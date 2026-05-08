@@ -1,0 +1,18 @@
+[project]
+name = "dns-filter-rust"
+
+[skills.global]
+
+[skills.dev.m07-concurrency]
+path = "/home/martijn/.cowork/repos/rust-skills/skills/m07-concurrency"
+local = false
+
+[skills.groups]
+
+[triggers]
+
+[security]
+require_lockfile = false
+verify_checksums = false
+show_update_diff = false
+auto_reject_high_risk = false
