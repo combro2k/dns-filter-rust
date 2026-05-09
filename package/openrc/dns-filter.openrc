@@ -1,0 +1,21 @@
+#!/sbin/openrc-run
+
+description="dns-filter DNS filtering service"
+command="/usr/bin/dns-filter"
+command_args="--config /etc/dns-filter/config.yaml"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+
+depend() {
+	need net
+}
+
+start_pre() {
+	checkpath -d /var/lib/dns-filter
+}
+
+reload() {
+	ebegin "Reloading ${RC_SVCNAME}"
+	kill -HUP $(cat ${pidfile})
+	eend $?
+}

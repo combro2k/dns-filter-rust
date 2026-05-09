@@ -1,0 +1,17 @@
+[Unit]
+Description=dns-filter DNS filtering service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/dns-filter --config /etc/dns-filter/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+StateDirectory=dns-filter
+WorkingDirectory=/var/lib/dns-filter
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

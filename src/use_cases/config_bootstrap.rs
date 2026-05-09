@@ -8,6 +8,9 @@ use crate::entities::resolution::UpstreamStrategy;
 use crate::frameworks::config::schema::{DnsFilterConfig, UpstreamServer};
 use crate::frameworks::upstream::{DnsTlsClient, DnsUdpTcpClient};
 use crate::use_cases::filtering::{parse_interval, DomainFilter, ListFilterEngine};
+use crate::use_cases::request_pipeline::{
+    DnsFilterStage, DnsRequestPipeline, DnsServfailFallbackStage, DnsUpstreamStage,
+};
 use crate::use_cases::upstream_resolver::{StrategyUpstreamResolver, UpstreamResolver};
 
 pub fn validate_config(config: DnsFilterConfig) -> DnsFilterConfig {
@@ -55,6 +58,16 @@ pub fn build_domain_filter(config: &DnsFilterConfig) -> Result<Arc<dyn DomainFil
 
     let engine = ListFilterEngine::from_config(config)?;
     Ok(Arc::new(engine))
+}
+
+pub fn build_dns_request_pipeline(
+    resolver: Arc<dyn UpstreamResolver>,
+    filter: Arc<dyn DomainFilter>,
+) -> DnsRequestPipeline {
+    DnsRequestPipeline::default()
+        .add_stage(DnsFilterStage::new(filter))
+        .add_stage(DnsUpstreamStage::new(resolver))
+        .add_stage(DnsServfailFallbackStage)
 }
 
 fn build_single_upstream_resolver(

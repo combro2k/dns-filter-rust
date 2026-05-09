@@ -1,3 +1,15 @@
+use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use hickory_client::proto::op::{Message, MessageType, OpCode, ResponseCode};
+use hickory_client::proto::rr::rdata::{A, AAAA};
+use hickory_client::proto::rr::{RData, Record, RecordType};
+
+use crate::entities::filter::FilterDecision;
+use crate::use_cases::filtering::DomainFilter;
+use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
+
 /// A single stage in the request pipeline.
 ///
 /// Returning `Some(Response)` means the stage handled the request and the
@@ -39,12 +51,261 @@ impl<Request, Response> Default for PipelineHandler<Request, Response> {
     }
 }
 
+/// Async stage in a request pipeline with explicit error propagation.
+#[async_trait]
+pub trait AsyncRequestStage<Request, Response, Error>: Send + Sync {
+    async fn handle(&self, request: &Request) -> Result<Option<Response>, Error>;
+}
+
+/// Async Chain of Responsibility pipeline.
+pub struct AsyncPipelineHandler<Request, Response, Error> {
+    stages: Vec<Box<dyn AsyncRequestStage<Request, Response, Error>>>,
+}
+
+impl<Request, Response, Error> AsyncPipelineHandler<Request, Response, Error> {
+    pub fn new(stages: Vec<Box<dyn AsyncRequestStage<Request, Response, Error>>>) -> Self {
+        Self { stages }
+    }
+
+    pub fn add_stage(
+        mut self,
+        stage: impl AsyncRequestStage<Request, Response, Error> + 'static,
+    ) -> Self {
+        self.stages.push(Box::new(stage));
+        self
+    }
+
+    pub async fn handle_request(&self, request: &Request) -> Result<Option<Response>, Error> {
+        for stage in &self.stages {
+            if let Some(response) = stage.handle(request).await? {
+                return Ok(Some(response));
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+impl<Request, Response, Error> Default for AsyncPipelineHandler<Request, Response, Error> {
+    fn default() -> Self {
+        Self { stages: Vec::new() }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnsPipelineRequest {
+    pub query: Vec<u8>,
+    pub client_query_id: u16,
+}
+
+impl DnsPipelineRequest {
+    pub fn new(query: Vec<u8>) -> Self {
+        let client_query_id = if query.len() >= 2 {
+            u16::from_be_bytes([query[0], query[1]])
+        } else {
+            0
+        };
+
+        Self {
+            query,
+            client_query_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnsPipelineResponse {
+    response: Vec<u8>,
+}
+
+impl DnsPipelineResponse {
+    pub fn new(response: Vec<u8>) -> Self {
+        Self { response }
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.response
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DnsPipelineError {
+    #[error("upstream resolution failed: {0}")]
+    Upstream(#[from] UpstreamResolveError),
+}
+
+pub type DnsRequestPipeline =
+    AsyncPipelineHandler<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError>;
+
+pub struct DnsFilterStage {
+    domain_filter: Arc<dyn DomainFilter>,
+}
+
+impl DnsFilterStage {
+    pub fn new(domain_filter: Arc<dyn DomainFilter>) -> Self {
+        Self { domain_filter }
+    }
+}
+
+#[async_trait]
+impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError>
+    for DnsFilterStage
+{
+    async fn handle(
+        &self,
+        request: &DnsPipelineRequest,
+    ) -> Result<Option<DnsPipelineResponse>, DnsPipelineError> {
+        let Ok(message) = Message::from_vec(&request.query) else {
+            return Ok(None);
+        };
+
+        let Some(first_query) = message.queries().first() else {
+            return Ok(None);
+        };
+
+        let domain = first_query.name().to_ascii();
+        match self.domain_filter.decide(&domain) {
+            FilterDecision::Allow | FilterDecision::Neutral => Ok(None),
+            FilterDecision::Block => {
+                tracing::info!(domain = %domain, "query blocked by filter policy");
+                let response = build_sinkhole_response(
+                    &message,
+                    self.domain_filter.sinkhole_ipv4(),
+                    self.domain_filter.sinkhole_ipv6(),
+                );
+                Ok(Some(DnsPipelineResponse::new(response)))
+            }
+        }
+    }
+}
+
+pub struct DnsUpstreamStage {
+    upstream_resolver: Arc<dyn UpstreamResolver>,
+}
+
+impl DnsUpstreamStage {
+    pub fn new(upstream_resolver: Arc<dyn UpstreamResolver>) -> Self {
+        Self { upstream_resolver }
+    }
+}
+
+#[async_trait]
+impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError>
+    for DnsUpstreamStage
+{
+    async fn handle(
+        &self,
+        request: &DnsPipelineRequest,
+    ) -> Result<Option<DnsPipelineResponse>, DnsPipelineError> {
+        let response = self
+            .upstream_resolver
+            .resolve(request.query.clone())
+            .await?;
+
+        if let Ok(mut msg) = Message::from_vec(&response) {
+            msg.set_id(request.client_query_id);
+            let fixed_response = msg.to_vec().unwrap_or(response);
+            return Ok(Some(DnsPipelineResponse::new(fixed_response)));
+        }
+
+        tracing::warn!("failed to parse upstream response, returning as-is");
+        Ok(Some(DnsPipelineResponse::new(response)))
+    }
+}
+
+pub struct DnsServfailFallbackStage;
+
+#[async_trait]
+impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError>
+    for DnsServfailFallbackStage
+{
+    async fn handle(
+        &self,
+        request: &DnsPipelineRequest,
+    ) -> Result<Option<DnsPipelineResponse>, DnsPipelineError> {
+        Ok(Some(DnsPipelineResponse::new(build_servfail_response(
+            &request.query,
+        ))))
+    }
+}
+
+pub fn build_sinkhole_response(
+    query: &Message,
+    sinkhole_v4: Ipv4Addr,
+    sinkhole_v6: Ipv6Addr,
+) -> Vec<u8> {
+    let mut response = Message::new();
+    response.set_id(query.id());
+    response.set_message_type(MessageType::Response);
+    response.set_op_code(OpCode::Query);
+    response.set_recursion_desired(query.recursion_desired());
+    response.set_recursion_available(true);
+    response.set_response_code(ResponseCode::NoError);
+
+    for q in query.queries() {
+        response.add_query(q.clone());
+    }
+
+    if let Some(question) = query.queries().first() {
+        let name = question.name().clone();
+        match question.query_type() {
+            RecordType::A => {
+                response.add_answer(make_a_record(name, sinkhole_v4));
+            }
+            RecordType::AAAA => {
+                response.add_answer(make_aaaa_record(name, sinkhole_v6));
+            }
+            RecordType::ANY => {
+                response.add_answer(make_a_record(name.clone(), sinkhole_v4));
+                response.add_answer(make_aaaa_record(name, sinkhole_v6));
+            }
+            _ => {}
+        }
+    }
+
+    response.to_vec().unwrap_or_default()
+}
+
+fn make_a_record(name: hickory_client::proto::rr::Name, addr: Ipv4Addr) -> Record {
+    Record::from_rdata(name, 60, RData::A(A(addr)))
+}
+
+fn make_aaaa_record(name: hickory_client::proto::rr::Name, addr: Ipv6Addr) -> Record {
+    Record::from_rdata(name, 60, RData::AAAA(AAAA(addr)))
+}
+
+pub fn build_servfail_response(query_bytes: &[u8]) -> Vec<u8> {
+    let mut response = Message::new();
+    response.set_message_type(MessageType::Response);
+    response.set_op_code(OpCode::Query);
+    response.set_recursion_available(true);
+    response.set_response_code(ResponseCode::ServFail);
+
+    if let Ok(query) = Message::from_vec(query_bytes) {
+        response.set_id(query.id());
+        response.set_recursion_desired(query.recursion_desired());
+        for q in query.queries() {
+            response.add_query(q.clone());
+        }
+    }
+
+    response.to_vec().unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    use async_trait::async_trait;
+    use hickory_client::proto::op::{Message, MessageType, Query, ResponseCode};
+    use hickory_client::proto::rr::{DNSClass, RecordType};
+
+    use crate::entities::filter::FilterDecision;
+    use crate::use_cases::filtering::DomainFilter;
+    use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
 
     use super::*;
 
@@ -202,5 +463,160 @@ mod tests {
         assert_eq!(response, Some("upstream-response".to_string()));
         assert_eq!(policy_calls.load(Ordering::Relaxed), 1);
         assert_eq!(upstream_calls.load(Ordering::Relaxed), 1);
+    }
+
+    struct AsyncPrefixMatchStage {
+        prefix: &'static str,
+        response: Option<&'static str>,
+    }
+
+    #[async_trait]
+    impl AsyncRequestStage<String, String, DnsPipelineError> for AsyncPrefixMatchStage {
+        async fn handle(&self, request: &String) -> Result<Option<String>, DnsPipelineError> {
+            if request.starts_with(self.prefix) {
+                return Ok(self.response.map(str::to_string));
+            }
+
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn async_pipeline_short_circuits_after_first_match() {
+        let pipeline = AsyncPipelineHandler::default()
+            .add_stage(AsyncPrefixMatchStage {
+                prefix: "block:",
+                response: Some("blocked"),
+            })
+            .add_stage(AsyncPrefixMatchStage {
+                prefix: "block:",
+                response: Some("should-not-run"),
+            });
+
+        let response = pipeline
+            .handle_request(&"block:example.org".to_string())
+            .await
+            .expect("pipeline should not error");
+
+        assert_eq!(response, Some("blocked".to_string()));
+    }
+
+    struct FixedResponseResolver(Vec<u8>);
+
+    #[async_trait]
+    impl UpstreamResolver for FixedResponseResolver {
+        async fn resolve(&self, _query: Vec<u8>) -> Result<Vec<u8>, UpstreamResolveError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct AlwaysFailResolver;
+
+    #[async_trait]
+    impl UpstreamResolver for AlwaysFailResolver {
+        async fn resolve(&self, _query: Vec<u8>) -> Result<Vec<u8>, UpstreamResolveError> {
+            Err(UpstreamResolveError::AllFailed)
+        }
+    }
+
+    struct TestDomainFilter {
+        decision: FilterDecision,
+    }
+
+    impl DomainFilter for TestDomainFilter {
+        fn decide(&self, _domain: &str) -> FilterDecision {
+            self.decision
+        }
+
+        fn sinkhole_ipv4(&self) -> std::net::Ipv4Addr {
+            std::net::Ipv4Addr::new(0, 0, 0, 0)
+        }
+
+        fn sinkhole_ipv6(&self) -> std::net::Ipv6Addr {
+            std::net::Ipv6Addr::UNSPECIFIED
+        }
+
+        fn start_background_refresh(self: Arc<Self>) {}
+    }
+
+    fn make_query(domain: &str) -> Vec<u8> {
+        let mut msg = Message::new();
+        msg.set_id(42);
+        msg.set_recursion_desired(true);
+        let mut q = Query::new();
+        q.set_name(domain.parse().unwrap());
+        q.set_query_type(RecordType::A);
+        q.set_query_class(DNSClass::IN);
+        msg.add_query(q);
+        msg.to_vec().unwrap()
+    }
+
+    fn make_noerror_response(id: u16) -> Vec<u8> {
+        let mut msg = Message::new();
+        msg.set_id(id);
+        msg.set_message_type(MessageType::Response);
+        msg.set_response_code(ResponseCode::NoError);
+        msg.to_vec().unwrap()
+    }
+
+    #[tokio::test]
+    async fn dns_pipeline_blocks_query_before_upstream() {
+        let filter: Arc<dyn DomainFilter> = Arc::new(TestDomainFilter {
+            decision: FilterDecision::Block,
+        });
+        let resolver: Arc<dyn UpstreamResolver> = Arc::new(AlwaysFailResolver);
+
+        let pipeline = DnsRequestPipeline::default()
+            .add_stage(DnsFilterStage::new(filter))
+            .add_stage(DnsUpstreamStage::new(resolver))
+            .add_stage(DnsServfailFallbackStage);
+
+        let response = pipeline
+            .handle_request(&DnsPipelineRequest::new(make_query("example.com.")))
+            .await
+            .expect("pipeline should not error")
+            .expect("pipeline should return a response")
+            .into_bytes();
+
+        let message = Message::from_vec(&response).expect("valid DNS message");
+        assert_eq!(message.response_code(), ResponseCode::NoError);
+        assert_eq!(message.answers().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dns_pipeline_preserves_client_id_for_upstream_response() {
+        let filter: Arc<dyn DomainFilter> = Arc::new(TestDomainFilter {
+            decision: FilterDecision::Neutral,
+        });
+        let resolver: Arc<dyn UpstreamResolver> =
+            Arc::new(FixedResponseResolver(make_noerror_response(9999)));
+
+        let pipeline = DnsRequestPipeline::default()
+            .add_stage(DnsFilterStage::new(filter))
+            .add_stage(DnsUpstreamStage::new(resolver))
+            .add_stage(DnsServfailFallbackStage);
+
+        let response = pipeline
+            .handle_request(&DnsPipelineRequest::new(make_query("example.com.")))
+            .await
+            .expect("pipeline should not error")
+            .expect("pipeline should return a response")
+            .into_bytes();
+
+        let message = Message::from_vec(&response).expect("valid DNS message");
+        assert_eq!(message.id(), 42);
+        assert_eq!(message.response_code(), ResponseCode::NoError);
+    }
+
+    #[tokio::test]
+    async fn dns_pipeline_returns_error_when_upstream_fails_without_fallback() {
+        let resolver: Arc<dyn UpstreamResolver> = Arc::new(AlwaysFailResolver);
+        let pipeline = DnsRequestPipeline::default().add_stage(DnsUpstreamStage::new(resolver));
+
+        let result = pipeline
+            .handle_request(&DnsPipelineRequest::new(make_query("example.com.")))
+            .await;
+
+        assert!(result.is_err());
     }
 }

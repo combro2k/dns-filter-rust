@@ -1,17 +1,15 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use hickory_client::proto::op::{Message, MessageType, OpCode, ResponseCode};
-use hickory_client::proto::rr::rdata::{A, AAAA};
-use hickory_client::proto::rr::{RData, Record, RecordType};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::sync::Mutex;
 
-use crate::entities::filter::FilterDecision;
 use crate::frameworks::config::schema::SocketConfig;
-use crate::use_cases::filtering::DomainFilter;
-use crate::use_cases::upstream_resolver::UpstreamResolver;
+use crate::use_cases::request_pipeline::{
+    build_servfail_response, DnsPipelineRequest, DnsRequestPipeline,
+};
 
 /// Maximum size of a single UDP DNS datagram accepted by the listener.
 /// 4096 bytes covers EDNS0 responses without excessive allocation.
@@ -51,18 +49,17 @@ impl DnsAdapter {
 /// TCP uses the 2-byte length-prefix framing defined in RFC 7766.
 pub struct DnsServer {
     bind_addr: SocketAddr,
-    resolver: Arc<dyn UpstreamResolver>,
-    domain_filter: Arc<dyn DomainFilter>,
+    pipeline_slot: Arc<Mutex<Arc<DnsRequestPipeline>>>,
 }
 
 impl DnsServer {
-    /// Creates a new `DnsServer` from a `SocketConfig` and an upstream resolver.
+    /// Creates a new `DnsServer` from a `SocketConfig` and request pipeline slot.
     ///
+    /// The pipeline is wrapped in a Mutex to allow atomic state swapping on reload.
     /// Validates the bind address but does not open sockets until [`run`](DnsServer::run) is called.
     pub fn new(
         config: &SocketConfig,
-        resolver: Arc<dyn UpstreamResolver>,
-        domain_filter: Arc<dyn DomainFilter>,
+        pipeline_slot: Arc<Mutex<Arc<DnsRequestPipeline>>>,
     ) -> Result<Self, DnsListenerError> {
         let raw = format!("{}:{}", config.address, config.port);
         let bind_addr =
@@ -73,8 +70,7 @@ impl DnsServer {
                 })?;
         Ok(Self {
             bind_addr,
-            resolver,
-            domain_filter,
+            pipeline_slot,
         })
     }
 
@@ -99,12 +95,10 @@ impl DnsServer {
 
         tracing::info!(addr = %self.bind_addr, "DNS listener bound (UDP + TCP)");
 
-        let resolver_for_udp = Arc::clone(&self.resolver);
-        let resolver_for_tcp = self.resolver;
-        let filter_for_udp = Arc::clone(&self.domain_filter);
-        let filter_for_tcp = self.domain_filter;
-        let udp_task = tokio::spawn(run_udp(udp, resolver_for_udp, filter_for_udp));
-        let tcp_task = tokio::spawn(run_tcp(tcp, resolver_for_tcp, filter_for_tcp));
+        let pipeline_slot_for_udp = Arc::clone(&self.pipeline_slot);
+        let pipeline_slot_for_tcp = self.pipeline_slot;
+        let udp_task = tokio::spawn(run_udp(udp, pipeline_slot_for_udp));
+        let tcp_task = tokio::spawn(run_tcp(tcp, pipeline_slot_for_tcp));
 
         tokio::select! {
             result = udp_task => flatten_join(result),
@@ -127,8 +121,7 @@ fn flatten_join(
 /// Drives the UDP receive loop, spawning a task per incoming datagram.
 async fn run_udp(
     socket: UdpSocket,
-    resolver: Arc<dyn UpstreamResolver>,
-    domain_filter: Arc<dyn DomainFilter>,
+    pipeline_slot: Arc<Mutex<Arc<DnsRequestPipeline>>>,
 ) -> Result<(), DnsListenerError> {
     let socket = Arc::new(socket);
     let mut buf = [0u8; UDP_RECV_BUF];
@@ -143,12 +136,11 @@ async fn run_udp(
         tracing::debug!(peer = %src, query_len = len, "DNS UDP query received");
         let query = buf[..len].to_vec();
         let socket = Arc::clone(&socket);
-        let resolver = Arc::clone(&resolver);
-        let domain_filter = Arc::clone(&domain_filter);
+        let pipeline_slot = Arc::clone(&pipeline_slot);
 
         tokio::spawn(async move {
             tracing::debug!(peer = %src, "forwarding query to upstream");
-            let response = forward_query(&resolver, &domain_filter, &query).await;
+            let response = forward_query(&pipeline_slot, &query).await;
             tracing::debug!(peer = %src, response_len = response.len(), "sending DNS response");
             if let Err(e) = socket.send_to(&response, src).await {
                 tracing::warn!(peer = %src, error = %e, "failed to send UDP DNS response");
@@ -160,16 +152,14 @@ async fn run_udp(
 /// Drives the TCP accept loop, spawning a task per incoming connection.
 async fn run_tcp(
     listener: TcpListener,
-    resolver: Arc<dyn UpstreamResolver>,
-    domain_filter: Arc<dyn DomainFilter>,
+    pipeline_slot: Arc<Mutex<Arc<DnsRequestPipeline>>>,
 ) -> Result<(), DnsListenerError> {
     loop {
         let (stream, src) = listener.accept().await.map_err(DnsListenerError::Runtime)?;
-        let resolver = Arc::clone(&resolver);
-        let domain_filter = Arc::clone(&domain_filter);
+        let pipeline_slot = Arc::clone(&pipeline_slot);
 
         tokio::spawn(async move {
-            if let Err(e) = handle_tcp_conn(stream, &resolver, &domain_filter).await {
+            if let Err(e) = handle_tcp_conn(stream, &pipeline_slot).await {
                 tracing::warn!(peer = %src, error = %e, "DNS TCP connection error");
             }
         });
@@ -180,8 +170,7 @@ async fn run_tcp(
 /// writes corresponding responses until the client closes the connection.
 async fn handle_tcp_conn(
     mut stream: TcpStream,
-    resolver: &Arc<dyn UpstreamResolver>,
-    domain_filter: &Arc<dyn DomainFilter>,
+    pipeline_slot: &Arc<Mutex<Arc<DnsRequestPipeline>>>,
 ) -> std::io::Result<()> {
     loop {
         let mut len_buf = [0u8; 2];
@@ -199,7 +188,7 @@ async fn handle_tcp_conn(
         let mut query = vec![0u8; msg_len];
         stream.read_exact(&mut query).await?;
 
-        let response = forward_query(resolver, domain_filter, &query).await;
+        let response = forward_query(pipeline_slot, &query).await;
         let write_len = response.len().min(u16::MAX as usize);
         stream.write_all(&(write_len as u16).to_be_bytes()).await?;
         stream.write_all(&response[..write_len]).await?;
@@ -210,135 +199,24 @@ async fn handle_tcp_conn(
 /// Returns a SERVFAIL response if resolution fails.
 /// Preserves the original query ID from the client in the response.
 async fn forward_query(
-    resolver: &Arc<dyn UpstreamResolver>,
-    domain_filter: &Arc<dyn DomainFilter>,
+    pipeline_slot: &Arc<Mutex<Arc<DnsRequestPipeline>>>,
     query: &[u8],
 ) -> Vec<u8> {
-    tracing::debug!(query_len = query.len(), "calling upstream resolver");
+    tracing::debug!(query_len = query.len(), "calling request pipeline");
+    let pipeline = Arc::clone(&*pipeline_slot.lock().await);
 
-    if let Ok(message) = Message::from_vec(query) {
-        if let Some(blocked_response) = try_build_block_response(&message, domain_filter) {
-            return blocked_response;
+    let request = DnsPipelineRequest::new(query.to_vec());
+    match pipeline.handle_request(&request).await {
+        Ok(Some(response)) => response.into_bytes(),
+        Ok(None) => {
+            tracing::warn!("pipeline returned no response; returning SERVFAIL");
+            build_servfail_response(query)
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "pipeline failed; returning SERVFAIL");
+            build_servfail_response(query)
         }
     }
-
-    // Extract the query ID from the client's original query
-    let client_query_id = if query.len() >= 2 {
-        u16::from_be_bytes([query[0], query[1]])
-    } else {
-        0
-    };
-
-    match resolver.resolve(query.to_vec()).await {
-        Ok(response) => {
-            // Parse the response, update its ID to match the client's query ID, and re-encode
-            if let Ok(mut msg) = Message::from_vec(&response) {
-                msg.set_id(client_query_id);
-                let fixed_response = msg.to_vec().unwrap_or(response);
-                tracing::debug!(
-                    response_len = fixed_response.len(),
-                    client_id = client_query_id,
-                    "upstream resolution succeeded with ID preservation"
-                );
-                fixed_response
-            } else {
-                tracing::warn!("failed to parse upstream response, returning as-is");
-                response
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "upstream resolution failed; returning SERVFAIL");
-            build_servfail(query)
-        }
-    }
-}
-
-fn try_build_block_response(
-    query: &Message,
-    domain_filter: &Arc<dyn DomainFilter>,
-) -> Option<Vec<u8>> {
-    let first_query = query.queries().first()?;
-    let domain = first_query.name().to_ascii();
-    let decision = domain_filter.decide(&domain);
-
-    match decision {
-        FilterDecision::Allow | FilterDecision::Neutral => None,
-        FilterDecision::Block => {
-            tracing::info!(domain = %domain, "query blocked by filter policy");
-            Some(build_sinkhole_response(
-                query,
-                domain_filter.sinkhole_ipv4(),
-                domain_filter.sinkhole_ipv6(),
-            ))
-        }
-    }
-}
-
-fn build_sinkhole_response(
-    query: &Message,
-    sinkhole_v4: std::net::Ipv4Addr,
-    sinkhole_v6: std::net::Ipv6Addr,
-) -> Vec<u8> {
-    let mut response = Message::new();
-    response.set_id(query.id());
-    response.set_message_type(MessageType::Response);
-    response.set_op_code(OpCode::Query);
-    response.set_recursion_desired(query.recursion_desired());
-    response.set_recursion_available(true);
-    response.set_response_code(ResponseCode::NoError);
-
-    for q in query.queries() {
-        response.add_query(q.clone());
-    }
-
-    if let Some(question) = query.queries().first() {
-        let name = question.name().clone();
-        match question.query_type() {
-            RecordType::A => {
-                response.add_answer(make_a_record(name, sinkhole_v4));
-            }
-            RecordType::AAAA => {
-                response.add_answer(make_aaaa_record(name, sinkhole_v6));
-            }
-            RecordType::ANY => {
-                response.add_answer(make_a_record(name.clone(), sinkhole_v4));
-                response.add_answer(make_aaaa_record(name, sinkhole_v6));
-            }
-            _ => {}
-        }
-    }
-
-    response.to_vec().unwrap_or_default()
-}
-
-fn make_a_record(name: hickory_client::proto::rr::Name, addr: std::net::Ipv4Addr) -> Record {
-    Record::from_rdata(name, 60, RData::A(A(addr)))
-}
-
-fn make_aaaa_record(name: hickory_client::proto::rr::Name, addr: std::net::Ipv6Addr) -> Record {
-    Record::from_rdata(name, 60, RData::AAAA(AAAA(addr)))
-}
-
-/// Constructs a DNS SERVFAIL response for the given raw query bytes.
-///
-/// Copies the message ID and question section from the query when parseable.
-/// Falls back to a minimal SERVFAIL with `id = 0` on parse failure.
-fn build_servfail(query_bytes: &[u8]) -> Vec<u8> {
-    let mut response = Message::new();
-    response.set_message_type(MessageType::Response);
-    response.set_op_code(OpCode::Query);
-    response.set_recursion_available(true);
-    response.set_response_code(ResponseCode::ServFail);
-
-    if let Ok(query) = Message::from_vec(query_bytes) {
-        response.set_id(query.id());
-        response.set_recursion_desired(query.recursion_desired());
-        for q in query.queries() {
-            response.add_query(q.clone());
-        }
-    }
-
-    response.to_vec().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -350,9 +228,13 @@ mod tests {
     use hickory_client::proto::op::{Message, MessageType, Query, ResponseCode};
     use hickory_client::proto::rr::{DNSClass, RecordType};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Mutex;
 
+    use crate::entities::filter::FilterDecision;
     use crate::frameworks::config::schema::SocketConfig;
+    use crate::use_cases::config_bootstrap::build_dns_request_pipeline;
     use crate::use_cases::filtering::DomainFilter;
+    use crate::use_cases::request_pipeline::DnsRequestPipeline;
     use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
 
     use super::*;
@@ -431,12 +313,21 @@ mod tests {
         })
     }
 
+    fn pipeline_slot(
+        resolver: Arc<dyn UpstreamResolver>,
+        filter: Arc<dyn DomainFilter>,
+    ) -> Arc<Mutex<Arc<DnsRequestPipeline>>> {
+        Arc::new(Mutex::new(Arc::new(build_dns_request_pipeline(
+            resolver, filter,
+        ))))
+    }
+
     // ── build_servfail ───────────────────────────────────────────────────────
 
     #[test]
     fn build_servfail_copies_query_id_and_question() {
         let query = make_query("example.com.");
-        let servfail = build_servfail(&query);
+        let servfail = build_servfail_response(&query);
 
         let response = Message::from_vec(&servfail).expect("valid DNS message");
         assert_eq!(response.id(), 42);
@@ -448,7 +339,7 @@ mod tests {
 
     #[test]
     fn build_servfail_on_empty_input_returns_id_zero() {
-        let servfail = build_servfail(&[]);
+        let servfail = build_servfail_response(&[]);
 
         let response = Message::from_vec(&servfail).expect("valid DNS message");
         assert_eq!(response.id(), 0);
@@ -465,8 +356,8 @@ mod tests {
             address: "127.0.0.1".into(),
             port: 5353,
         };
-        let resolver: Arc<dyn UpstreamResolver> = Arc::new(AlwaysFailResolver);
-        assert!(DnsServer::new(&cfg, resolver, neutral_filter()).is_ok());
+        let pipeline = pipeline_slot(Arc::new(AlwaysFailResolver), neutral_filter());
+        assert!(DnsServer::new(&cfg, pipeline).is_ok());
     }
 
     #[test]
@@ -476,8 +367,8 @@ mod tests {
             address: "not-an-ip".into(),
             port: 5353,
         };
-        let resolver: Arc<dyn UpstreamResolver> = Arc::new(AlwaysFailResolver);
-        let err = match DnsServer::new(&cfg, resolver, neutral_filter()) {
+        let pipeline = pipeline_slot(Arc::new(AlwaysFailResolver), neutral_filter());
+        let err = match DnsServer::new(&cfg, pipeline) {
             Err(e) => e,
             Ok(_) => panic!("expected an error for invalid address"),
         };
@@ -489,15 +380,18 @@ mod tests {
     #[tokio::test]
     async fn forward_query_returns_upstream_response() {
         let expected = make_noerror_response(42);
-        let resolver: Arc<dyn UpstreamResolver> = Arc::new(FixedResponseResolver(expected.clone()));
-        let result = forward_query(&resolver, &neutral_filter(), &make_query("example.com.")).await;
+        let pipeline = pipeline_slot(
+            Arc::new(FixedResponseResolver(expected.clone())),
+            neutral_filter(),
+        );
+        let result = forward_query(&pipeline, &make_query("example.com.")).await;
         assert_eq!(result, expected);
     }
 
     #[tokio::test]
     async fn forward_query_returns_servfail_on_upstream_error() {
-        let resolver: Arc<dyn UpstreamResolver> = Arc::new(AlwaysFailResolver);
-        let result = forward_query(&resolver, &neutral_filter(), &make_query("example.com.")).await;
+        let pipeline = pipeline_slot(Arc::new(AlwaysFailResolver), neutral_filter());
+        let result = forward_query(&pipeline, &make_query("example.com.")).await;
         let msg = Message::from_vec(&result).expect("valid DNS message");
         assert_eq!(msg.response_code(), ResponseCode::ServFail);
         assert_eq!(msg.id(), 42);
@@ -505,9 +399,8 @@ mod tests {
 
     #[tokio::test]
     async fn forward_query_returns_sinkhole_response_when_blocked() {
-        let resolver: Arc<dyn UpstreamResolver> = Arc::new(AlwaysFailResolver);
-        let result =
-            forward_query(&resolver, &blocking_filter(), &make_query("example.com.")).await;
+        let pipeline = pipeline_slot(Arc::new(AlwaysFailResolver), blocking_filter());
+        let result = forward_query(&pipeline, &make_query("example.com.")).await;
         let msg = Message::from_vec(&result).expect("valid DNS message");
         assert_eq!(msg.response_code(), ResponseCode::NoError);
         assert_eq!(msg.id(), 42);
@@ -521,20 +414,19 @@ mod tests {
     async fn handle_tcp_conn_processes_length_prefixed_query_and_responds() {
         let query = make_query("example.com.");
         let expected_response = make_noerror_response(42);
-        let resolver: Arc<dyn UpstreamResolver> =
-            Arc::new(FixedResponseResolver(expected_response.clone()));
+        let pipeline = pipeline_slot(
+            Arc::new(FixedResponseResolver(expected_response.clone())),
+            neutral_filter(),
+        );
 
         // Bind to an ephemeral port for an in-process TCP round-trip.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let server_resolver = Arc::clone(&resolver);
-        let server_filter = neutral_filter();
+        let server_pipeline = Arc::clone(&pipeline);
         let server_task = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_tcp_conn(stream, &server_resolver, &server_filter)
-                .await
-                .unwrap();
+            handle_tcp_conn(stream, &server_pipeline).await.unwrap();
         });
 
         let mut client = TcpStream::connect(addr).await.unwrap();

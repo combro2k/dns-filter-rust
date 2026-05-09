@@ -66,7 +66,7 @@ filtering:
   # mode: "sqlite" persists list documents to a local SQLite file.
   cache:
     mode: "memory"
-    document_path: "package/cache/filter-cache.db"
+    document_path: "/var/lib/dns-filter/filter-cache.db"
 
 upstreams:
   strategy: "round_robin"
@@ -87,5 +87,5 @@ logging:
     location: /var/log/dns-filter.log
     level: debug
   stdout:
-    enabled: true
+    enabled: false
     level: debug

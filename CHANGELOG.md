@@ -3,6 +3,23 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Started one-shot Chain of Responsibility compliance migration for request handling: added async, explicit-error CoR support in [src/use_cases/request_pipeline.rs](src/use_cases/request_pipeline.rs) with `AsyncRequestStage` + `AsyncPipelineHandler` (`Result<Option<Response>, Error>` contract)
+- Added concrete DNS pipeline stages in use-cases (`DnsFilterStage`, `DnsUpstreamStage`, `DnsServfailFallbackStage`) and moved sinkhole/SERVFAIL response construction helpers to use-case orchestration
+- Added `build_dns_request_pipeline()` in [src/use_cases/config_bootstrap.rs](src/use_cases/config_bootstrap.rs) to compose canonical stage order (filter -> upstream -> fallback)
+- Refactored DNS listener adapter in [src/interface_adapters/listeners/dns.rs](src/interface_adapters/listeners/dns.rs) to delegate query processing to the use-case pipeline instead of inline filter/upstream branching
+- Updated composition and reload flow in [src/main.rs](src/main.rs) to maintain an atomically swappable pipeline slot (`Arc<Mutex<Arc<...>>>`) rebuilt on SIGHUP reload
+- Added/updated pipeline-focused tests in [src/use_cases/request_pipeline.rs](src/use_cases/request_pipeline.rs) and adapted DNS listener tests to the new pipeline wiring
+- Implemented SIGHUP signal handler for graceful zero-downtime configuration reload: signal triggers config file re-read and atomic state swap without interrupting in-flight DNS queries; on reload error, the service continues with previous config and logs a warning
+- Refactored state management to use `Arc<Mutex<Arc<>>>` pattern for atomic swappable resolver and filter instances, enabling safe concurrent access from reload handler and DNS listeners
+- Updated systemd service file with `ExecReload=/bin/kill -HUP $MAINPID` to support `systemctl reload dns-filter`
+- Added `reload()` function to OpenRC init script to support `rc-service dns-filter reload`
+- Added integration tests for config reload validation, error handling, and successful reloads with valid configurations
+- Added `src/use_cases/reload.rs` module with `reload_config()` function that orchestrates configuration reload by reusing bootstrap logic from `config_bootstrap.rs`
+- Added `src/frameworks/signal_handler.rs` module with `setup_sighup_handler()` for Unix SIGHUP signal listening via `tokio::signal::unix`
+- Added CLI flags documentation and CHANGELOG.md
+- Updated packaged service launch arguments to pass config via `--config /etc/dns-filter/config.yaml` in both systemd and OpenRC files
+- Reorganized packaging artifacts by role: configuration templates now live under `package/config/`, systemd units under `package/systemd/`, and OpenRC scripts under `package/openrc/`
+- Added packaging helpers: a root `Makefile`, a systemd unit, and an OpenRC init script that install `dns-filter` to `/usr/bin/dns-filter`, the config to `/etc/dns-filter/config.yaml`, and data under `/var/lib/dns-filter`
 - Extended `list refreshed` logs to include parsed added-entry counters: `block_entries_added`, `whitelist_entries_added`, and `skipped_entries_added`
 - Improved filter list parser to correctly handle AdGuard/uBlock Origin syntax: cosmetic rules (`##`, `#@#`, `#$#`, `#%#`, `$$`) are now skipped; `@@||domain^` exception rules are treated as inline allowlist entries; rules with content-type (`$script`, `$image`, etc.) or context (`$third-party`, `$domain=`, etc.) modifiers are skipped with a `debug`-level log since DNS cannot evaluate those restrictions; `$all` and behaviour-only modifiers (`$important`, `$match-case`) are stripped and the rule is applied
 - Added optional `enabled` flag support for `blocklists`/`allowlists` entries; disabled lists are excluded from runtime refresh scheduling while omitted `enabled` defaults to active behavior
