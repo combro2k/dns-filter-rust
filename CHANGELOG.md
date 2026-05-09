@@ -26,7 +26,7 @@ All notable changes to this project will be documented in this file.
 - Added optional `enabled` flag support for `blocklists`/`allowlists` entries; disabled lists are excluded from runtime refresh scheduling while omitted `enabled` defaults to active behavior
 - Updated example config list entries so only `blocklists.adguard_base` is enabled and all other blocklist/allowlist entries are disabled by default
 - Added optional SQLite-backed document cache for filter lists (`filtering.cache.mode: sqlite`) to support warm-start restoration while keeping in-memory cache as runtime source of truth
-- Added optional `filtering.cache.document_path` config for SQLite cache file location (default: `package/cache/filter-cache.db` when sqlite mode is enabled)
+- Added optional `filtering.cache.document_path` config for SQLite cache file location (default: `/var/lib/dns-filter/filter-cache.db` when sqlite mode is enabled)
 - Started filtering implementation with interval-based list cache refresh: added per-list `interval` support on `blocklists`/`allowlists` (for example `blocklists.adguard_base.interval`) with runtime default of `12h` when omitted
 - Added `filtering.sinkhole_ipv4` and `filtering.sinkhole_ipv6` config options (defaults: `0.0.0.0` and `::`) and wired sinkhole responses for blocked DNS queries
 - Added `ListFilterEngine` use-case with background per-list refresh workers for HTTP(S)/file-backed sources and allowlist-over-blocklist decision precedence

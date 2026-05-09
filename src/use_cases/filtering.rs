@@ -14,7 +14,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_LIST_INTERVAL_SECS: u64 = 12 * 60 * 60;
-const DEFAULT_DOCUMENT_CACHE_PATH: &str = "package/cache/filter-cache.db";
+const DEFAULT_DOCUMENT_CACHE_PATH: &str = "/var/lib/dns-filter/filter-cache.db";
 const SQLITE_DOCS_TABLE: &str = "filter_cache_documents";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

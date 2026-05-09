@@ -295,7 +295,7 @@ filtering:
   any_query_policy: "refused"
   cache:
     mode: "sqlite"
-    document_path: "package/cache/filter-cache.db"
+    document_path: "/var/lib/dns-filter/filter-cache.db"
 upstreams:
   strategy: "round_robin"
   servers: []
@@ -314,7 +314,7 @@ logging:
         assert_eq!(cache.mode.as_deref(), Some("sqlite"));
         assert_eq!(
             cache.document_path.as_deref(),
-            Some("package/cache/filter-cache.db")
+            Some("/var/lib/dns-filter/filter-cache.db")
         );
     }
 }
