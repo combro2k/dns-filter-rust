@@ -148,4 +148,59 @@ mod tests {
         assert_eq!(first_calls.load(Ordering::Relaxed), 1);
         assert_eq!(second_calls.load(Ordering::Relaxed), 1);
     }
+
+    struct UpstreamTerminalStage {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RequestStage<String, String> for UpstreamTerminalStage {
+        fn handle(&self, _request: &String) -> Option<String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Some("upstream-response".to_string())
+        }
+    }
+
+    #[test]
+    fn chain_short_circuit_skips_upstream_terminal_stage() {
+        let policy_calls = Arc::new(AtomicUsize::new(0));
+        let upstream_calls = Arc::new(AtomicUsize::new(0));
+
+        let pipeline = PipelineHandler::default()
+            .add_stage(PrefixMatchStage::new(
+                "block:",
+                Some("blocked"),
+                Arc::clone(&policy_calls),
+            ))
+            .add_stage(UpstreamTerminalStage {
+                calls: Arc::clone(&upstream_calls),
+            });
+
+        let response = pipeline.handle_request(&"block:example.org".to_string());
+
+        assert_eq!(response, Some("blocked".to_string()));
+        assert_eq!(policy_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(upstream_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn chain_pass_through_reaches_upstream_terminal_stage() {
+        let policy_calls = Arc::new(AtomicUsize::new(0));
+        let upstream_calls = Arc::new(AtomicUsize::new(0));
+
+        let pipeline = PipelineHandler::default()
+            .add_stage(PrefixMatchStage::new(
+                "block:",
+                Some("blocked"),
+                Arc::clone(&policy_calls),
+            ))
+            .add_stage(UpstreamTerminalStage {
+                calls: Arc::clone(&upstream_calls),
+            });
+
+        let response = pipeline.handle_request(&"allow:example.org".to_string());
+
+        assert_eq!(response, Some("upstream-response".to_string()));
+        assert_eq!(policy_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(upstream_calls.load(Ordering::Relaxed), 1);
+    }
 }

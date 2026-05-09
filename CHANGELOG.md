@@ -3,6 +3,15 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Added `upstreams.bootstrap_resolvers` config (default: `1.1.1.1`) to bootstrap DoT hostname resolution when OS DNS is unavailable
+- Implemented DoT hostname resolution fallback in `DnsTlsClient`: tries OS lookup first, then queries configured bootstrap resolvers for A/AAAA records
+- Extended DoT upstream parsing to support hostname endpoints (for example `tls://dns.example.com:853`) with hostname-based SNI and runtime hostname resolution
+- Added DNS-over-TLS upstream resolver support via new `DnsTlsClient` in `src/frameworks/upstream/dot_client.rs`
+- Enabled Hickory TLS features in `Cargo.toml` (`tls-ring`, `webpki-roots`) to support DoT client connectivity
+- Added upstream bootstrap construction in `src/use_cases/config_bootstrap.rs` to build `Arc<dyn UpstreamResolver>` from config (`dns` and `dot`), including validation for strategy, protocol, address format, and empty upstream list
+- Wired upstream resolver construction into composition root startup in `src/main.rs` so invalid upstream configuration fails fast
+- Improved upstream parse hints in `src/frameworks/config/loader.rs` to include supported protocols and DoT address examples
+- Added Chain of Responsibility-focused tests in `src/use_cases/request_pipeline.rs` to verify upstream terminal stage is skipped on short-circuit and reached on pass-through
 - Implemented use-case Chain of Responsibility core in `src/use_cases/request_pipeline.rs`: added `RequestStage` pass/short-circuit contract with `Option<Response>`, `PipelineHandler` stage composition, and execution short-circuiting
 - Added unit tests for request pipeline pass-through, short-circuit, and unhandled request behavior
 - **Migrated from `trust-dns` 0.22 to `hickory-client` 0.25 (Hickory DNS)**: fixes broken DNSSEC validation, adds native DoT/DoH/DoQ/DoH3 protocol support via feature flags

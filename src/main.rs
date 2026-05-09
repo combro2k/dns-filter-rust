@@ -1,5 +1,5 @@
 use dns_filter::frameworks::config::loader::load_config;
-use dns_filter::use_cases::config_bootstrap::validate_config;
+use dns_filter::use_cases::config_bootstrap::{build_upstream_resolver, validate_config};
 
 #[tokio::main]
 async fn main() {
@@ -12,6 +12,14 @@ async fn main() {
         Ok(cfg) => validate_config(cfg),
         Err(e) => {
             eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+
+    let _upstream_resolver = match build_upstream_resolver(&config) {
+        Ok(resolver) => resolver,
+        Err(e) => {
+            eprintln!("invalid upstream configuration: {e:#}");
             std::process::exit(1);
         }
     };

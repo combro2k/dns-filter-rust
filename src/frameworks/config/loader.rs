@@ -47,7 +47,7 @@ fn hint_for_path(field_path: &str) -> &'static str {
     } else if field_path.starts_with("listen") {
         "Check listener fields and types (for example, ports must be numbers and TLS sections must be nested under 'tls')."
     } else if field_path.starts_with("upstreams") {
-        "Check that 'strategy' is present and each server includes 'protocol' and 'address'."
+        "Check that 'strategy' is valid, each server includes 'protocol'/'address', and optional 'bootstrap_resolvers' values are IP or IP:port (default: 1.1.1.1; protocol support: dns, dot; DoT examples: tls://1.1.1.1, tls://dns.example.com:853, or 1.1.1.1:853)."
     } else if field_path.starts_with("logging") {
         "Check each logging target uses the expected keys (enabled/level and location for file logging)."
     } else {

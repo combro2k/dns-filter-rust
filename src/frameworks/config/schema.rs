@@ -96,7 +96,13 @@ impl<'de> Deserialize<'de> for NamedList {
 #[derive(Debug, Deserialize)]
 pub struct UpstreamsConfig {
     pub strategy: String,
+    #[serde(default = "default_bootstrap_resolvers")]
+    pub bootstrap_resolvers: Vec<String>,
     pub servers: Vec<UpstreamServer>,
+}
+
+fn default_bootstrap_resolvers() -> Vec<String> {
+    vec!["1.1.1.1".to_string()]
 }
 
 #[derive(Debug, Deserialize)]
