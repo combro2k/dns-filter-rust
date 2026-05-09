@@ -122,6 +122,7 @@ async fn run_udp(
 ) -> Result<(), DnsListenerError> {
     let socket = Arc::new(socket);
     let mut buf = [0u8; UDP_RECV_BUF];
+    tracing::debug!("UDP receive loop started");
 
     loop {
         let (len, src) = socket
@@ -129,12 +130,15 @@ async fn run_udp(
             .await
             .map_err(DnsListenerError::Runtime)?;
 
+        tracing::debug!(peer = %src, query_len = len, "DNS UDP query received");
         let query = buf[..len].to_vec();
         let socket = Arc::clone(&socket);
         let resolver = Arc::clone(&resolver);
 
         tokio::spawn(async move {
+            tracing::debug!(peer = %src, "forwarding query to upstream");
             let response = forward_query(&resolver, &query).await;
+            tracing::debug!(peer = %src, response_len = response.len(), "sending DNS response");
             if let Err(e) = socket.send_to(&response, src).await {
                 tracing::warn!(peer = %src, error = %e, "failed to send UDP DNS response");
             }
@@ -190,9 +194,30 @@ async fn handle_tcp_conn(
 
 /// Forwards a raw DNS query wire buffer to the upstream resolver.
 /// Returns a SERVFAIL response if resolution fails.
+/// Preserves the original query ID from the client in the response.
 async fn forward_query(resolver: &Arc<dyn UpstreamResolver>, query: &[u8]) -> Vec<u8> {
+    tracing::debug!(query_len = query.len(), "calling upstream resolver");
+    
+    // Extract the query ID from the client's original query
+    let client_query_id = if query.len() >= 2 {
+        u16::from_be_bytes([query[0], query[1]])
+    } else {
+        0
+    };
+    
     match resolver.resolve(query.to_vec()).await {
-        Ok(response) => response,
+        Ok(response) => {
+            // Parse the response, update its ID to match the client's query ID, and re-encode
+            if let Ok(mut msg) = Message::from_vec(&response) {
+                msg.set_id(client_query_id);
+                let fixed_response = msg.to_vec().unwrap_or(response);
+                tracing::debug!(response_len = fixed_response.len(), client_id = client_query_id, "upstream resolution succeeded with ID preservation");
+                fixed_response
+            } else {
+                tracing::warn!("failed to parse upstream response, returning as-is");
+                response
+            }
+        }
         Err(e) => {
             tracing::warn!(error = %e, "upstream resolution failed; returning SERVFAIL");
             build_servfail(query)

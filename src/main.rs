@@ -1,9 +1,16 @@
 use dns_filter::frameworks::config::loader::load_config;
 use dns_filter::interface_adapters::listeners::dns::DnsServer;
 use dns_filter::use_cases::config_bootstrap::{build_upstream_resolver, validate_config};
+use tracing_subscriber;
 
 #[tokio::main]
 async fn main() {
+    // Initialize tracing/logging
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_target(true)
+        .with_thread_ids(true)
+        .init();
     // Load config from /etc/dns-filter/config.yaml by default.
     // Override by passing the path as the first argument.
     let config_path = std::env::args()
