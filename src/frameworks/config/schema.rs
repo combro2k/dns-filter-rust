@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -48,10 +50,47 @@ pub struct MetricsConfig {
     pub port: u16,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct NamedList {
     pub name: String,
     pub url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct NamedListEntry {
+    url: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum NamedListRepr {
+    Explicit { name: String, url: String },
+    Nested(BTreeMap<String, NamedListEntry>),
+}
+
+impl<'de> Deserialize<'de> for NamedList {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let repr = NamedListRepr::deserialize(deserializer)?;
+
+        match repr {
+            NamedListRepr::Explicit { name, url } => Ok(Self { name, url }),
+            NamedListRepr::Nested(map) => {
+                let mut iter = map.into_iter();
+                match (iter.next(), iter.next()) {
+                    (Some((name, entry)), None) => Ok(Self {
+                        name,
+                        url: entry.url,
+                    }),
+                    _ => Err(serde::de::Error::custom(
+                        "named list map must contain exactly one item",
+                    )),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

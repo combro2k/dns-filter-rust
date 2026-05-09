@@ -1,15 +1,58 @@
 use std::fs;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Result};
 
 use crate::frameworks::config::schema::DnsFilterConfig;
 
 pub fn load_config(path: &str) -> Result<DnsFilterConfig> {
-    let content =
-        fs::read_to_string(path).with_context(|| format!("failed to read config file: {path}"))?;
-    let config = serde_yaml::from_str::<DnsFilterConfig>(&content)
-        .with_context(|| format!("failed to parse config file: {path}"))?;
-    Ok(config)
+    let content = fs::read_to_string(path).map_err(|error| {
+    anyhow!(
+      "Could not read the config file.\n  File: {path}\n  Reason: {error}\n  Hint: Check that the file exists and that this process has read permissions."
+    )
+  })?;
+
+    parse_config(path, &content)
+}
+
+fn parse_config(path: &str, content: &str) -> Result<DnsFilterConfig> {
+    let deserializer = serde_yaml::Deserializer::from_str(content);
+    serde_path_to_error::deserialize::<_, DnsFilterConfig>(deserializer).map_err(|error| {
+    let field_path = error.path().to_string();
+    let inner = error.inner();
+    let specific_hint = hint_for_path(&field_path);
+
+    if let Some(location) = inner.location() {
+      anyhow!(
+        "Could not parse the config file.\n  File: {path}\n  Location: line {}, column {}\n  Field: {}\n  Reason: {}\n  Hint: {}",
+        location.line(),
+        location.column(),
+        field_path,
+        inner,
+        specific_hint
+      )
+    } else {
+      anyhow!(
+        "Could not parse the config file.\n  File: {path}\n  Field: {}\n  Reason: {}\n  Hint: {}",
+        field_path,
+        inner,
+        specific_hint
+      )
+    }
+  })
+}
+
+fn hint_for_path(field_path: &str) -> &'static str {
+    if field_path.starts_with("blocklists") || field_path.starts_with("allowlists") {
+        "Use either '- name: my_list\\n  url: https://...' or '- my_list:\\n    url: https://...' for each list item."
+    } else if field_path.starts_with("listen") {
+        "Check listener fields and types (for example, ports must be numbers and TLS sections must be nested under 'tls')."
+    } else if field_path.starts_with("upstreams") {
+        "Check that 'strategy' is present and each server includes 'protocol' and 'address'."
+    } else if field_path.starts_with("logging") {
+        "Check each logging target uses the expected keys (enabled/level and location for file logging)."
+    } else {
+        "Check YAML indentation and value types in this section."
+    }
 }
 
 #[cfg(test)]
@@ -41,7 +84,77 @@ logging:
     level: "info"
 "#;
 
-        let parsed = serde_yaml::from_str::<DnsFilterConfig>(yaml);
+        let parsed = parse_config("minimal.yaml", yaml);
         assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn parses_named_map_list_format() {
+        let yaml = r#"
+listen:
+  dns:
+    address: "0.0.0.0"
+    port: 53
+  dot: null
+  doh: null
+  doq: null
+  http: null
+  metrics: null
+blocklists:
+  - adguard_base:
+      url: "https://example.com/blocklist.txt"
+allowlists:
+  - local_allow:
+      url: "/etc/dns-filter/allowlist.txt"
+upstreams:
+  strategy: "round_robin"
+  servers: []
+logging:
+  syslog: null
+  file: null
+  stdout:
+    enabled: true
+    level: "info"
+"#;
+
+        let parsed = parse_config("named-map.yaml", yaml).expect("config should parse");
+        assert_eq!(parsed.blocklists[0].name, "adguard_base");
+        assert_eq!(parsed.allowlists[0].name, "local_allow");
+    }
+
+    #[test]
+    fn reports_line_column_and_field_path_on_parse_errors() {
+        let yaml = r#"
+listen:
+  dns:
+    address: "127.0.0.1"
+    port: "not-a-number"
+  dot: null
+  doh: null
+  doq: null
+  http: null
+  metrics: null
+blocklists: []
+allowlists: []
+upstreams:
+  strategy: "round_robin"
+  servers: []
+logging:
+  syslog: null
+  file: null
+  stdout:
+    enabled: true
+    level: "info"
+"#;
+
+        let error = parse_config("broken.yaml", yaml).expect_err("parse should fail");
+        let message = format!("{error:#}");
+
+        assert!(message.contains("Could not parse the config file"));
+        assert!(message.contains("broken.yaml"));
+        assert!(message.contains("line"));
+        assert!(message.contains("column"));
+        assert!(message.contains("listen.dns.port"));
+        assert!(message.contains("Hint:"));
     }
 }

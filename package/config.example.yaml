@@ -40,6 +40,8 @@ blocklists:
 allowlists:
   - corporate_allow:
       url: "https://example.com/allowlist.txt"
+  - boo:
+      url: "/etc/dns-filter/allowlist.txt"
   - local_allow:
       url: "/etc/dns-filter/allowlist.txt"
 

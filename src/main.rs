@@ -11,7 +11,7 @@ async fn main() {
     let config = match load_config(&config_path) {
         Ok(cfg) => validate_config(cfg),
         Err(e) => {
-            eprintln!("Failed to load config file {}: {}", config_path, e);
+            eprintln!("{e}");
             std::process::exit(1);
         }
     };
