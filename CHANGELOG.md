@@ -3,6 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Added listener batch smoke-test script at [tests/listener_batch_test.sh](tests/listener_batch_test.sh) to start a local instance on non-default loopback ports, probe DNS UDP/TCP end-to-end, and report DoT/DoH/DoQ/HTTP/metrics checks as pass/fail/skip with optional strict mode
 - Aligned `hickory-client` dependency to latest stable `0.25.2` while keeping existing DNSSEC/TLS feature flags
 - Started one-shot Chain of Responsibility compliance migration for request handling: added async, explicit-error CoR support in [src/use_cases/request_pipeline.rs](src/use_cases/request_pipeline.rs) with `AsyncRequestStage` + `AsyncPipelineHandler` (`Result<Option<Response>, Error>` contract)
 - Added concrete DNS pipeline stages in use-cases (`DnsFilterStage`, `DnsUpstreamStage`, `DnsServfailFallbackStage`) and moved sinkhole/SERVFAIL response construction helpers to use-case orchestration

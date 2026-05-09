@@ -64,6 +64,7 @@ impl AgentHandler for ConcreteAgentA {
 - **Always add cargo tests if implementing a new feature**
 - **Always run `cargo fmt` and `cargo clippy --all -- -D warnings` before committing**
 - **Code must not contain any formatting errors or clippy warnings/errors**
+- **Always run `./tests/listener_batch_test.sh` after finishing changes**
 - **Reject changes that invert layer dependencies**
 - **Keep `AGENTS.md` synchronized with structural module changes**
 
