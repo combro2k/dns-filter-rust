@@ -3,6 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Extended `list refreshed` logs to include parsed added-entry counters: `block_entries_added`, `whitelist_entries_added`, and `skipped_entries_added`
 - Improved filter list parser to correctly handle AdGuard/uBlock Origin syntax: cosmetic rules (`##`, `#@#`, `#$#`, `#%#`, `$$`) are now skipped; `@@||domain^` exception rules are treated as inline allowlist entries; rules with content-type (`$script`, `$image`, etc.) or context (`$third-party`, `$domain=`, etc.) modifiers are skipped with a `debug`-level log since DNS cannot evaluate those restrictions; `$all` and behaviour-only modifiers (`$important`, `$match-case`) are stripped and the rule is applied
 - Added optional `enabled` flag support for `blocklists`/`allowlists` entries; disabled lists are excluded from runtime refresh scheduling while omitted `enabled` defaults to active behavior
 - Updated example config list entries so only `blocklists.adguard_base` is enabled and all other blocklist/allowlist entries are disabled by default

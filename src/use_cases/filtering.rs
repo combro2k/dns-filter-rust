@@ -29,6 +29,11 @@ enum ParsedLine {
     Allow(String),
 }
 
+enum ParseDomainLineResult {
+    Parsed(ParsedLine),
+    Skipped,
+}
+
 #[derive(Debug, Clone)]
 struct ListRuntime {
     key: String,
@@ -114,7 +119,7 @@ impl ListFilterEngine {
     async fn refresh_single_list(&self, runtime: &ListRuntime) {
         match fetch_list_content(&runtime.url).await {
             Ok(content) => {
-                let (domains, exceptions) = parse_domains(&content);
+                let (domains, exceptions, skipped_entries_added) = parse_domains(&content);
                 {
                     let mut lists = self
                         .lists
@@ -148,6 +153,9 @@ impl ListFilterEngine {
                     list = %runtime.name,
                     source = %runtime.url,
                     interval_secs = runtime.interval.as_secs(),
+                    block_entries_added = domains.len(),
+                    whitelist_entries_added = exceptions.len(),
+                    skipped_entries_added,
                     "list refreshed"
                 );
             }
@@ -542,23 +550,34 @@ fn restricting_modifier(modifiers: &str) -> Option<&str> {
     None
 }
 
-fn parse_domains(content: &str) -> (HashSet<String>, HashSet<String>) {
+fn parse_domains(content: &str) -> (HashSet<String>, HashSet<String>, usize) {
     let mut blocks = HashSet::new();
     let mut exceptions = HashSet::new();
-    for parsed in content.lines().filter_map(parse_domain_line) {
+    let mut skipped_entries = 0usize;
+
+    for parsed in content.lines().filter_map(parse_domain_line_with_status) {
         match parsed {
-            ParsedLine::Block(d) => {
+            ParseDomainLineResult::Parsed(ParsedLine::Block(d)) => {
                 blocks.insert(d);
             }
-            ParsedLine::Allow(d) => {
+            ParseDomainLineResult::Parsed(ParsedLine::Allow(d)) => {
                 exceptions.insert(d);
             }
+            ParseDomainLineResult::Skipped => skipped_entries += 1,
         }
     }
-    (blocks, exceptions)
+    (blocks, exceptions, skipped_entries)
 }
 
+#[cfg(test)]
 fn parse_domain_line(line: &str) -> Option<ParsedLine> {
+    parse_domain_line_with_status(line).and_then(|result| match result {
+        ParseDomainLineResult::Parsed(parsed) => Some(parsed),
+        ParseDomainLineResult::Skipped => None,
+    })
+}
+
+fn parse_domain_line_with_status(line: &str) -> Option<ParseDomainLineResult> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!') {
         return None;
@@ -567,7 +586,7 @@ fn parse_domain_line(line: &str) -> Option<ParsedLine> {
     // Skip non-network rules: cosmetic, CSS injection, scriptlet, HTML filter
     const COSMETIC_MARKERS: &[&str] = &["##", "#@#", "#$#", "#%#", "$$"];
     if COSMETIC_MARKERS.iter().any(|m| trimmed.contains(m)) {
-        return None;
+        return Some(ParseDomainLineResult::Skipped);
     }
 
     // Detect exception (`@@`) prefix
@@ -586,20 +605,22 @@ fn parse_domain_line(line: &str) -> Option<ParsedLine> {
                 reason = %reason,
                 "filter rule skipped: modifier not applicable at DNS level"
             );
-            return None;
+            return Some(ParseDomainLineResult::Skipped);
         }
-        return normalize_domain_opt(domain_part).map(|d| {
-            if is_exception {
-                ParsedLine::Allow(d)
-            } else {
-                ParsedLine::Block(d)
-            }
-        });
+        return normalize_domain_opt(domain_part)
+            .map(|d| {
+                if is_exception {
+                    ParseDomainLineResult::Parsed(ParsedLine::Allow(d))
+                } else {
+                    ParseDomainLineResult::Parsed(ParsedLine::Block(d))
+                }
+            })
+            .or(Some(ParseDomainLineResult::Skipped));
     }
 
     // Exception rules without `||` prefix are too specific to evaluate at DNS level
     if is_exception {
-        return None;
+        return Some(ParseDomainLineResult::Skipped);
     }
 
     // HOSTS-file format and plain domain entries
@@ -617,7 +638,9 @@ fn parse_domain_line(line: &str) -> Option<ParsedLine> {
         _ => first,
     };
 
-    normalize_domain_opt(domain).map(ParsedLine::Block)
+    normalize_domain_opt(domain)
+        .map(|d| ParseDomainLineResult::Parsed(ParsedLine::Block(d)))
+        .or(Some(ParseDomainLineResult::Skipped))
 }
 
 fn is_ip_like(value: &str) -> bool {
@@ -840,8 +863,9 @@ mod tests {
 
     #[test]
     fn parse_domains_separates_blocks_and_exceptions() {
-        let content = "||ads.example.com^\n@@||safe.example.com^\n||tracker.org^$third-party\n";
-        let (blocks, exceptions) = parse_domains(content);
+        let content =
+            "||ads.example.com^\n@@||safe.example.com^\n||tracker.org^$third-party\n!comment\n";
+        let (blocks, exceptions, skipped_entries) = parse_domains(content);
         assert!(
             blocks.contains("ads.example.com"),
             "should block ads.example.com"
@@ -857,6 +881,27 @@ mod tests {
         assert!(
             !blocks.contains("tracker.org"),
             "third-party-only rule should be skipped"
+        );
+        assert_eq!(
+            skipped_entries, 1,
+            "only non-empty non-comment skipped rules should be counted"
+        );
+    }
+
+    #[test]
+    fn parse_domains_counts_multiple_skipped_rule_kinds() {
+        let content =
+            "||ok.example^\n||skip-modifier.example^$script\n@@plain-exception.example.com\nhttp://not-a-domain/\n# comment\n";
+        let (blocks, exceptions, skipped_entries) = parse_domains(content);
+
+        assert!(
+            blocks.contains("ok.example"),
+            "block domain should be parsed"
+        );
+        assert!(exceptions.is_empty(), "no allow domains expected");
+        assert_eq!(
+            skipped_entries, 3,
+            "modifier-based, unsupported exception, and invalid domain should be skipped"
         );
     }
 
