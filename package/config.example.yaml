@@ -38,17 +38,35 @@ listen:
 
 blocklists:
   - adguard_base:
+      enabled: true
       url: "https://raw.githubusercontent.com/AdguardTeam/FiltersRegistry/master/filters/filter_2_Base/filter.txt"
+      interval: "12h"
   - custom_ads:
+      enabled: false
       url: "https://example.com/myadblock.txt"
+      interval: "30m"
 
 allowlists:
   - corporate_allow:
+      enabled: false
       url: "https://example.com/allowlist.txt"
+      interval: "1h"
   - boo:
+      enabled: false
       url: "/etc/dns-filter/allowlist.txt"
   - local_allow:
+      enabled: false
       url: "/etc/dns-filter/allowlist.txt"
+
+filtering:
+  sinkhole_ipv4: "0.0.0.0"
+  sinkhole_ipv6: "::"
+  # Optional persistent document cache for warm starts.
+  # mode: "memory" (default) keeps cache in RAM only.
+  # mode: "sqlite" persists list documents to a local SQLite file.
+  cache:
+    mode: "memory"
+    document_path: "package/cache/filter-cache.db"
 
 upstreams:
   strategy: "round_robin"

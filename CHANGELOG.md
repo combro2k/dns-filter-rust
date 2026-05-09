@@ -3,6 +3,15 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Improved filter list parser to correctly handle AdGuard/uBlock Origin syntax: cosmetic rules (`##`, `#@#`, `#$#`, `#%#`, `$$`) are now skipped; `@@||domain^` exception rules are treated as inline allowlist entries; rules with content-type (`$script`, `$image`, etc.) or context (`$third-party`, `$domain=`, etc.) modifiers are skipped with a `debug`-level log since DNS cannot evaluate those restrictions; `$all` and behaviour-only modifiers (`$important`, `$match-case`) are stripped and the rule is applied
+- Added optional `enabled` flag support for `blocklists`/`allowlists` entries; disabled lists are excluded from runtime refresh scheduling while omitted `enabled` defaults to active behavior
+- Updated example config list entries so only `blocklists.adguard_base` is enabled and all other blocklist/allowlist entries are disabled by default
+- Added optional SQLite-backed document cache for filter lists (`filtering.cache.mode: sqlite`) to support warm-start restoration while keeping in-memory cache as runtime source of truth
+- Added optional `filtering.cache.document_path` config for SQLite cache file location (default: `package/cache/filter-cache.db` when sqlite mode is enabled)
+- Started filtering implementation with interval-based list cache refresh: added per-list `interval` support on `blocklists`/`allowlists` (for example `blocklists.adguard_base.interval`) with runtime default of `12h` when omitted
+- Added `filtering.sinkhole_ipv4` and `filtering.sinkhole_ipv6` config options (defaults: `0.0.0.0` and `::`) and wired sinkhole responses for blocked DNS queries
+- Added `ListFilterEngine` use-case with background per-list refresh workers for HTTP(S)/file-backed sources and allowlist-over-blocklist decision precedence
+- Wired DNS listener filtering path before upstream resolution so blocked domains short-circuit to synthetic responses
 - Added explicit `enabled` flags for listener sockets (`listen.dns|dot|doh|doq|http`) and upstream servers (`upstreams.servers[*]`), with runtime gating so disabled entries are not started/used
 - Updated composition root and upstream bootstrap behavior: DNS listener now requires `listen.dns.enabled: true`, and resolver construction now requires at least one enabled upstream server
 - Updated example configuration to set `enabled` on each listener and upstream entry, with only DNS listener and DNS upstream enabled for now

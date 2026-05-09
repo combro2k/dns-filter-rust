@@ -1,7 +1,8 @@
 use dns_filter::frameworks::config::loader::load_config;
 use dns_filter::interface_adapters::listeners::dns::DnsServer;
-use dns_filter::use_cases::config_bootstrap::{build_upstream_resolver, validate_config};
-use tracing_subscriber;
+use dns_filter::use_cases::config_bootstrap::{
+    build_domain_filter, build_upstream_resolver, validate_config,
+};
 
 #[tokio::main]
 async fn main() {
@@ -33,6 +34,15 @@ async fn main() {
         }
     };
 
+    let domain_filter = match build_domain_filter(&config) {
+        Ok(filter) => filter,
+        Err(e) => {
+            eprintln!("invalid filtering configuration: {e:#}");
+            std::process::exit(1);
+        }
+    };
+    domain_filter.clone().start_background_refresh();
+
     let Some(dns_config) = config.listen.dns.as_ref().filter(|cfg| cfg.enabled) else {
         eprintln!(
             "listen.dns must be configured with enabled: true (only DNS listener startup is supported right now)"
@@ -40,7 +50,7 @@ async fn main() {
         std::process::exit(1);
     };
 
-    let server = match DnsServer::new(dns_config, upstream_resolver) {
+    let server = match DnsServer::new(dns_config, upstream_resolver, domain_filter) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("failed to initialise DNS server: {e}");

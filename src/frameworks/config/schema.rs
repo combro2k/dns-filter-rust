@@ -9,6 +9,7 @@ pub struct DnsFilterConfig {
     pub listen: ListenConfig,
     pub blocklists: Vec<NamedList>,
     pub allowlists: Vec<NamedList>,
+    pub filtering: Option<FilteringConfig>,
     pub upstreams: UpstreamsConfig,
     pub logging: LoggingConfig,
 }
@@ -56,17 +57,26 @@ pub struct MetricsConfig {
 pub struct NamedList {
     pub name: String,
     pub url: String,
+    pub interval: Option<String>,
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 struct NamedListEntry {
     url: String,
+    interval: Option<String>,
+    enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum NamedListRepr {
-    Explicit { name: String, url: String },
+    Explicit {
+        name: String,
+        url: String,
+        interval: Option<String>,
+        enabled: Option<bool>,
+    },
     Nested(BTreeMap<String, NamedListEntry>),
 }
 
@@ -78,13 +88,25 @@ impl<'de> Deserialize<'de> for NamedList {
         let repr = NamedListRepr::deserialize(deserializer)?;
 
         match repr {
-            NamedListRepr::Explicit { name, url } => Ok(Self { name, url }),
+            NamedListRepr::Explicit {
+                name,
+                url,
+                interval,
+                enabled,
+            } => Ok(Self {
+                name,
+                url,
+                interval,
+                enabled,
+            }),
             NamedListRepr::Nested(map) => {
                 let mut iter = map.into_iter();
                 match (iter.next(), iter.next()) {
                     (Some((name, entry)), None) => Ok(Self {
                         name,
                         url: entry.url,
+                        interval: entry.interval,
+                        enabled: entry.enabled,
                     }),
                     _ => Err(serde::de::Error::custom(
                         "named list map must contain exactly one item",
@@ -93,6 +115,19 @@ impl<'de> Deserialize<'de> for NamedList {
             }
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FilteringConfig {
+    pub sinkhole_ipv4: Option<String>,
+    pub sinkhole_ipv6: Option<String>,
+    pub cache: Option<FilteringCacheConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FilteringCacheConfig {
+    pub mode: Option<String>,
+    pub document_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

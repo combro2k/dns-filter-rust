@@ -7,6 +7,7 @@ use anyhow::{anyhow, bail, Result};
 use crate::entities::resolution::UpstreamStrategy;
 use crate::frameworks::config::schema::{DnsFilterConfig, UpstreamServer};
 use crate::frameworks::upstream::{DnsTlsClient, DnsUdpTcpClient};
+use crate::use_cases::filtering::{parse_interval, DomainFilter, ListFilterEngine};
 use crate::use_cases::upstream_resolver::{StrategyUpstreamResolver, UpstreamResolver};
 
 pub fn validate_config(config: DnsFilterConfig) -> DnsFilterConfig {
@@ -37,6 +38,23 @@ pub fn build_upstream_resolver(config: &DnsFilterConfig) -> Result<Arc<dyn Upstr
         .collect::<Result<Vec<_>>>()?;
 
     Ok(Arc::new(StrategyUpstreamResolver::new(resolvers, strategy)))
+}
+
+pub fn build_domain_filter(config: &DnsFilterConfig) -> Result<Arc<dyn DomainFilter>> {
+    for list in config.blocklists.iter().chain(config.allowlists.iter()) {
+        if let Some(interval) = &list.interval {
+            parse_interval(interval).map_err(|error| {
+                anyhow!(
+                    "invalid interval for list '{}': {} ({error})",
+                    list.name,
+                    interval
+                )
+            })?;
+        }
+    }
+
+    let engine = ListFilterEngine::from_config(config)?;
+    Ok(Arc::new(engine))
 }
 
 fn build_single_upstream_resolver(
@@ -91,8 +109,8 @@ fn parse_bootstrap_resolvers(values: &[String]) -> Result<Vec<SocketAddr>> {
 #[cfg(test)]
 mod tests {
     use crate::frameworks::config::schema::{
-        DnsFilterConfig, ListenConfig, LoggingConfig, NamedList, SocketConfig, StdoutLogConfig,
-        UpstreamServer, UpstreamsConfig,
+        DnsFilterConfig, FilteringConfig, ListenConfig, LoggingConfig, NamedList, SocketConfig,
+        StdoutLogConfig, UpstreamServer, UpstreamsConfig,
     };
 
     use super::*;
@@ -113,6 +131,7 @@ mod tests {
             },
             blocklists: Vec::<NamedList>::new(),
             allowlists: Vec::<NamedList>::new(),
+            filtering: None,
             upstreams: UpstreamsConfig {
                 strategy: "round_robin".into(),
                 bootstrap_resolvers: vec!["1.1.1.1".into()],
@@ -243,5 +262,64 @@ mod tests {
         assert!(error
             .to_string()
             .contains("invalid bootstrap resolver address"));
+    }
+
+    #[test]
+    fn build_domain_filter_accepts_missing_interval_and_uses_defaults() {
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+        }]);
+        config.blocklists = vec![NamedList {
+            name: "ads".into(),
+            url: "https://example.com/ads.txt".into(),
+            interval: None,
+            enabled: None,
+        }];
+
+        let filter = build_domain_filter(&config).expect("domain filter should build");
+        assert_eq!(filter.sinkhole_ipv4().to_string(), "0.0.0.0");
+        assert_eq!(filter.sinkhole_ipv6().to_string(), "::");
+    }
+
+    #[test]
+    fn build_domain_filter_rejects_invalid_list_interval() {
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+        }]);
+        config.blocklists = vec![NamedList {
+            name: "ads".into(),
+            url: "https://example.com/ads.txt".into(),
+            interval: Some("99w".into()),
+            enabled: None,
+        }];
+
+        let result = build_domain_filter(&config);
+        assert!(result.is_err());
+        let error = result.err().expect("expected error");
+        assert!(error
+            .to_string()
+            .contains("invalid interval for list 'ads'"));
+    }
+
+    #[test]
+    fn build_domain_filter_uses_configured_sinkhole_addresses() {
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+        }]);
+        config.filtering = Some(FilteringConfig {
+            sinkhole_ipv4: Some("10.10.10.10".into()),
+            sinkhole_ipv6: Some("fd00::1".into()),
+            cache: None,
+        });
+
+        let filter = build_domain_filter(&config).expect("domain filter should build");
+        assert_eq!(filter.sinkhole_ipv4().to_string(), "10.10.10.10");
+        assert_eq!(filter.sinkhole_ipv6().to_string(), "fd00::1");
     }
 }

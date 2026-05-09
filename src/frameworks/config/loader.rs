@@ -43,13 +43,15 @@ fn parse_config(path: &str, content: &str) -> Result<DnsFilterConfig> {
 
 fn hint_for_path(field_path: &str) -> &'static str {
     if field_path.starts_with("blocklists") || field_path.starts_with("allowlists") {
-        "Use either '- name: my_list\\n  url: https://...' or '- my_list:\\n    url: https://...' for each list item."
+        "Use either '- name: my_list\\n  url: https://...\\n  interval: 12h' or '- my_list:\\n    url: https://...\\n    interval: 12h' for each list item."
     } else if field_path.starts_with("listen") {
         "Check listener fields and types (for example, ports must be numbers and TLS sections must be nested under 'tls')."
     } else if field_path.starts_with("upstreams") {
         "Check that 'strategy' is valid, each server includes 'protocol'/'address', and optional 'bootstrap_resolvers' values are IP or IP:port (default: 1.1.1.1; protocol support: dns, dot; DoT examples: tls://1.1.1.1, tls://dns.example.com:853, or 1.1.1.1:853)."
     } else if field_path.starts_with("logging") {
         "Check each logging target uses the expected keys (enabled/level and location for file logging)."
+    } else if field_path.starts_with("filtering") {
+        "Check filtering fields (sinkhole_ipv4/sinkhole_ipv6) and optional cache config: mode is 'memory' or 'sqlite', with optional document_path."
     } else {
         "Check YAML indentation and value types in this section."
     }
@@ -105,9 +107,13 @@ listen:
 blocklists:
   - adguard_base:
       url: "https://example.com/blocklist.txt"
+      interval: "6h"
+      enabled: true
 allowlists:
   - local_allow:
       url: "/etc/dns-filter/allowlist.txt"
+      interval: "45m"
+      enabled: false
 upstreams:
   strategy: "round_robin"
   servers: []
@@ -121,7 +127,48 @@ logging:
 
         let parsed = parse_config("named-map.yaml", yaml).expect("config should parse");
         assert_eq!(parsed.blocklists[0].name, "adguard_base");
+        assert_eq!(parsed.blocklists[0].interval.as_deref(), Some("6h"));
+        assert_eq!(parsed.blocklists[0].enabled, Some(true));
         assert_eq!(parsed.allowlists[0].name, "local_allow");
+        assert_eq!(parsed.allowlists[0].interval.as_deref(), Some("45m"));
+        assert_eq!(parsed.allowlists[0].enabled, Some(false));
+    }
+
+    #[test]
+    fn parses_explicit_list_format_with_optional_enabled() {
+        let yaml = r#"
+listen:
+  dns:
+    enabled: true
+    address: "127.0.0.1"
+    port: 5353
+  dot: null
+  doh: null
+  doq: null
+  http: null
+  metrics: null
+blocklists:
+  - name: "adguard_base"
+    url: "https://example.com/blocklist.txt"
+    interval: "6h"
+    enabled: false
+allowlists:
+  - name: "local_allow"
+    url: "/etc/dns-filter/allowlist.txt"
+upstreams:
+  strategy: "round_robin"
+  servers: []
+logging:
+  syslog: null
+  file: null
+  stdout:
+    enabled: true
+    level: "info"
+"#;
+
+        let parsed = parse_config("explicit-enabled.yaml", yaml).expect("config should parse");
+        assert_eq!(parsed.blocklists[0].enabled, Some(false));
+        assert_eq!(parsed.allowlists[0].enabled, None);
     }
 
     #[test]
@@ -225,5 +272,47 @@ logging:
         assert!(message.contains("column"));
         assert!(message.contains("listen.dns.port"));
         assert!(message.contains("Hint:"));
+    }
+
+    #[test]
+    fn parses_filtering_cache_sqlite_settings() {
+        let yaml = r#"
+listen:
+  dns:
+    enabled: true
+    address: "127.0.0.1"
+    port: 5353
+  dot: null
+  doh: null
+  doq: null
+  http: null
+  metrics: null
+blocklists: []
+allowlists: []
+filtering:
+  sinkhole_ipv4: "0.0.0.0"
+  sinkhole_ipv6: "::"
+  cache:
+    mode: "sqlite"
+    document_path: "package/cache/filter-cache.db"
+upstreams:
+  strategy: "round_robin"
+  servers: []
+logging:
+  syslog: null
+  file: null
+  stdout:
+    enabled: true
+    level: "info"
+"#;
+
+        let parsed = parse_config("filtering-cache.yaml", yaml).expect("config should parse");
+        let filtering = parsed.filtering.expect("filtering config should exist");
+        let cache = filtering.cache.expect("cache config should exist");
+        assert_eq!(cache.mode.as_deref(), Some("sqlite"));
+        assert_eq!(
+            cache.document_path.as_deref(),
+            Some("package/cache/filter-cache.db")
+        );
     }
 }
