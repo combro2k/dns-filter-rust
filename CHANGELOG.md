@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Added `UpstreamProtocol` enum and `ResolvedUpstream` value object to `entities/resolution.rs`
+- Added `Copy` derive to `UpstreamStrategy`
+- Added `use_cases/upstream_resolver.rs`: `UpstreamResolver` async trait, `UpstreamResolveError`, and `StrategyUpstreamResolver` implementing round-robin, random, and failover dispatch strategies
+- Added `frameworks/upstream/dns_client.rs`: `DnsUdpTcpClient` now uses Trust-DNS DNSSEC-aware clients for UDP-first resolution with automatic TCP fallback on truncation (RFC 5966)
+- Enabled DNSSEC features on `trust-dns-client` and `trust-dns-proto` in `Cargo.toml`
+- Added `async-trait`, `rand`, and `futures` dependencies to `Cargo.toml`
 - Initial creation of AGENTS.md and CHANGELOG.md
 - Documented DDD and chain of responsibility patterns
 - Established project rules: always update CHANGELOG.md and add cargo tests for new features
