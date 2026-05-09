@@ -3,6 +3,8 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Implemented use-case Chain of Responsibility core in `src/use_cases/request_pipeline.rs`: added `RequestStage` pass/short-circuit contract with `Option<Response>`, `PipelineHandler` stage composition, and execution short-circuiting
+- Added unit tests for request pipeline pass-through, short-circuit, and unhandled request behavior
 - **Migrated from `trust-dns` 0.22 to `hickory-client` 0.25 (Hickory DNS)**: fixes broken DNSSEC validation, adds native DoT/DoH/DoQ/DoH3 protocol support via feature flags
 - Replaced `trust-dns-server`, `trust-dns-proto`, and `trust-dns-client` with `hickory-client` (features: `dnssec-ring`)
 - Rewrote `DnsUdpTcpClient` to use Hickory's `DnssecClient`, `UdpClientStream`, `TcpClientStream` + `DnsMultiplexer`
