@@ -1,12 +1,5 @@
-// filter logic is now in the filter crate
-mod logging;
-mod metrics;
-mod upstream;
-
-mod config; // Declare config module so use config::DnsFilterConfig works
-use config::DnsFilterConfig;
-use std::fs;
-use std::path::Path;
+use dns_filter::frameworks::config::loader::load_config;
+use dns_filter::use_cases::config_bootstrap::validate_config;
 
 #[tokio::main]
 async fn main() {
@@ -15,19 +8,14 @@ async fn main() {
     let config_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "package/config.example.yaml".to_string());
-    let config = match fs::read_to_string(&config_path) {
-        Ok(content) => match serde_yaml::from_str::<DnsFilterConfig>(&content) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                eprintln!("Failed to parse config: {}", e);
-                std::process::exit(1);
-            }
-        },
+    let config = match load_config(&config_path) {
+        Ok(cfg) => validate_config(cfg),
         Err(e) => {
-            eprintln!("Failed to read config file {}: {}", config_path, e);
+            eprintln!("Failed to load config file {}: {}", config_path, e);
             std::process::exit(1);
         }
     };
+
     println!("Loaded config: {:?}", config);
     // TODO: Initialize logging, metrics, filter, upstream, and start listeners
 }

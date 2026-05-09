@@ -2,17 +2,42 @@
 
 ## Agent Architecture Overview
 
-This project follows the Domain-Driven Design (DDD) pattern and implements the Chain of Responsibility pattern for agent logic and request handling.
+This project follows Clean Architecture with DDD-style domain modeling and uses Chain of Responsibility in the request processing pipeline.
 
-### Domain-Driven Design (DDD)
-- **Bounded Contexts:** Each domain concept is encapsulated in its own module or component.
-- **Entities & Value Objects:** Core business logic is modeled using entities and value objects.
-- **Aggregates:** Aggregates enforce business invariants and transactional consistency.
-- **Repositories:** Data access is abstracted via repository interfaces.
+### Clean Architecture Structure
+- **entities:** Pure domain model and business rules. No framework or I/O dependencies.
+- **use_cases:** Application orchestration and policy. Depends on entities.
+- **interface_adapters:** Protocol and boundary adapters (DNS, DoT, DoH, DoQ, HTTP).
+- **frameworks:** External systems and drivers (config loading, logging, metrics, upstream I/O).
+
+### Dependency Rule
+- Dependencies point inward only.
+- `entities` must not depend on any other project layer.
+- `use_cases` can depend only on `entities`.
+- `interface_adapters` can depend on `use_cases` and `entities`.
+- `frameworks` can depend on adapters/use_cases/entities, but they must not leak framework concerns back into entities.
+
+### Source Layout (Target)
+```text
+src/
+    entities/
+    use_cases/
+    interface_adapters/
+    frameworks/
+        config/
+```
+
+### Protocol Scope
+- DNS UDP/TCP
+- DNS over TLS (DoT)
+- DNS over HTTPS (DoH)
+- DNS over QUIC (DoQ)
+- HTTP admin/metrics
 
 ### Chain of Responsibility Pattern
-- **Request Handling:** Agents are organized in a chain, where each agent can handle a request or pass it to the next agent in the chain.
-- **Extensibility:** New agents can be added to the chain without modifying existing code, promoting open/closed principle.
+- **Placement:** Implemented inside use-case orchestration.
+- **Request Handling:** Processing stages should be chained with explicit pass/short-circuit behavior.
+- **Extensibility:** New handlers should be composable without modifying existing handlers.
 
 #### Example (Pseudocode)
 ```rust
@@ -39,6 +64,8 @@ impl AgentHandler for ConcreteAgentA {
 - **Always add cargo tests if implementing a new feature**
 - **Always run `cargo fmt` and `cargo clippy --all -- -D warnings` before committing**
 - **Code must not contain any formatting errors or clippy warnings/errors**
+- **Reject changes that invert layer dependencies**
+- **Keep `AGENTS.md` synchronized with structural module changes**
 
 ## File Conventions
 - `AGENTS.md`: Documents agent architecture and design patterns
