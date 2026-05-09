@@ -12,9 +12,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 prometheus = "0.13"
 hyper = { version = "0.14", features = ["full"] }
-trust-dns-server = "0.22"
-trust-dns-proto = { version = "0.22", features = ["dnssec"] }
-trust-dns-client = { version = "0.22", features = ["dnssec"] }
+hickory-client = { version = "0.25", features = ["dnssec-ring"] }
 thiserror = "1.0"
 anyhow = "1.0"
 async-trait = "0.1"

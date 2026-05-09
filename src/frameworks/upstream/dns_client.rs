@@ -2,11 +2,13 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use trust_dns_client::client::{AsyncDnssecClient, ClientConnection, ClientHandle};
-use trust_dns_client::tcp::TcpClientConnection;
-use trust_dns_client::udp::UdpClientConnection;
-use trust_dns_proto::op::Message;
-use trust_dns_proto::rr::{DNSClass, Name, RecordType};
+use hickory_client::client::{ClientHandle, DnssecClient};
+use hickory_client::proto::op::Message;
+use hickory_client::proto::rr::{DNSClass, Name, RecordType};
+use hickory_client::proto::runtime::TokioRuntimeProvider;
+use hickory_client::proto::tcp::TcpClientStream;
+use hickory_client::proto::udp::UdpClientStream;
+use hickory_client::proto::xfer::DnsMultiplexer;
 
 use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
 
@@ -28,8 +30,8 @@ impl DnsUdpTcpClient {
     fn extract_question(
         query: &[u8],
     ) -> Result<(Name, DNSClass, RecordType), UpstreamResolveError> {
-        let message =
-            Message::from_vec(query).map_err(|e| UpstreamResolveError::Protocol(e.to_string()))?;
+        let message = Message::from_vec(query)
+            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
         let question = message
             .queries()
             .first()
@@ -42,47 +44,61 @@ impl DnsUdpTcpClient {
         ))
     }
 
-    async fn resolve_with_connection<C>(
-        &self,
-        query: &[u8],
-        connection: C,
-    ) -> Result<Vec<u8>, UpstreamResolveError>
-    where
-        C: ClientConnection + Send + Sync + 'static,
-        C::SenderFuture: Send + 'static,
-    {
+    async fn resolve_udp(&self, query: &[u8]) -> Result<Vec<u8>, UpstreamResolveError> {
         let (name, query_class, query_type) = Self::extract_question(query)?;
-        let (mut client, background) = AsyncDnssecClient::connect(connection.new_stream(None))
+        let provider = TokioRuntimeProvider::default();
+        let conn = UdpClientStream::builder(self.address, provider)
+            .with_timeout(Some(UDP_TIMEOUT))
+            .build();
+        let (mut client, background) = DnssecClient::connect(conn)
             .await
-            .map_err(|e| UpstreamResolveError::Protocol(e.to_string()))?;
+            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
 
         tokio::spawn(background);
 
         let response = client
             .query(name, query_class, query_type)
             .await
-            .map_err(|e| UpstreamResolveError::Protocol(e.to_string()))?;
+            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
 
         response
             .to_vec()
-            .map_err(|e| UpstreamResolveError::Protocol(e.to_string()))
+            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))
+    }
+
+    async fn resolve_tcp(&self, query: &[u8]) -> Result<Vec<u8>, UpstreamResolveError> {
+        let (name, query_class, query_type) = Self::extract_question(query)?;
+        let provider = TokioRuntimeProvider::default();
+        let (tcp_stream, sender) =
+            TcpClientStream::new(self.address, None, Some(TCP_TIMEOUT), provider);
+        let multiplexer = DnsMultiplexer::new(tcp_stream, sender, None);
+        let (mut client, background) = DnssecClient::connect(multiplexer)
+            .await
+            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
+
+        tokio::spawn(background);
+
+        let response = client
+            .query(name, query_class, query_type)
+            .await
+            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
+
+        response
+            .to_vec()
+            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))
     }
 }
 
 #[async_trait]
 impl UpstreamResolver for DnsUdpTcpClient {
     async fn resolve(&self, query: Vec<u8>) -> Result<Vec<u8>, UpstreamResolveError> {
-        let udp_connection = UdpClientConnection::with_timeout(self.address, UDP_TIMEOUT)
-            .map_err(|error| UpstreamResolveError::Protocol(error.to_string()))?;
-        let response = self.resolve_with_connection(&query, udp_connection).await?;
+        let response = self.resolve_udp(&query).await?;
 
         let msg = Message::from_vec(&response)
-            .map_err(|e| UpstreamResolveError::Protocol(e.to_string()))?;
+            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
 
         if msg.truncated() {
-            let tcp_connection = TcpClientConnection::with_timeout(self.address, TCP_TIMEOUT)
-                .map_err(|error| UpstreamResolveError::Protocol(error.to_string()))?;
-            self.resolve_with_connection(&query, tcp_connection).await
+            self.resolve_tcp(&query).await
         } else {
             Ok(response)
         }
@@ -92,29 +108,44 @@ impl UpstreamResolver for DnsUdpTcpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trust_dns_proto::op::ResponseCode;
-    use trust_dns_proto::rr::RecordType;
+    use hickory_client::proto::op::ResponseCode;
 
-    /// Hand-crafted standard query for `example.com` type A, class IN (RFC 1035).
+    fn build_query(domain: &str) -> Vec<u8> {
+        let mut msg = Message::new();
+        msg.set_id(1);
+        msg.set_recursion_desired(true);
+        msg.add_query({
+            let mut q = hickory_client::proto::op::Query::new();
+            q.set_name(domain.parse().unwrap());
+            q.set_query_type(RecordType::A);
+            q.set_query_class(DNSClass::IN);
+            q
+        });
+        msg.to_vec().unwrap()
+    }
+
+    /// Hand-crafted standard query for `sigok.verteiltesysteme.net` type A, class IN (RFC 1035).
     ///
     /// Bytes:
     ///   0x00 0x01          — Message ID
     ///   0x01 0x00          — Flags: QR=0 RD=1
     ///   0x00 0x01          — QDCOUNT = 1
     ///   0x00 0x00 * 3      — ANCOUNT / NSCOUNT / ARCOUNT = 0
-    ///   0x07 "example"     — label (7 chars)
-    ///   0x03 "com" 0x00    — label (3 chars) + root
+    ///   0x05 "sigok"       — label (5 chars)
+    ///   0x10 "verteiltesysteme" — label (16 chars)
+    ///   0x03 "net"         — label (3 chars)
     ///   0x00 0x01 0x00 0x01 — QTYPE=A, QCLASS=IN
     #[rustfmt::skip]
-    const EXAMPLE_COM_A_QUERY: &[u8] = &[
+    const SIGOK_VERTEILTESYSTEME_NET_A_QUERY: &[u8] = &[
         0x00, 0x01,
         0x01, 0x00,
         0x00, 0x01,
         0x00, 0x00,
         0x00, 0x00,
         0x00, 0x00,
-        0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
-        0x03, b'c', b'o', b'm',
+        0x05, b's', b'i', b'g', b'o', b'k',
+        0x10, b'v', b'e', b'r', b't', b'e', b'i', b'l', b't', b'e', b's', b'y', b's', b't', b'e', b'm', b'e',
+        0x03, b'n', b'e', b't',
         0x00,
         0x00, 0x01,
         0x00, 0x01,
@@ -123,10 +154,10 @@ mod tests {
     #[test]
     fn test_extract_question_parses_name_class_and_type() {
         let (name, query_class, query_type) =
-            DnsUdpTcpClient::extract_question(EXAMPLE_COM_A_QUERY)
+            DnsUdpTcpClient::extract_question(SIGOK_VERTEILTESYSTEME_NET_A_QUERY)
                 .expect("failed to parse question");
 
-        assert_eq!(name.to_ascii(), "example.com.");
+        assert_eq!(name.to_ascii(), "sigok.verteiltesysteme.net.");
         assert_eq!(query_class, DNSClass::IN);
         assert_eq!(query_type, RecordType::A);
     }
@@ -139,11 +170,11 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires network access to 8.8.8.8:53"]
-    async fn test_resolve_example_com_a_over_udp() {
+    async fn test_resolve_sigok_verteiltesysteme_net_a_over_udp() {
         let addr: SocketAddr = "8.8.8.8:53".parse().unwrap();
         let client = DnsUdpTcpClient::new(addr);
         let response = client
-            .resolve(EXAMPLE_COM_A_QUERY.to_vec())
+            .resolve(SIGOK_VERTEILTESYSTEME_NET_A_QUERY.to_vec())
             .await
             .expect("resolution failed");
 
@@ -157,17 +188,31 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires network access to 8.8.8.8:53"]
-    async fn test_resolve_example_com_a_over_tcp() {
+    async fn test_resolve_sigok_verteiltesysteme_net_a_over_tcp() {
         let addr: SocketAddr = "8.8.8.8:53".parse().unwrap();
         let client = DnsUdpTcpClient::new(addr);
-        let connection = TcpClientConnection::with_timeout(addr, TCP_TIMEOUT).unwrap();
         let response = client
-            .resolve_with_connection(EXAMPLE_COM_A_QUERY, connection)
+            .resolve_tcp(SIGOK_VERTEILTESYSTEME_NET_A_QUERY)
             .await
             .expect("TCP resolution failed");
 
         let msg = Message::from_vec(&response).expect("failed to parse response");
         assert_eq!(msg.response_code(), ResponseCode::NoError);
         assert!(!msg.answers().is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network access to 8.8.8.8:53"]
+    async fn test_dnssec_validation_rejects_broken_chain() {
+        // dnssec-failed.org is intentionally configured with broken DNSSEC signatures
+        let addr: SocketAddr = "8.8.8.8:53".parse().unwrap();
+        let client = DnsUdpTcpClient::new(addr);
+        let query = build_query("dnssec-failed.org.");
+        let result = client.resolve(query).await;
+
+        assert!(
+            result.is_err(),
+            "expected DNSSEC validation to reject broken chain"
+        );
     }
 }
