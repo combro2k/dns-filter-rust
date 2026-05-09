@@ -18,16 +18,21 @@ pub fn build_upstream_resolver(config: &DnsFilterConfig) -> Result<Arc<dyn Upstr
     let strategy = UpstreamStrategy::from_str(&config.upstreams.strategy)
         .map_err(|_| anyhow!("invalid upstream strategy: {}", config.upstreams.strategy))?;
 
-    if config.upstreams.servers.is_empty() {
-        bail!("at least one upstream server is required");
+    let enabled_servers = config
+        .upstreams
+        .servers
+        .iter()
+        .filter(|server| server.enabled)
+        .collect::<Vec<_>>();
+
+    if enabled_servers.is_empty() {
+        bail!("at least one enabled upstream server is required");
     }
 
     let bootstrap_resolvers = parse_bootstrap_resolvers(&config.upstreams.bootstrap_resolvers)?;
 
-    let resolvers = config
-        .upstreams
-        .servers
-        .iter()
+    let resolvers = enabled_servers
+        .into_iter()
         .map(|server| build_single_upstream_resolver(server, &bootstrap_resolvers))
         .collect::<Result<Vec<_>>>()?;
 
@@ -96,6 +101,7 @@ mod tests {
         DnsFilterConfig {
             listen: ListenConfig {
                 dns: Some(SocketConfig {
+                    enabled: true,
                     address: "127.0.0.1".into(),
                     port: 5353,
                 }),
@@ -126,6 +132,7 @@ mod tests {
     #[test]
     fn build_upstream_resolver_accepts_dot_server() {
         let config = base_config(vec![UpstreamServer {
+            enabled: true,
             protocol: "dot".into(),
             address: "tls://1.1.1.1".into(),
         }]);
@@ -137,6 +144,7 @@ mod tests {
     #[test]
     fn build_upstream_resolver_rejects_unknown_protocol() {
         let config = base_config(vec![UpstreamServer {
+            enabled: true,
             protocol: "doh".into(),
             address: "https://dns.example.com/dns-query".into(),
         }]);
@@ -150,6 +158,7 @@ mod tests {
     #[test]
     fn build_upstream_resolver_rejects_malformed_dot_address() {
         let config = base_config(vec![UpstreamServer {
+            enabled: true,
             protocol: "dot".into(),
             address: "tls://dns_example.com".into(),
         }]);
@@ -163,6 +172,7 @@ mod tests {
     #[test]
     fn build_upstream_resolver_accepts_dot_hostname_server() {
         let config = base_config(vec![UpstreamServer {
+            enabled: true,
             protocol: "dot".into(),
             address: "tls://dns.example.com:853".into(),
         }]);
@@ -180,12 +190,48 @@ mod tests {
         let error = result.err().expect("expected error");
         assert!(error
             .to_string()
-            .contains("at least one upstream server is required"));
+            .contains("at least one enabled upstream server is required"));
+    }
+
+    #[test]
+    fn build_upstream_resolver_ignores_disabled_servers() {
+        let config = base_config(vec![
+            UpstreamServer {
+                enabled: false,
+                protocol: "doh".into(),
+                address: "https://dns.example.com/dns-query".into(),
+            },
+            UpstreamServer {
+                enabled: true,
+                protocol: "dns".into(),
+                address: "8.8.8.8:53".into(),
+            },
+        ]);
+
+        let resolver = build_upstream_resolver(&config);
+        assert!(resolver.is_ok());
+    }
+
+    #[test]
+    fn build_upstream_resolver_rejects_all_disabled_servers() {
+        let config = base_config(vec![UpstreamServer {
+            enabled: false,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+        }]);
+
+        let result = build_upstream_resolver(&config);
+        assert!(result.is_err());
+        let error = result.err().expect("expected error");
+        assert!(error
+            .to_string()
+            .contains("at least one enabled upstream server is required"));
     }
 
     #[test]
     fn build_upstream_resolver_rejects_invalid_bootstrap_resolver() {
         let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
             protocol: "dot".into(),
             address: "tls://dns.example.com:853".into(),
         }]);

@@ -25,12 +25,14 @@ pub struct ListenConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct SocketConfig {
+    pub enabled: bool,
     pub address: String,
     pub port: u16,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct TlsSocketConfig {
+    pub enabled: bool,
     pub address: String,
     pub port: u16,
     pub tls: TlsConfig,
@@ -107,6 +109,7 @@ fn default_bootstrap_resolvers() -> Vec<String> {
 
 #[derive(Debug, Deserialize)]
 pub struct UpstreamServer {
+    pub enabled: bool,
     pub protocol: String,
     pub address: String,
 }

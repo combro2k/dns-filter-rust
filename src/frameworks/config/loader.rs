@@ -64,6 +64,7 @@ mod tests {
         let yaml = r#"
 listen:
   dns:
+    enabled: true
     address: "127.0.0.1"
     port: 5353
   dot: null
@@ -93,6 +94,7 @@ logging:
         let yaml = r#"
 listen:
   dns:
+    enabled: true
     address: "0.0.0.0"
     port: 53
   dot: null
@@ -123,10 +125,77 @@ logging:
     }
 
     #[test]
+    fn reports_missing_enabled_for_listener() {
+        let yaml = r#"
+listen:
+  dns:
+    address: "127.0.0.1"
+    port: 5353
+  dot: null
+  doh: null
+  doq: null
+  http: null
+  metrics: null
+blocklists: []
+allowlists: []
+upstreams:
+  strategy: "round_robin"
+  servers: []
+logging:
+  syslog: null
+  file: null
+  stdout:
+    enabled: true
+    level: "info"
+"#;
+
+        let error = parse_config("missing-enabled.yaml", yaml).expect_err("parse should fail");
+        let message = format!("{error:#}");
+        assert!(message.contains("listen.dns"));
+        assert!(message.contains("missing field `enabled`"));
+    }
+
+    #[test]
+    fn reports_missing_enabled_for_upstream_server() {
+        let yaml = r#"
+listen:
+  dns:
+    enabled: true
+    address: "127.0.0.1"
+    port: 5353
+  dot: null
+  doh: null
+  doq: null
+  http: null
+  metrics: null
+blocklists: []
+allowlists: []
+upstreams:
+  strategy: "round_robin"
+  servers:
+    - protocol: "dns"
+      address: "8.8.8.8:53"
+logging:
+  syslog: null
+  file: null
+  stdout:
+    enabled: true
+    level: "info"
+"#;
+
+        let error =
+            parse_config("missing-upstream-enabled.yaml", yaml).expect_err("parse should fail");
+        let message = format!("{error:#}");
+        assert!(message.contains("upstreams.servers[0]"));
+        assert!(message.contains("missing field `enabled`"));
+    }
+
+    #[test]
     fn reports_line_column_and_field_path_on_parse_errors() {
         let yaml = r#"
 listen:
   dns:
+    enabled: true
     address: "127.0.0.1"
     port: "not-a-number"
   dot: null

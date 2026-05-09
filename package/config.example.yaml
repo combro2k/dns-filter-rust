@@ -1,8 +1,10 @@
 listen:
   dns:
+    enabled: true
     address: "0.0.0.0"
     port: 53
   dot:
+    enabled: false
     address: "0.0.0.0"
     port: 853
     tls:
@@ -10,6 +12,7 @@ listen:
       key_path: "/etc/dns-filter/key.pem"
       autogenerate: true
   doh:
+    enabled: false
     address: "0.0.0.0"
     port: 443
     tls:
@@ -17,6 +20,7 @@ listen:
       key_path: "/etc/dns-filter/key.pem"
       autogenerate: true
   doq:
+    enabled: false
     address: "0.0.0.0"
     port: 8853
     tls:
@@ -24,6 +28,7 @@ listen:
       key_path: "/etc/dns-filter/key.pem"
       autogenerate: true
   http:
+    enabled: false
     address: "0.0.0.0"
     port: 8080
   metrics:
@@ -50,11 +55,14 @@ upstreams:
   bootstrap_resolvers:
     - "1.1.1.1"
   servers:
-    - protocol: "doh"
+    - enabled: false
+      protocol: "doh"
       address: "https://dns.example.com/dns-query"
-    - protocol: "dot"
+    - enabled: false
+      protocol: "dot"
       address: "tls://1.1.1.1"
-    - protocol: "dns"
+    - enabled: true
+      protocol: "dns"
       address: "8.8.8.8:53"
 
 logging:

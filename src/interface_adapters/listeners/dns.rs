@@ -1,8 +1,390 @@
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use hickory_client::proto::op::{Message, MessageType, OpCode, ResponseCode};
+use thiserror::Error;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
+
+use crate::frameworks::config::schema::SocketConfig;
+use crate::use_cases::upstream_resolver::UpstreamResolver;
+
+/// Maximum size of a single UDP DNS datagram accepted by the listener.
+/// 4096 bytes covers EDNS0 responses without excessive allocation.
+const UDP_RECV_BUF: usize = 4096;
+
+/// Errors that can occur when creating or running a [`DnsServer`].
+#[derive(Debug, Error)]
+pub enum DnsListenerError {
+    #[error("invalid bind address '{addr}': {source}")]
+    InvalidAddress {
+        addr: String,
+        source: std::net::AddrParseError,
+    },
+    #[error("failed to bind {proto} on {addr}: {source}")]
+    BindFailed {
+        proto: &'static str,
+        addr: SocketAddr,
+        source: std::io::Error,
+    },
+    #[error("listener runtime error: {0}")]
+    Runtime(std::io::Error),
+}
+
+/// Protocol adapter identification stub.
 #[derive(Debug, Clone)]
 pub struct DnsAdapter;
 
 impl DnsAdapter {
     pub fn protocol_name(&self) -> &'static str {
         "dns"
+    }
+}
+
+/// DNS server that accepts queries over UDP and TCP (RFC 7766).
+///
+/// UDP uses standard datagram exchange.
+/// TCP uses the 2-byte length-prefix framing defined in RFC 7766.
+pub struct DnsServer {
+    bind_addr: SocketAddr,
+    resolver: Arc<dyn UpstreamResolver>,
+}
+
+impl DnsServer {
+    /// Creates a new `DnsServer` from a `SocketConfig` and an upstream resolver.
+    ///
+    /// Validates the bind address but does not open sockets until [`run`](DnsServer::run) is called.
+    pub fn new(
+        config: &SocketConfig,
+        resolver: Arc<dyn UpstreamResolver>,
+    ) -> Result<Self, DnsListenerError> {
+        let raw = format!("{}:{}", config.address, config.port);
+        let bind_addr =
+            raw.parse::<SocketAddr>()
+                .map_err(|e| DnsListenerError::InvalidAddress {
+                    addr: raw,
+                    source: e,
+                })?;
+        Ok(Self {
+            bind_addr,
+            resolver,
+        })
+    }
+
+    /// Binds UDP and TCP sockets and serves DNS queries until a fatal error occurs.
+    pub async fn run(self) -> Result<(), DnsListenerError> {
+        let udp =
+            UdpSocket::bind(self.bind_addr)
+                .await
+                .map_err(|e| DnsListenerError::BindFailed {
+                    proto: "UDP",
+                    addr: self.bind_addr,
+                    source: e,
+                })?;
+        let tcp =
+            TcpListener::bind(self.bind_addr)
+                .await
+                .map_err(|e| DnsListenerError::BindFailed {
+                    proto: "TCP",
+                    addr: self.bind_addr,
+                    source: e,
+                })?;
+
+        tracing::info!(addr = %self.bind_addr, "DNS listener bound (UDP + TCP)");
+
+        let resolver_for_udp = Arc::clone(&self.resolver);
+        let resolver_for_tcp = self.resolver;
+        let udp_task = tokio::spawn(run_udp(udp, resolver_for_udp));
+        let tcp_task = tokio::spawn(run_tcp(tcp, resolver_for_tcp));
+
+        tokio::select! {
+            result = udp_task => flatten_join(result),
+            result = tcp_task => flatten_join(result),
+        }
+    }
+}
+
+fn flatten_join(
+    result: Result<Result<(), DnsListenerError>, tokio::task::JoinError>,
+) -> Result<(), DnsListenerError> {
+    match result {
+        Ok(inner) => inner,
+        Err(e) => Err(DnsListenerError::Runtime(std::io::Error::other(
+            e.to_string(),
+        ))),
+    }
+}
+
+/// Drives the UDP receive loop, spawning a task per incoming datagram.
+async fn run_udp(
+    socket: UdpSocket,
+    resolver: Arc<dyn UpstreamResolver>,
+) -> Result<(), DnsListenerError> {
+    let socket = Arc::new(socket);
+    let mut buf = [0u8; UDP_RECV_BUF];
+
+    loop {
+        let (len, src) = socket
+            .recv_from(&mut buf)
+            .await
+            .map_err(DnsListenerError::Runtime)?;
+
+        let query = buf[..len].to_vec();
+        let socket = Arc::clone(&socket);
+        let resolver = Arc::clone(&resolver);
+
+        tokio::spawn(async move {
+            let response = forward_query(&resolver, &query).await;
+            if let Err(e) = socket.send_to(&response, src).await {
+                tracing::warn!(peer = %src, error = %e, "failed to send UDP DNS response");
+            }
+        });
+    }
+}
+
+/// Drives the TCP accept loop, spawning a task per incoming connection.
+async fn run_tcp(
+    listener: TcpListener,
+    resolver: Arc<dyn UpstreamResolver>,
+) -> Result<(), DnsListenerError> {
+    loop {
+        let (stream, src) = listener.accept().await.map_err(DnsListenerError::Runtime)?;
+        let resolver = Arc::clone(&resolver);
+
+        tokio::spawn(async move {
+            if let Err(e) = handle_tcp_conn(stream, &resolver).await {
+                tracing::warn!(peer = %src, error = %e, "DNS TCP connection error");
+            }
+        });
+    }
+}
+
+/// Handles a single TCP connection: reads RFC 7766 length-prefixed DNS messages and
+/// writes corresponding responses until the client closes the connection.
+async fn handle_tcp_conn(
+    mut stream: TcpStream,
+    resolver: &Arc<dyn UpstreamResolver>,
+) -> std::io::Result<()> {
+    loop {
+        let mut len_buf = [0u8; 2];
+        match stream.read_exact(&mut len_buf).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(e) => return Err(e),
+        }
+
+        let msg_len = u16::from_be_bytes(len_buf) as usize;
+        if msg_len == 0 {
+            continue;
+        }
+
+        let mut query = vec![0u8; msg_len];
+        stream.read_exact(&mut query).await?;
+
+        let response = forward_query(resolver, &query).await;
+        let write_len = response.len().min(u16::MAX as usize);
+        stream.write_all(&(write_len as u16).to_be_bytes()).await?;
+        stream.write_all(&response[..write_len]).await?;
+    }
+}
+
+/// Forwards a raw DNS query wire buffer to the upstream resolver.
+/// Returns a SERVFAIL response if resolution fails.
+async fn forward_query(resolver: &Arc<dyn UpstreamResolver>, query: &[u8]) -> Vec<u8> {
+    match resolver.resolve(query.to_vec()).await {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::warn!(error = %e, "upstream resolution failed; returning SERVFAIL");
+            build_servfail(query)
+        }
+    }
+}
+
+/// Constructs a DNS SERVFAIL response for the given raw query bytes.
+///
+/// Copies the message ID and question section from the query when parseable.
+/// Falls back to a minimal SERVFAIL with `id = 0` on parse failure.
+fn build_servfail(query_bytes: &[u8]) -> Vec<u8> {
+    let mut response = Message::new();
+    response.set_message_type(MessageType::Response);
+    response.set_op_code(OpCode::Query);
+    response.set_recursion_available(true);
+    response.set_response_code(ResponseCode::ServFail);
+
+    if let Ok(query) = Message::from_vec(query_bytes) {
+        response.set_id(query.id());
+        response.set_recursion_desired(query.recursion_desired());
+        for q in query.queries() {
+            response.add_query(q.clone());
+        }
+    }
+
+    response.to_vec().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use hickory_client::proto::op::{Message, MessageType, Query, ResponseCode};
+    use hickory_client::proto::rr::{DNSClass, RecordType};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use crate::frameworks::config::schema::SocketConfig;
+    use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
+
+    use super::*;
+
+    // ── Mock resolvers ───────────────────────────────────────────────────────
+
+    struct FixedResponseResolver(Vec<u8>);
+
+    #[async_trait]
+    impl UpstreamResolver for FixedResponseResolver {
+        async fn resolve(&self, _query: Vec<u8>) -> Result<Vec<u8>, UpstreamResolveError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct AlwaysFailResolver;
+
+    #[async_trait]
+    impl UpstreamResolver for AlwaysFailResolver {
+        async fn resolve(&self, _query: Vec<u8>) -> Result<Vec<u8>, UpstreamResolveError> {
+            Err(UpstreamResolveError::AllFailed)
+        }
+    }
+
+    // ── Wire-format helpers ──────────────────────────────────────────────────
+
+    fn make_query(domain: &str) -> Vec<u8> {
+        let mut msg = Message::new();
+        msg.set_id(42);
+        msg.set_recursion_desired(true);
+        let mut q = Query::new();
+        q.set_name(domain.parse().unwrap());
+        q.set_query_type(RecordType::A);
+        q.set_query_class(DNSClass::IN);
+        msg.add_query(q);
+        msg.to_vec().unwrap()
+    }
+
+    fn make_noerror_response(id: u16) -> Vec<u8> {
+        let mut msg = Message::new();
+        msg.set_id(id);
+        msg.set_message_type(MessageType::Response);
+        msg.set_response_code(ResponseCode::NoError);
+        msg.to_vec().unwrap()
+    }
+
+    // ── build_servfail ───────────────────────────────────────────────────────
+
+    #[test]
+    fn build_servfail_copies_query_id_and_question() {
+        let query = make_query("example.com.");
+        let servfail = build_servfail(&query);
+
+        let response = Message::from_vec(&servfail).expect("valid DNS message");
+        assert_eq!(response.id(), 42);
+        assert_eq!(response.response_code(), ResponseCode::ServFail);
+        assert_eq!(response.message_type(), MessageType::Response);
+        assert_eq!(response.queries().len(), 1);
+        assert_eq!(response.queries()[0].name().to_ascii(), "example.com.");
+    }
+
+    #[test]
+    fn build_servfail_on_empty_input_returns_id_zero() {
+        let servfail = build_servfail(&[]);
+
+        let response = Message::from_vec(&servfail).expect("valid DNS message");
+        assert_eq!(response.id(), 0);
+        assert_eq!(response.response_code(), ResponseCode::ServFail);
+        assert_eq!(response.message_type(), MessageType::Response);
+    }
+
+    // ── DnsServer::new ───────────────────────────────────────────────────────
+
+    #[test]
+    fn dns_server_new_accepts_valid_address() {
+        let cfg = SocketConfig {
+            enabled: true,
+            address: "127.0.0.1".into(),
+            port: 5353,
+        };
+        let resolver: Arc<dyn UpstreamResolver> = Arc::new(AlwaysFailResolver);
+        assert!(DnsServer::new(&cfg, resolver).is_ok());
+    }
+
+    #[test]
+    fn dns_server_new_rejects_invalid_address() {
+        let cfg = SocketConfig {
+            enabled: true,
+            address: "not-an-ip".into(),
+            port: 5353,
+        };
+        let resolver: Arc<dyn UpstreamResolver> = Arc::new(AlwaysFailResolver);
+        let err = match DnsServer::new(&cfg, resolver) {
+            Err(e) => e,
+            Ok(_) => panic!("expected an error for invalid address"),
+        };
+        assert!(err.to_string().contains("invalid bind address"));
+    }
+
+    // ── forward_query ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn forward_query_returns_upstream_response() {
+        let expected = make_noerror_response(42);
+        let resolver: Arc<dyn UpstreamResolver> = Arc::new(FixedResponseResolver(expected.clone()));
+        let result = forward_query(&resolver, &make_query("example.com.")).await;
+        assert_eq!(result, expected);
+    }
+
+    #[tokio::test]
+    async fn forward_query_returns_servfail_on_upstream_error() {
+        let resolver: Arc<dyn UpstreamResolver> = Arc::new(AlwaysFailResolver);
+        let result = forward_query(&resolver, &make_query("example.com.")).await;
+        let msg = Message::from_vec(&result).expect("valid DNS message");
+        assert_eq!(msg.response_code(), ResponseCode::ServFail);
+        assert_eq!(msg.id(), 42);
+    }
+
+    // ── TCP framing ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_tcp_conn_processes_length_prefixed_query_and_responds() {
+        let query = make_query("example.com.");
+        let expected_response = make_noerror_response(42);
+        let resolver: Arc<dyn UpstreamResolver> =
+            Arc::new(FixedResponseResolver(expected_response.clone()));
+
+        // Bind to an ephemeral port for an in-process TCP round-trip.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_resolver = Arc::clone(&resolver);
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_tcp_conn(stream, &server_resolver).await.unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(&(query.len() as u16).to_be_bytes())
+            .await
+            .unwrap();
+        client.write_all(&query).await.unwrap();
+        // Shut down the write side so the server sees EOF and exits cleanly.
+        client.shutdown().await.unwrap();
+
+        let mut resp_len_buf = [0u8; 2];
+        client.read_exact(&mut resp_len_buf).await.unwrap();
+        let resp_len = u16::from_be_bytes(resp_len_buf) as usize;
+        let mut resp_buf = vec![0u8; resp_len];
+        client.read_exact(&mut resp_buf).await.unwrap();
+
+        server_task.await.unwrap();
+        assert_eq!(resp_buf, expected_response);
     }
 }

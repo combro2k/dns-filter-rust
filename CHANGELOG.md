@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Added explicit `enabled` flags for listener sockets (`listen.dns|dot|doh|doq|http`) and upstream servers (`upstreams.servers[*]`), with runtime gating so disabled entries are not started/used
+- Updated composition root and upstream bootstrap behavior: DNS listener now requires `listen.dns.enabled: true`, and resolver construction now requires at least one enabled upstream server
+- Updated example configuration to set `enabled` on each listener and upstream entry, with only DNS listener and DNS upstream enabled for now
+- Added/updated tests for missing `enabled` parse failures, disabled-upstream filtering, and all-disabled upstream validation errors
+- Implemented default DNS UDP/TCP server in `src/interface_adapters/listeners/dns.rs`: `DnsServer` binds both a UDP socket and a TCP listener on the configured address/port, serves DNS queries concurrently, and maps upstream failures to SERVFAIL responses (RFC 2308)
+- TCP transport uses RFC 7766 2-byte length-prefix framing; each connection is handled in an isolated task so a single bad stream cannot stall the accept loop
+- Wired `DnsServer` startup into composition root (`src/main.rs`): validates that `listen.dns` is present and exits with a clear error message if it is not configured
+- Added unit tests for SERVFAIL construction, address validation, `forward_query` success/failure paths, and end-to-end TCP framing round-trip
 - Added `tokio::time::timeout` guard to `DnsUdpTcpClient::resolve_udp` and `resolve_tcp` so that a hung hickory background task can no longer stall the caller indefinitely
 - Added TLS connection caching to `DnsTlsClient`: TLS handshake is performed once and the resulting `DnssecClient` handle is reused across queries; stale connections are evicted on error and re-established transparently
 - Added TCP connection caching to `DnsUdpTcpClient::resolve_tcp`: TCP session is reused across truncated-response fallbacks; stale connections are evicted on error and re-established transparently
