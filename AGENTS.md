@@ -37,6 +37,8 @@ impl AgentHandler for ConcreteAgentA {
 ## Project Rules
 - **Always add changes to `CHANGELOG.md`**
 - **Always add cargo tests if implementing a new feature**
+- **Always run `cargo fmt` and `cargo clippy --all -- -D warnings` before committing**
+- **Code must not contain any formatting errors or clippy warnings/errors**
 
 ## File Conventions
 - `AGENTS.md`: Documents agent architecture and design patterns

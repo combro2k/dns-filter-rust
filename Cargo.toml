@@ -1,0 +1,18 @@
+[package]
+name = "dns-filter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+prometheus = "0.13"
+hyper = { version = "0.14", features = ["full"] }
+trust-dns-server = "0.22"
+trust-dns-proto = "0.22"
+trust-dns-client = "0.22"
+thiserror = "1.0"
+anyhow = "1.0"

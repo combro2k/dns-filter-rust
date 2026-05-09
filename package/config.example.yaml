@@ -1,0 +1,67 @@
+listen:
+  dns:
+    address: "0.0.0.0"
+    port: 53
+  dot:
+    address: "0.0.0.0"
+    port: 853
+    tls:
+      cert_path: "/etc/dns-filter/cert.pem"
+      key_path: "/etc/dns-filter/key.pem"
+      autogenerate: true
+  doh:
+    address: "0.0.0.0"
+    port: 443
+    tls:
+      cert_path: "/etc/dns-filter/cert.pem"
+      key_path: "/etc/dns-filter/key.pem"
+      autogenerate: true
+  doq:
+    address: "0.0.0.0"
+    port: 8853
+    tls:
+      cert_path: "/etc/dns-filter/cert.pem"
+      key_path: "/etc/dns-filter/key.pem"
+      autogenerate: true
+  http:
+    address: "0.0.0.0"
+    port: 8080
+  metrics:
+    enabled: false
+    address: "127.0.0.1"
+    port: 9100
+
+blocklists:
+  - adguard_base:
+      url: "https://raw.githubusercontent.com/AdguardTeam/FiltersRegistry/master/filters/filter_2_Base/filter.txt"
+  - custom_ads:
+      url: "https://example.com/myadblock.txt"
+
+allowlists:
+  - corporate_allow:
+      url: "https://example.com/allowlist.txt"
+  - local_allow:
+      url: "/etc/dns-filter/allowlist.txt"
+
+upstreams:
+  strategy: "round_robin"
+  servers:
+    - protocol: "doh"
+      address: "https://dns.example.com/dns-query"
+    - protocol: "dot"
+      address: "tls://1.1.1.1"
+    - protocol: "dns"
+      address: "8.8.8.8:53"
+
+logging:
+  syslog:
+    enabled: true
+    facility: local0
+    level: info
+  file:
+    enabled: false
+    location: /var/log/dns-filter.log
+    level: debug
+  stdout:
+    enabled: true
+    level: error
