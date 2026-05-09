@@ -27,5 +27,8 @@ Thumbs.db
 /test-output/
 /coverage/
 
+# own plan file
+PLAN.md
+
 # By default, ignore all backup and temp files
 *~
