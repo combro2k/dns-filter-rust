@@ -1,4 +1,6 @@
+use std::fmt;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -10,21 +12,40 @@ use hickory_client::proto::tcp::TcpClientStream;
 use hickory_client::proto::udp::UdpClientStream;
 use hickory_client::proto::xfer::DnsMultiplexer;
 
+use tokio::sync::Mutex;
+
 use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
 
 const UDP_TIMEOUT: Duration = Duration::from_secs(5);
 const TCP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// A cached TCP DNS client connection shared across queries.
+///
+/// `DnssecClient` does not implement `Debug`, so we wrap the cache in a newtype
+/// that provides a no-op `Debug` impl so that `DnsUdpTcpClient` can still derive it.
+#[derive(Clone, Default)]
+struct TcpClientCache(Arc<Mutex<Option<DnssecClient>>>);
+
+impl fmt::Debug for TcpClientCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TcpClientCache").finish_non_exhaustive()
+    }
+}
+
 /// DNS resolver that sends queries over UDP and falls back to TCP when the response
 /// is truncated (TC bit set), per RFC 5966.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DnsUdpTcpClient {
     address: SocketAddr,
+    tcp_cache: TcpClientCache,
 }
 
 impl DnsUdpTcpClient {
     pub fn new(address: SocketAddr) -> Self {
-        Self { address }
+        Self {
+            address,
+            tcp_cache: TcpClientCache::default(),
+        }
     }
 
     fn extract_question(
@@ -56,10 +77,11 @@ impl DnsUdpTcpClient {
 
         tokio::spawn(background);
 
-        let response = client
-            .query(name, query_class, query_type)
-            .await
-            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
+        let response =
+            tokio::time::timeout(UDP_TIMEOUT, client.query(name, query_class, query_type))
+                .await
+                .map_err(|_| UpstreamResolveError::Timeout)?
+                .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
 
         response
             .to_vec()
@@ -68,6 +90,29 @@ impl DnsUdpTcpClient {
 
     async fn resolve_tcp(&self, query: &[u8]) -> Result<Vec<u8>, UpstreamResolveError> {
         let (name, query_class, query_type) = Self::extract_question(query)?;
+
+        // Try the cached TCP connection first (clone to release the lock before I/O).
+        let cached = self.tcp_cache.0.lock().await.clone();
+        if let Some(mut client) = cached {
+            match tokio::time::timeout(
+                TCP_TIMEOUT,
+                client.query(name.clone(), query_class, query_type),
+            )
+            .await
+            {
+                Ok(Ok(response)) => {
+                    return response
+                        .to_vec()
+                        .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")));
+                }
+                _ => {
+                    // Stale connection — evict and fall through to reconnect.
+                    *self.tcp_cache.0.lock().await = None;
+                }
+            }
+        }
+
+        // Establish a fresh TCP connection.
         let provider = TokioRuntimeProvider::default();
         let (tcp_stream, sender) =
             TcpClientStream::new(self.address, None, Some(TCP_TIMEOUT), provider);
@@ -78,10 +123,14 @@ impl DnsUdpTcpClient {
 
         tokio::spawn(background);
 
-        let response = client
-            .query(name, query_class, query_type)
-            .await
-            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
+        let response =
+            tokio::time::timeout(TCP_TIMEOUT, client.query(name, query_class, query_type))
+                .await
+                .map_err(|_| UpstreamResolveError::Timeout)?
+                .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
+
+        // Cache the connection for subsequent queries.
+        *self.tcp_cache.0.lock().await = Some(client.clone());
 
         response
             .to_vec()

@@ -1,3 +1,4 @@
+use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,6 +10,7 @@ use hickory_client::proto::rr::{DNSClass, Name, RecordType};
 use hickory_client::proto::runtime::TokioRuntimeProvider;
 use hickory_client::proto::rustls::{client_config, tls_client_connect};
 use hickory_client::proto::xfer::DnsMultiplexer;
+use tokio::sync::Mutex;
 
 use crate::frameworks::upstream::DnsUdpTcpClient;
 use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
@@ -16,12 +18,26 @@ use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver
 const DOT_DEFAULT_PORT: u16 = 853;
 const DOT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// A cached DoT client connection shared across queries.
+///
+/// `DnssecClient` does not implement `Debug`, so we wrap the cache in a newtype
+/// that provides a no-op `Debug` impl so that `DnsTlsClient` can still derive it.
+#[derive(Clone, Default)]
+struct ClientCache(Arc<Mutex<Option<DnssecClient>>>);
+
+impl fmt::Debug for ClientCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientCache").finish_non_exhaustive()
+    }
+}
+
 /// DNS resolver that sends queries over DNS-over-TLS (DoT).
 #[derive(Debug, Clone)]
 pub struct DnsTlsClient {
     endpoint: DotEndpoint,
     server_name: String,
     bootstrap_resolvers: Vec<SocketAddr>,
+    client_cache: ClientCache,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +52,7 @@ impl DnsTlsClient {
             endpoint: DotEndpoint::Static(address),
             server_name,
             bootstrap_resolvers: vec![SocketAddr::new(IpAddr::from([1, 1, 1, 1]), 53)],
+            client_cache: ClientCache::default(),
         }
     }
 
@@ -45,6 +62,7 @@ impl DnsTlsClient {
             endpoint: DotEndpoint::Hostname { host, port },
             server_name,
             bootstrap_resolvers: vec![SocketAddr::new(IpAddr::from([1, 1, 1, 1]), 53)],
+            client_cache: ClientCache::default(),
         }
     }
 
@@ -157,6 +175,29 @@ impl DnsTlsClient {
 
     async fn resolve_dot(&self, query: &[u8]) -> Result<Vec<u8>, UpstreamResolveError> {
         let (name, query_class, query_type) = Self::extract_question(query)?;
+
+        // Try the cached TLS connection first (clone to release the lock before I/O).
+        let cached = self.client_cache.0.lock().await.clone();
+        if let Some(mut client) = cached {
+            match tokio::time::timeout(
+                DOT_TIMEOUT,
+                client.query(name.clone(), query_class, query_type),
+            )
+            .await
+            {
+                Ok(Ok(response)) => {
+                    return response
+                        .to_vec()
+                        .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")));
+                }
+                _ => {
+                    // Stale connection — evict and fall through to reconnect.
+                    *self.client_cache.0.lock().await = None;
+                }
+            }
+        }
+
+        // Establish a fresh TLS connection.
         let address = self.resolve_address().await?;
         let provider = TokioRuntimeProvider::default();
         let tls_config = Arc::new(client_config());
@@ -174,6 +215,9 @@ impl DnsTlsClient {
                 .await
                 .map_err(|_| UpstreamResolveError::Timeout)?
                 .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
+
+        // Cache the connection for subsequent queries.
+        *self.client_cache.0.lock().await = Some(client.clone());
 
         response
             .to_vec()

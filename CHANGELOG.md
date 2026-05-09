@@ -3,6 +3,9 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Added `tokio::time::timeout` guard to `DnsUdpTcpClient::resolve_udp` and `resolve_tcp` so that a hung hickory background task can no longer stall the caller indefinitely
+- Added TLS connection caching to `DnsTlsClient`: TLS handshake is performed once and the resulting `DnssecClient` handle is reused across queries; stale connections are evicted on error and re-established transparently
+- Added TCP connection caching to `DnsUdpTcpClient::resolve_tcp`: TCP session is reused across truncated-response fallbacks; stale connections are evicted on error and re-established transparently
 - Added `upstreams.bootstrap_resolvers` config (default: `1.1.1.1`) to bootstrap DoT hostname resolution when OS DNS is unavailable
 - Implemented DoT hostname resolution fallback in `DnsTlsClient`: tries OS lookup first, then queries configured bootstrap resolvers for A/AAAA records
 - Extended DoT upstream parsing to support hostname endpoints (for example `tls://dns.example.com:853`) with hostname-based SNI and runtime hostname resolution
