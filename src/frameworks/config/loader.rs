@@ -51,7 +51,7 @@ fn hint_for_path(field_path: &str) -> &'static str {
     } else if field_path.starts_with("logging") {
         "Check each logging target uses the expected keys (enabled/level and location for file logging)."
     } else if field_path.starts_with("filtering") {
-        "Check filtering fields (sinkhole_ipv4/sinkhole_ipv6) and optional cache config: mode is 'memory' or 'sqlite', with optional document_path."
+        "Check filtering fields (sinkhole_ipv4/sinkhole_ipv6), optional any_query_policy ('passthrough', 'refused', or 'notimp'), and optional cache config: mode is 'memory' or 'sqlite', with optional document_path."
     } else {
         "Check YAML indentation and value types in this section."
     }
@@ -292,6 +292,7 @@ allowlists: []
 filtering:
   sinkhole_ipv4: "0.0.0.0"
   sinkhole_ipv6: "::"
+  any_query_policy: "refused"
   cache:
     mode: "sqlite"
     document_path: "package/cache/filter-cache.db"
@@ -308,6 +309,7 @@ logging:
 
         let parsed = parse_config("filtering-cache.yaml", yaml).expect("config should parse");
         let filtering = parsed.filtering.expect("filtering config should exist");
+        assert_eq!(filtering.any_query_policy.as_deref(), Some("refused"));
         let cache = filtering.cache.expect("cache config should exist");
         assert_eq!(cache.mode.as_deref(), Some("sqlite"));
         assert_eq!(

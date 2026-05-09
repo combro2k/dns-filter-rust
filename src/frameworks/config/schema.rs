@@ -121,6 +121,7 @@ impl<'de> Deserialize<'de> for NamedList {
 pub struct FilteringConfig {
     pub sinkhole_ipv4: Option<String>,
     pub sinkhole_ipv6: Option<String>,
+    pub any_query_policy: Option<String>,
     pub cache: Option<FilteringCacheConfig>,
 }
 

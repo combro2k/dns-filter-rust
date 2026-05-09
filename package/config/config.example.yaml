@@ -61,6 +61,11 @@ allowlists:
 filtering:
   sinkhole_ipv4: "0.0.0.0"
   sinkhole_ipv6: "::"
+  # Optional policy for incoming QTYPE=ANY queries:
+  # - "notimp" (default): reply NOTIMP locally, matching RFC 8482 behavior
+  # - "refused": reply REFUSED locally
+  # - "passthrough": forward ANY upstream as-is (may cause SERVFAIL noise)
+  any_query_policy: "notimp"
   # Optional persistent document cache for warm starts.
   # mode: "memory" (default) keeps cache in RAM only.
   # mode: "sqlite" persists list documents to a local SQLite file.
@@ -76,6 +81,27 @@ upstreams:
     - enabled: true
       protocol: "dns"
       address: "8.8.8.8:53"
+    - enabled: false
+      protocol: "dns"
+      address: "1.1.1.1:53"
+    - enabled: false
+      protocol: "dot"
+      address: "dns.google:853"
+      tls:
+        cert_path: "/etc/dns-filter/upstream-cert.pem"
+        autogenerate: true
+    - enabled: false
+      protocol: "doh"
+      address: "https://dns.google/dns-query"
+      tls:
+        cert_path: "/etc/dns-filter/upstream-cert.pem"
+        autogenerate: true
+    - enabled: false
+      protocol: "doq"
+      address: "dns.google:8853"
+      tls:
+        cert_path: "/etc/dns-filter/upstream-cert.pem"
+        autogenerate: true
 
 logging:
   syslog:

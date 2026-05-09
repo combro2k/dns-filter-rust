@@ -9,7 +9,8 @@ use crate::frameworks::config::schema::{DnsFilterConfig, UpstreamServer};
 use crate::frameworks::upstream::{DnsTlsClient, DnsUdpTcpClient};
 use crate::use_cases::filtering::{parse_interval, DomainFilter, ListFilterEngine};
 use crate::use_cases::request_pipeline::{
-    DnsFilterStage, DnsRequestPipeline, DnsServfailFallbackStage, DnsUpstreamStage,
+    AnyQueryPolicy, DnsAnyQueryPolicyStage, DnsFilterStage, DnsRequestPipeline,
+    DnsServfailFallbackStage, DnsUpstreamStage,
 };
 use crate::use_cases::upstream_resolver::{StrategyUpstreamResolver, UpstreamResolver};
 
@@ -60,12 +61,33 @@ pub fn build_domain_filter(config: &DnsFilterConfig) -> Result<Arc<dyn DomainFil
     Ok(Arc::new(engine))
 }
 
+pub fn build_any_query_policy(config: &DnsFilterConfig) -> Result<AnyQueryPolicy> {
+    let Some(policy) = config
+        .filtering
+        .as_ref()
+        .and_then(|filtering| filtering.any_query_policy.as_deref())
+    else {
+        return Ok(AnyQueryPolicy::NotImp);
+    };
+
+    match policy.trim().to_ascii_lowercase().as_str() {
+        "passthrough" => Ok(AnyQueryPolicy::Passthrough),
+        "refused" => Ok(AnyQueryPolicy::Refused),
+        "notimp" | "not_imp" => Ok(AnyQueryPolicy::NotImp),
+        other => bail!(
+            "invalid filtering.any_query_policy: {other}; supported values are: passthrough, refused, notimp"
+        ),
+    }
+}
+
 pub fn build_dns_request_pipeline(
     resolver: Arc<dyn UpstreamResolver>,
     filter: Arc<dyn DomainFilter>,
+    any_query_policy: AnyQueryPolicy,
 ) -> DnsRequestPipeline {
     DnsRequestPipeline::default()
         .add_stage(DnsFilterStage::new(filter))
+        .add_stage(DnsAnyQueryPolicyStage::new(any_query_policy))
         .add_stage(DnsUpstreamStage::new(resolver))
         .add_stage(DnsServfailFallbackStage)
 }
@@ -328,11 +350,75 @@ mod tests {
         config.filtering = Some(FilteringConfig {
             sinkhole_ipv4: Some("10.10.10.10".into()),
             sinkhole_ipv6: Some("fd00::1".into()),
+            any_query_policy: None,
             cache: None,
         });
 
         let filter = build_domain_filter(&config).expect("domain filter should build");
         assert_eq!(filter.sinkhole_ipv4().to_string(), "10.10.10.10");
         assert_eq!(filter.sinkhole_ipv6().to_string(), "fd00::1");
+    }
+
+    #[test]
+    fn build_any_query_policy_defaults_to_notimp() {
+        let config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+        }]);
+
+        let policy = build_any_query_policy(&config).expect("policy should parse");
+        assert_eq!(policy, AnyQueryPolicy::NotImp);
+    }
+
+    #[test]
+    fn build_any_query_policy_accepts_refused_and_notimp() {
+        let mut refused_config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+        }]);
+        refused_config.filtering = Some(FilteringConfig {
+            sinkhole_ipv4: None,
+            sinkhole_ipv6: None,
+            any_query_policy: Some("refused".into()),
+            cache: None,
+        });
+
+        let refused = build_any_query_policy(&refused_config).expect("policy should parse");
+        assert_eq!(refused, AnyQueryPolicy::Refused);
+
+        let mut notimp_config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+        }]);
+        notimp_config.filtering = Some(FilteringConfig {
+            sinkhole_ipv4: None,
+            sinkhole_ipv6: None,
+            any_query_policy: Some("notimp".into()),
+            cache: None,
+        });
+
+        let notimp = build_any_query_policy(&notimp_config).expect("policy should parse");
+        assert_eq!(notimp, AnyQueryPolicy::NotImp);
+    }
+
+    #[test]
+    fn build_any_query_policy_rejects_invalid_value() {
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+        }]);
+        config.filtering = Some(FilteringConfig {
+            sinkhole_ipv4: None,
+            sinkhole_ipv6: None,
+            any_query_policy: Some("bad-value".into()),
+            cache: None,
+        });
+
+        let result = build_any_query_policy(&config);
+        assert!(result.is_err());
     }
 }

@@ -234,7 +234,7 @@ mod tests {
     use crate::frameworks::config::schema::SocketConfig;
     use crate::use_cases::config_bootstrap::build_dns_request_pipeline;
     use crate::use_cases::filtering::DomainFilter;
-    use crate::use_cases::request_pipeline::DnsRequestPipeline;
+    use crate::use_cases::request_pipeline::{AnyQueryPolicy, DnsRequestPipeline};
     use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
 
     use super::*;
@@ -318,7 +318,9 @@ mod tests {
         filter: Arc<dyn DomainFilter>,
     ) -> Arc<Mutex<Arc<DnsRequestPipeline>>> {
         Arc::new(Mutex::new(Arc::new(build_dns_request_pipeline(
-            resolver, filter,
+            resolver,
+            filter,
+            AnyQueryPolicy::Passthrough,
         ))))
     }
 

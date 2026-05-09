@@ -764,6 +764,7 @@ mod tests {
         let filtering = FilteringConfig {
             sinkhole_ipv4: None,
             sinkhole_ipv6: None,
+            any_query_policy: None,
             cache: Some(FilteringCacheConfig {
                 mode: Some("sqlite".into()),
                 document_path: Some("/tmp/dns-filter-cache.db".into()),
@@ -784,6 +785,7 @@ mod tests {
         let filtering = FilteringConfig {
             sinkhole_ipv4: None,
             sinkhole_ipv6: None,
+            any_query_policy: None,
             cache: Some(FilteringCacheConfig {
                 mode: Some("bad-mode".into()),
                 document_path: None,

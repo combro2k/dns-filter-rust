@@ -134,6 +134,14 @@ pub enum DnsPipelineError {
     Upstream(#[from] UpstreamResolveError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AnyQueryPolicy {
+    Passthrough,
+    Refused,
+    #[default]
+    NotImp,
+}
+
 pub type DnsRequestPipeline =
     AsyncPipelineHandler<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError>;
 
@@ -213,6 +221,60 @@ impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError
     }
 }
 
+pub struct DnsAnyQueryPolicyStage {
+    policy: AnyQueryPolicy,
+}
+
+impl DnsAnyQueryPolicyStage {
+    pub fn new(policy: AnyQueryPolicy) -> Self {
+        Self { policy }
+    }
+}
+
+#[async_trait]
+impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError>
+    for DnsAnyQueryPolicyStage
+{
+    async fn handle(
+        &self,
+        request: &DnsPipelineRequest,
+    ) -> Result<Option<DnsPipelineResponse>, DnsPipelineError> {
+        if matches!(self.policy, AnyQueryPolicy::Passthrough) {
+            return Ok(None);
+        }
+
+        let Ok(message) = Message::from_vec(&request.query) else {
+            return Ok(None);
+        };
+
+        let Some(first_query) = message.queries().first() else {
+            return Ok(None);
+        };
+
+        if first_query.query_type() != RecordType::ANY {
+            return Ok(None);
+        }
+
+        let response_code = match self.policy {
+            AnyQueryPolicy::Passthrough => return Ok(None),
+            AnyQueryPolicy::Refused => ResponseCode::Refused,
+            AnyQueryPolicy::NotImp => ResponseCode::NotImp,
+        };
+
+        tracing::info!(
+            domain = %first_query.name().to_ascii(),
+            policy = ?self.policy,
+            response_code = ?response_code,
+            "ANY query handled by policy"
+        );
+
+        Ok(Some(DnsPipelineResponse::new(build_error_response(
+            &request.query,
+            response_code,
+        ))))
+    }
+}
+
 pub struct DnsServfailFallbackStage;
 
 #[async_trait]
@@ -275,11 +337,15 @@ fn make_aaaa_record(name: hickory_client::proto::rr::Name, addr: Ipv6Addr) -> Re
 }
 
 pub fn build_servfail_response(query_bytes: &[u8]) -> Vec<u8> {
+    build_error_response(query_bytes, ResponseCode::ServFail)
+}
+
+fn build_error_response(query_bytes: &[u8], response_code: ResponseCode) -> Vec<u8> {
     let mut response = Message::new();
     response.set_message_type(MessageType::Response);
     response.set_op_code(OpCode::Query);
     response.set_recursion_available(true);
-    response.set_response_code(ResponseCode::ServFail);
+    response.set_response_code(response_code);
 
     if let Ok(query) = Message::from_vec(query_bytes) {
         response.set_id(query.id());
@@ -539,16 +605,20 @@ mod tests {
         fn start_background_refresh(self: Arc<Self>) {}
     }
 
-    fn make_query(domain: &str) -> Vec<u8> {
+    fn make_query_with_type(domain: &str, record_type: RecordType) -> Vec<u8> {
         let mut msg = Message::new();
         msg.set_id(42);
         msg.set_recursion_desired(true);
         let mut q = Query::new();
         q.set_name(domain.parse().unwrap());
-        q.set_query_type(RecordType::A);
+        q.set_query_type(record_type);
         q.set_query_class(DNSClass::IN);
         msg.add_query(q);
         msg.to_vec().unwrap()
+    }
+
+    fn make_query(domain: &str) -> Vec<u8> {
+        make_query_with_type(domain, RecordType::A)
     }
 
     fn make_noerror_response(id: u16) -> Vec<u8> {
@@ -568,6 +638,7 @@ mod tests {
 
         let pipeline = DnsRequestPipeline::default()
             .add_stage(DnsFilterStage::new(filter))
+            .add_stage(DnsAnyQueryPolicyStage::new(AnyQueryPolicy::Passthrough))
             .add_stage(DnsUpstreamStage::new(resolver))
             .add_stage(DnsServfailFallbackStage);
 
@@ -593,6 +664,7 @@ mod tests {
 
         let pipeline = DnsRequestPipeline::default()
             .add_stage(DnsFilterStage::new(filter))
+            .add_stage(DnsAnyQueryPolicyStage::new(AnyQueryPolicy::Passthrough))
             .add_stage(DnsUpstreamStage::new(resolver))
             .add_stage(DnsServfailFallbackStage);
 
@@ -611,12 +683,70 @@ mod tests {
     #[tokio::test]
     async fn dns_pipeline_returns_error_when_upstream_fails_without_fallback() {
         let resolver: Arc<dyn UpstreamResolver> = Arc::new(AlwaysFailResolver);
-        let pipeline = DnsRequestPipeline::default().add_stage(DnsUpstreamStage::new(resolver));
+        let pipeline = DnsRequestPipeline::default()
+            .add_stage(DnsAnyQueryPolicyStage::new(AnyQueryPolicy::Passthrough))
+            .add_stage(DnsUpstreamStage::new(resolver));
 
         let result = pipeline
             .handle_request(&DnsPipelineRequest::new(make_query("example.com.")))
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn dns_pipeline_refuses_any_query_before_upstream() {
+        let filter: Arc<dyn DomainFilter> = Arc::new(TestDomainFilter {
+            decision: FilterDecision::Neutral,
+        });
+        let resolver: Arc<dyn UpstreamResolver> = Arc::new(AlwaysFailResolver);
+
+        let pipeline = DnsRequestPipeline::default()
+            .add_stage(DnsFilterStage::new(filter))
+            .add_stage(DnsAnyQueryPolicyStage::new(AnyQueryPolicy::Refused))
+            .add_stage(DnsUpstreamStage::new(resolver))
+            .add_stage(DnsServfailFallbackStage);
+
+        let response = pipeline
+            .handle_request(&DnsPipelineRequest::new(make_query_with_type(
+                "example.com.",
+                RecordType::ANY,
+            )))
+            .await
+            .expect("pipeline should not error")
+            .expect("pipeline should return a response")
+            .into_bytes();
+
+        let message = Message::from_vec(&response).expect("valid DNS message");
+        assert_eq!(message.id(), 42);
+        assert_eq!(message.response_code(), ResponseCode::Refused);
+    }
+
+    #[tokio::test]
+    async fn dns_pipeline_notimp_any_query_before_upstream() {
+        let filter: Arc<dyn DomainFilter> = Arc::new(TestDomainFilter {
+            decision: FilterDecision::Neutral,
+        });
+        let resolver: Arc<dyn UpstreamResolver> = Arc::new(AlwaysFailResolver);
+
+        let pipeline = DnsRequestPipeline::default()
+            .add_stage(DnsFilterStage::new(filter))
+            .add_stage(DnsAnyQueryPolicyStage::new(AnyQueryPolicy::NotImp))
+            .add_stage(DnsUpstreamStage::new(resolver))
+            .add_stage(DnsServfailFallbackStage);
+
+        let response = pipeline
+            .handle_request(&DnsPipelineRequest::new(make_query_with_type(
+                "example.com.",
+                RecordType::ANY,
+            )))
+            .await
+            .expect("pipeline should not error")
+            .expect("pipeline should return a response")
+            .into_bytes();
+
+        let message = Message::from_vec(&response).expect("valid DNS message");
+        assert_eq!(message.id(), 42);
+        assert_eq!(message.response_code(), ResponseCode::NotImp);
     }
 }

@@ -77,7 +77,7 @@ logging:
         }
         assert!(result.is_ok(), "should succeed with valid config");
 
-        let (resolver, filter) = result.expect("unwrap result");
+        let (resolver, filter, _policy) = result.expect("unwrap result");
         // Verify we got valid instances by checking they are not null
         let resolver_ptr = &*resolver as *const _ as *const ();
         let filter_ptr = &*filter as *const _ as *const ();

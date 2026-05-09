@@ -6,7 +6,8 @@ use dns_filter::frameworks::config::loader::load_config;
 use dns_filter::frameworks::signal_handler::setup_sighup_handler;
 use dns_filter::interface_adapters::listeners::dns::DnsServer;
 use dns_filter::use_cases::config_bootstrap::{
-    build_dns_request_pipeline, build_domain_filter, build_upstream_resolver, validate_config,
+    build_any_query_policy, build_dns_request_pipeline, build_domain_filter,
+    build_upstream_resolver, validate_config,
 };
 use dns_filter::use_cases::reload::reload_config;
 
@@ -115,8 +116,19 @@ async fn main() {
     };
     domain_filter.clone().start_background_refresh();
 
-    let request_pipeline =
-        build_dns_request_pipeline(Arc::clone(&upstream_resolver), Arc::clone(&domain_filter));
+    let any_query_policy = match build_any_query_policy(&config) {
+        Ok(policy) => policy,
+        Err(e) => {
+            eprintln!("invalid filtering configuration: {e:#}");
+            std::process::exit(1);
+        }
+    };
+
+    let request_pipeline = build_dns_request_pipeline(
+        Arc::clone(&upstream_resolver),
+        Arc::clone(&domain_filter),
+        any_query_policy,
+    );
 
     let Some(dns_config) = config.listen.dns.as_ref().filter(|cfg| cfg.enabled) else {
         eprintln!(
@@ -152,10 +164,13 @@ async fn main() {
     let reload_task = tokio::spawn(async move {
         while sighup_rx.recv().await.is_some() {
             match reload_config(&config_path_for_reload) {
-                Ok((new_resolver, new_filter)) => {
+                Ok((new_resolver, new_filter, new_any_query_policy)) => {
                     new_filter.clone().start_background_refresh();
-                    let new_pipeline =
-                        Arc::new(build_dns_request_pipeline(new_resolver, new_filter));
+                    let new_pipeline = Arc::new(build_dns_request_pipeline(
+                        new_resolver,
+                        new_filter,
+                        new_any_query_policy,
+                    ));
                     let mut pipeline_lock = pipeline_slot_for_reload.lock().await;
                     *pipeline_lock = new_pipeline;
                     tracing::info!("Configuration reloaded successfully");
