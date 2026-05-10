@@ -48,7 +48,7 @@ impl DnsAdapter {
 /// UDP uses standard datagram exchange.
 /// TCP uses the 2-byte length-prefix framing defined in RFC 7766.
 pub struct DnsServer {
-    bind_addr: SocketAddr,
+    bind_addrs: Vec<SocketAddr>,
     pipeline_slot: Arc<Mutex<Arc<DnsRequestPipeline>>>,
 }
 
@@ -56,54 +56,66 @@ impl DnsServer {
     /// Creates a new `DnsServer` from a `SocketConfig` and request pipeline slot.
     ///
     /// The pipeline is wrapped in a Mutex to allow atomic state swapping on reload.
-    /// Validates the bind address but does not open sockets until [`run`](DnsServer::run) is called.
+    /// Validates the bind addresses but does not open sockets until [`run`](DnsServer::run) is called.
     pub fn new(
         config: &SocketConfig,
         pipeline_slot: Arc<Mutex<Arc<DnsRequestPipeline>>>,
     ) -> Result<Self, DnsListenerError> {
-        let raw = format!("{}:{}", config.address, config.port);
-        let bind_addr =
-            raw.parse::<SocketAddr>()
-                .map_err(|e| DnsListenerError::InvalidAddress {
-                    addr: raw,
-                    source: e,
-                })?;
+        let mut bind_addrs = Vec::with_capacity(config.addresses.len());
+        for addr in &config.addresses {
+            let raw = if addr.contains(':') {
+                format!("[{addr}]:{}", config.port)
+            } else {
+                format!("{addr}:{}", config.port)
+            };
+            let parsed =
+                raw.parse::<SocketAddr>()
+                    .map_err(|e| DnsListenerError::InvalidAddress {
+                        addr: raw,
+                        source: e,
+                    })?;
+            bind_addrs.push(parsed);
+        }
         Ok(Self {
-            bind_addr,
+            bind_addrs,
             pipeline_slot,
         })
     }
 
-    /// Binds UDP and TCP sockets and serves DNS queries until a fatal error occurs.
+    /// Binds UDP and TCP sockets on all configured addresses and serves DNS queries
+    /// until a fatal error occurs.
     pub async fn run(self) -> Result<(), DnsListenerError> {
-        let udp =
-            UdpSocket::bind(self.bind_addr)
-                .await
-                .map_err(|e| DnsListenerError::BindFailed {
-                    proto: "UDP",
-                    addr: self.bind_addr,
-                    source: e,
-                })?;
-        let tcp =
-            TcpListener::bind(self.bind_addr)
-                .await
-                .map_err(|e| DnsListenerError::BindFailed {
-                    proto: "TCP",
-                    addr: self.bind_addr,
-                    source: e,
-                })?;
+        let mut tasks = Vec::new();
 
-        tracing::info!(addr = %self.bind_addr, "DNS listener bound (UDP + TCP)");
+        for bind_addr in &self.bind_addrs {
+            let udp =
+                UdpSocket::bind(bind_addr)
+                    .await
+                    .map_err(|e| DnsListenerError::BindFailed {
+                        proto: "UDP",
+                        addr: *bind_addr,
+                        source: e,
+                    })?;
+            let tcp =
+                TcpListener::bind(bind_addr)
+                    .await
+                    .map_err(|e| DnsListenerError::BindFailed {
+                        proto: "TCP",
+                        addr: *bind_addr,
+                        source: e,
+                    })?;
 
-        let pipeline_slot_for_udp = Arc::clone(&self.pipeline_slot);
-        let pipeline_slot_for_tcp = self.pipeline_slot;
-        let udp_task = tokio::spawn(run_udp(udp, pipeline_slot_for_udp));
-        let tcp_task = tokio::spawn(run_tcp(tcp, pipeline_slot_for_tcp));
+            tracing::info!(addr = %bind_addr, "DNS listener bound (UDP + TCP)");
 
-        tokio::select! {
-            result = udp_task => flatten_join(result),
-            result = tcp_task => flatten_join(result),
+            let pipeline_udp = Arc::clone(&self.pipeline_slot);
+            let pipeline_tcp = Arc::clone(&self.pipeline_slot);
+            tasks.push(tokio::spawn(run_udp(udp, pipeline_udp)));
+            tasks.push(tokio::spawn(run_tcp(tcp, pipeline_tcp)));
         }
+
+        // Wait for the first task to exit (which signals a fatal error).
+        let (result, _idx, _remaining) = futures::future::select_all(tasks).await;
+        flatten_join(result)
     }
 }
 
@@ -355,7 +367,7 @@ mod tests {
     fn dns_server_new_accepts_valid_address() {
         let cfg = SocketConfig {
             enabled: true,
-            address: "127.0.0.1".into(),
+            addresses: vec!["127.0.0.1".into()],
             port: 5353,
         };
         let pipeline = pipeline_slot(Arc::new(AlwaysFailResolver), neutral_filter());
@@ -363,10 +375,22 @@ mod tests {
     }
 
     #[test]
+    fn dns_server_new_accepts_dual_stack_addresses() {
+        let cfg = SocketConfig {
+            enabled: true,
+            addresses: vec!["0.0.0.0".into(), "::".into()],
+            port: 5353,
+        };
+        let pipeline = pipeline_slot(Arc::new(AlwaysFailResolver), neutral_filter());
+        let server = DnsServer::new(&cfg, pipeline).unwrap();
+        assert_eq!(server.bind_addrs.len(), 2);
+    }
+
+    #[test]
     fn dns_server_new_rejects_invalid_address() {
         let cfg = SocketConfig {
             enabled: true,
-            address: "not-an-ip".into(),
+            addresses: vec!["not-an-ip".into()],
             port: 5353,
         };
         let pipeline = pipeline_slot(Arc::new(AlwaysFailResolver), neutral_filter());

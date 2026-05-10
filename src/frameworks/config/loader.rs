@@ -317,4 +317,66 @@ logging:
             Some("/var/lib/dns-filter/filter-cache.db")
         );
     }
+
+    #[test]
+    fn parses_addresses_as_list_for_dual_stack() {
+        let yaml = r#"
+listen:
+  dns:
+    enabled: true
+    addresses: ["0.0.0.0", "::"]
+    port: 5353
+  dot: null
+  doh: null
+  doq: null
+  http: null
+  metrics: null
+blocklists: []
+allowlists: []
+resolvers:
+  strategy: "round_robin"
+  servers: []
+logging:
+  syslog: null
+  file: null
+  stdout:
+    enabled: true
+    level: "info"
+"#;
+
+        let parsed = parse_config("dual-stack.yaml", yaml).expect("config should parse");
+        let dns = parsed.listen.dns.expect("dns config should exist");
+        assert_eq!(dns.addresses, vec!["0.0.0.0", "::"]);
+    }
+
+    #[test]
+    fn parses_single_address_string_via_alias() {
+        let yaml = r#"
+listen:
+  dns:
+    enabled: true
+    address: "127.0.0.1"
+    port: 5353
+  dot: null
+  doh: null
+  doq: null
+  http: null
+  metrics: null
+blocklists: []
+allowlists: []
+resolvers:
+  strategy: "round_robin"
+  servers: []
+logging:
+  syslog: null
+  file: null
+  stdout:
+    enabled: true
+    level: "info"
+"#;
+
+        let parsed = parse_config("single-addr.yaml", yaml).expect("config should parse");
+        let dns = parsed.listen.dns.expect("dns config should exist");
+        assert_eq!(dns.addresses, vec!["127.0.0.1"]);
+    }
 }

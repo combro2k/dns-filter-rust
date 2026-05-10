@@ -188,7 +188,7 @@ mod tests {
             listen: ListenConfig {
                 dns: Some(SocketConfig {
                     enabled: true,
-                    address: "127.0.0.1".into(),
+                    addresses: vec!["127.0.0.1".into()],
                     port: 5353,
                 }),
                 dot: None,

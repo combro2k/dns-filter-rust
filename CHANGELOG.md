@@ -3,6 +3,8 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Added dual-stack (IPv4+IPv6) listening support: listener `address` field is now `addresses` accepting a list of bind addresses (e.g. `["0.0.0.0", "::"]`); the old single-string `address` key remains supported for backward compatibility; default is dual-stack `["0.0.0.0", "::"]` for public listeners and `["127.0.0.1", "::1"]` for metrics
+- Added CNAME chain following to the recursive resolver: when the initial lookup returns only CNAME records and the queried type is not CNAME itself, the resolver now issues follow-up queries for the CNAME target until the final answer (A/AAAA/etc.) is obtained, matching public resolver behavior; limited to 10 hops to prevent infinite loops from circular CNAME chains
 - Fixed `reload_config_succeeds_with_valid_config` test flaking due to parallel tests sharing the same temp file path; each test now gets a unique file via an atomic counter
 - Fixed recursive resolver returning SERVFAIL for NXDOMAIN and NODATA responses (e.g. DS queries for unsigned domains like `google.com`): the recursor's "no records found" errors are now translated into proper DNS NODATA (NOERROR + SOA + NSEC/NSEC3 proof records) or NXDOMAIN responses instead of propagating as pipeline failures, fixing `delv` "broken trust chain" errors for unsigned delegations
 - Fixed AD (Authenticated Data) flag being set unconditionally for all recursive responses when DNSSEC validation is enabled; the flag is now only set when every answer record carries `Proof::Secure`, so unsigned delegations (e.g. `google.com`) no longer cause `delv` to report "broken trust chain"

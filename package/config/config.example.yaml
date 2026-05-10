@@ -1,11 +1,11 @@
 listen:
   dns:
     enabled: true
-    address: "0.0.0.0"
+    addresses: ["0.0.0.0", "::"]
     port: 5353
   dot:
     enabled: false
-    address: "0.0.0.0"
+    addresses: ["0.0.0.0", "::"]
     port: 853
     tls:
       cert_path: "/etc/dns-filter/cert.pem"
@@ -13,7 +13,7 @@ listen:
       autogenerate: true
   doh:
     enabled: false
-    address: "0.0.0.0"
+    addresses: ["0.0.0.0", "::"]
     port: 443
     tls:
       cert_path: "/etc/dns-filter/cert.pem"
@@ -21,7 +21,7 @@ listen:
       autogenerate: true
   doq:
     enabled: false
-    address: "0.0.0.0"
+    addresses: ["0.0.0.0", "::"]
     port: 8853
     tls:
       cert_path: "/etc/dns-filter/cert.pem"
@@ -29,11 +29,11 @@ listen:
       autogenerate: true
   http:
     enabled: false
-    address: "0.0.0.0"
+    addresses: ["0.0.0.0", "::"]
     port: 8080
   metrics:
     enabled: false
-    address: "127.0.0.1"
+    addresses: ["127.0.0.1", "::1"]
     port: 9100
 
 blocklists:

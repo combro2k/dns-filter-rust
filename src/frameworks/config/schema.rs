@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use serde::de;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -27,14 +28,24 @@ pub struct ListenConfig {
 #[derive(Debug, Deserialize)]
 pub struct SocketConfig {
     pub enabled: bool,
-    pub address: String,
+    #[serde(
+        alias = "address",
+        deserialize_with = "deserialize_addresses",
+        default = "default_public_addresses"
+    )]
+    pub addresses: Vec<String>,
     pub port: u16,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct TlsSocketConfig {
     pub enabled: bool,
-    pub address: String,
+    #[serde(
+        alias = "address",
+        deserialize_with = "deserialize_addresses",
+        default = "default_public_addresses"
+    )]
+    pub addresses: Vec<String>,
     pub port: u16,
     pub tls: TlsConfig,
 }
@@ -49,8 +60,39 @@ pub struct TlsConfig {
 #[derive(Debug, Deserialize)]
 pub struct MetricsConfig {
     pub enabled: bool,
-    pub address: String,
+    #[serde(
+        alias = "address",
+        deserialize_with = "deserialize_addresses",
+        default = "default_loopback_addresses"
+    )]
+    pub addresses: Vec<String>,
     pub port: u16,
+}
+
+fn default_public_addresses() -> Vec<String> {
+    vec!["0.0.0.0".to_string(), "::".to_string()]
+}
+
+fn default_loopback_addresses() -> Vec<String> {
+    vec!["127.0.0.1".to_string(), "::1".to_string()]
+}
+
+/// Accepts either a single string `"0.0.0.0"` or a list `["0.0.0.0", "::"]`.
+fn deserialize_addresses<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: de::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(s) => Ok(vec![s]),
+        OneOrMany::Many(v) => Ok(v),
+    }
 }
 
 #[derive(Debug)]
