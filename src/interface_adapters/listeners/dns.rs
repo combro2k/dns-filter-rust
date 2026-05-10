@@ -52,6 +52,16 @@ pub struct DnsServer {
     pipeline_slot: Arc<Mutex<Arc<DnsRequestPipeline>>>,
 }
 
+/// A DNS server with all sockets already bound, ready to serve queries.
+///
+/// Created by [`DnsServer::bind`]. The separation allows callers to drop
+/// privileges between binding (which may require root for privileged ports)
+/// and serving (which runs as an unprivileged user).
+pub struct BoundDnsServer {
+    sockets: Vec<(UdpSocket, TcpListener)>,
+    pipeline_slot: Arc<Mutex<Arc<DnsRequestPipeline>>>,
+}
+
 impl DnsServer {
     /// Creates a new `DnsServer` from a `SocketConfig` and request pipeline slot.
     ///
@@ -82,10 +92,13 @@ impl DnsServer {
         })
     }
 
-    /// Binds UDP and TCP sockets on all configured addresses and serves DNS queries
-    /// until a fatal error occurs.
-    pub async fn run(self) -> Result<(), DnsListenerError> {
-        let mut tasks = Vec::new();
+    /// Binds UDP and TCP sockets on all configured addresses.
+    ///
+    /// Returns a [`BoundDnsServer`] that can be used to start serving queries.
+    /// This separation allows the caller to drop privileges between binding
+    /// (which may require root) and serving.
+    pub async fn bind(self) -> Result<BoundDnsServer, DnsListenerError> {
+        let mut sockets = Vec::with_capacity(self.bind_addrs.len());
 
         for bind_addr in &self.bind_addrs {
             let udp =
@@ -106,7 +119,22 @@ impl DnsServer {
                     })?;
 
             tracing::info!(addr = %bind_addr, "DNS listener bound (UDP + TCP)");
+            sockets.push((udp, tcp));
+        }
 
+        Ok(BoundDnsServer {
+            sockets,
+            pipeline_slot: self.pipeline_slot,
+        })
+    }
+}
+
+impl BoundDnsServer {
+    /// Serves DNS queries on the previously bound sockets until a fatal error occurs.
+    pub async fn serve(self) -> Result<(), DnsListenerError> {
+        let mut tasks = Vec::new();
+
+        for (udp, tcp) in self.sockets {
             let pipeline_udp = Arc::clone(&self.pipeline_slot);
             let pipeline_tcp = Arc::clone(&self.pipeline_slot);
             tasks.push(tokio::spawn(run_udp(udp, pipeline_udp)));

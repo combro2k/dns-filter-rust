@@ -1,11 +1,13 @@
 listen:
   dns:
     enabled: true
-    addresses: ["0.0.0.0", "::"]
-    port: 5353
+    addresses:
+      - "::
+    port: 53
   dot:
     enabled: false
-    addresses: ["0.0.0.0", "::"]
+    addresses: 
+      - "::"
     port: 853
     tls:
       cert_path: "/etc/dns-filter/cert.pem"
@@ -13,7 +15,8 @@ listen:
       autogenerate: true
   doh:
     enabled: false
-    addresses: ["0.0.0.0", "::"]
+    addresses:
+      - "::"
     port: 443
     tls:
       cert_path: "/etc/dns-filter/cert.pem"
@@ -21,7 +24,9 @@ listen:
       autogenerate: true
   doq:
     enabled: false
-    addresses: ["0.0.0.0", "::"]
+    addresses:
+      - "0.0.0.0"
+      - "::"
     port: 8853
     tls:
       cert_path: "/etc/dns-filter/cert.pem"
@@ -29,11 +34,13 @@ listen:
       autogenerate: true
   http:
     enabled: false
-    addresses: ["0.0.0.0", "::"]
+    addresses:
+      - "::"
     port: 8080
   metrics:
     enabled: false
-    addresses: ["127.0.0.1", "::1"]
+    addresses:
+      - "::1"
     port: 9100
 
 blocklists:
@@ -122,3 +129,15 @@ logging:
   stdout:
     enabled: false
     level: debug
+
+# Security settings: privilege dropping after socket bind.
+# The process starts as root to bind privileged ports, then drops to an
+# unprivileged user/group and chroots into a restricted directory.
+# CAP_NET_BIND_SERVICE is retained on Linux for potential rebinds on reload.
+#
+# NOTE: After chroot, config files and blocklist caches must be accessible
+# from within the chroot directory (e.g. bind-mount or copy into it).
+security:
+  user: "nobody"
+  group: "nogroup"
+  chroot_dir: "/var/lib/dns-filter"

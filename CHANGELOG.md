@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Added privilege dropping after socket bind: the process now starts as root to bind privileged ports, then performs chroot + setgroups + setgid + setuid to an unprivileged user; on Linux, `CAP_NET_BIND_SERVICE` is retained via `prctl(PR_SET_KEEPCAPS)` + capability manipulation for potential rebinds on config reload
+- Added `security` config section with `user` (default: `"nobody"`), `group` (default: `"nogroup"`), and `chroot_dir` (default: `"/var/lib/dns-filter"`) fields
+- Split `DnsServer::run()` into `DnsServer::bind()` + `BoundDnsServer::serve()` to allow privilege dropping between socket binding and request serving
+- Added `nix` (v0.29, features: user/fs/process) and `caps` (v0.5) dependencies for Unix privilege management and Linux capability manipulation
+- Updated systemd unit with `AmbientCapabilities`, `CapabilityBoundingSet`, and filesystem hardening directives (`ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`)
+- Updated OpenRC init script with ownership checks for the chroot directory
 - Added dual-stack (IPv4+IPv6) listening support: listener `address` field is now `addresses` accepting a list of bind addresses (e.g. `["0.0.0.0", "::"]`); the old single-string `address` key remains supported for backward compatibility; default is dual-stack `["0.0.0.0", "::"]` for public listeners and `["127.0.0.1", "::1"]` for metrics
 - Added CNAME chain following to the recursive resolver: when the initial lookup returns only CNAME records and the queried type is not CNAME itself, the resolver now issues follow-up queries for the CNAME target until the final answer (A/AAAA/etc.) is obtained, matching public resolver behavior; limited to 10 hops to prevent infinite loops from circular CNAME chains
 - Fixed `reload_config_succeeds_with_valid_config` test flaking due to parallel tests sharing the same temp file path; each test now gets a unique file via an atomic counter

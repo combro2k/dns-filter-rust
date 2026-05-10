@@ -13,6 +13,14 @@ pub struct DnsFilterConfig {
     pub filtering: Option<FilteringConfig>,
     pub resolvers: ResolversConfig,
     pub logging: LoggingConfig,
+    pub security: Option<SecurityConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SecurityConfig {
+    pub user: Option<String>,
+    pub group: Option<String>,
+    pub chroot_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,8 +1,12 @@
 use clap::Parser;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use dns_filter::frameworks::config::loader::load_config;
+use dns_filter::frameworks::privileges::{
+    drop_privileges, PrivilegeDropConfig, DEFAULT_CHROOT_DIR, DEFAULT_GROUP, DEFAULT_USER,
+};
 use dns_filter::frameworks::signal_handler::setup_sighup_handler;
 use dns_filter::interface_adapters::listeners::dns::DnsServer;
 use dns_filter::use_cases::config_bootstrap::{
@@ -148,6 +152,36 @@ async fn main() {
         }
     };
 
+    // Bind sockets while still running as root (for privileged ports).
+    let bound_server = match server.bind().await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("failed to bind DNS sockets: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Drop privileges: chroot + setgid + setuid + retain CAP_NET_BIND_SERVICE.
+    let security = config.security.as_ref();
+    let priv_user = security
+        .and_then(|s| s.user.as_deref())
+        .unwrap_or(DEFAULT_USER);
+    let priv_group = security
+        .and_then(|s| s.group.as_deref())
+        .unwrap_or(DEFAULT_GROUP);
+    let priv_chroot = security
+        .and_then(|s| s.chroot_dir.as_deref())
+        .unwrap_or(DEFAULT_CHROOT_DIR);
+    let priv_config = PrivilegeDropConfig {
+        user: priv_user,
+        group: priv_group,
+        chroot_dir: Some(Path::new(priv_chroot)),
+    };
+    if let Err(e) = drop_privileges(&priv_config) {
+        eprintln!("failed to drop privileges: {e:#}");
+        std::process::exit(1);
+    }
+
     // Set up SIGHUP signal handler for graceful reload
     let mut sighup_rx = match setup_sighup_handler() {
         Ok(rx) => rx,
@@ -157,7 +191,7 @@ async fn main() {
         }
     };
 
-    let server_task = tokio::spawn(server.run());
+    let server_task = tokio::spawn(bound_server.serve());
     let config_path_for_reload = config_path.clone();
     let pipeline_slot_for_reload = Arc::clone(&request_pipeline_slot);
 

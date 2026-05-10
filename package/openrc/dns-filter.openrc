@@ -6,12 +6,18 @@ command_args="--config /etc/dns-filter/config.yaml"
 command_background="yes"
 pidfile="/run/${RC_SVCNAME}.pid"
 
+# The binary handles privilege dropping itself (chroot + setuid/setgid).
+# It needs to start as root to bind privileged ports.
+
 depend() {
 	need net
 }
 
 start_pre() {
 	checkpath -d /var/lib/dns-filter
+	# Ensure the chroot directory is owned by the target user so the
+	# process can write state files (e.g. filter cache) after priv-drop.
+	checkpath -d -o nobody:nogroup /var/lib/dns-filter
 }
 
 reload() {

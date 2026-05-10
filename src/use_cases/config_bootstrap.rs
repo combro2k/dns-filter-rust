@@ -213,6 +213,7 @@ mod tests {
                     level: "info".into(),
                 }),
             },
+            security: None,
         }
     }
 
