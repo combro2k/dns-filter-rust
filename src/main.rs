@@ -82,13 +82,17 @@ async fn main() {
         unreachable!("version action is handled above");
     };
 
-    // Initialize tracing/logging
+    // Initialize tracing/logging.
+    // In normal mode, suppress noisy WARN-level messages from hickory's DNSSEC
+    // module (e.g. "response does not contain NSEC or NSEC3 records") that are
+    // expected for unsigned delegations.  In debug mode, show everything.
+    let filter = if cli_options.debug {
+        tracing_subscriber::EnvFilter::new("debug")
+    } else {
+        tracing_subscriber::EnvFilter::new("info,hickory_proto::dnssec=error")
+    };
     tracing_subscriber::fmt()
-        .with_max_level(if cli_options.debug {
-            tracing::Level::DEBUG
-        } else {
-            tracing::Level::INFO
-        })
+        .with_env_filter(filter)
         .with_target(true)
         .with_thread_ids(true)
         .init();

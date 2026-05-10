@@ -2,7 +2,7 @@ listen:
   dns:
     enabled: true
     addresses:
-      - "::
+      - "::"
     port: 53
   dot:
     enabled: false

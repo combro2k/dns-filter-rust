@@ -3,6 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Changed hickory DNSSEC warnings (e.g. "response does not contain NSEC or NSEC3 records" for missing DS/NSEC/NSEC3) from WARN to effectively DEBUG level: in normal mode the `hickory_proto::dnssec` module is filtered to ERROR-only; in `--debug` mode all messages are shown; switched `tracing-subscriber` from `with_max_level` to `EnvFilter` and added the `env-filter` feature
 - Added privilege dropping after socket bind: the process now starts as root to bind privileged ports, then performs chroot + setgroups + setgid + setuid to an unprivileged user; on Linux, `CAP_NET_BIND_SERVICE` is retained via `prctl(PR_SET_KEEPCAPS)` + capability manipulation for potential rebinds on config reload
 - Added `security` config section with `user` (default: `"nobody"`), `group` (default: `"nogroup"`), and `chroot_dir` (default: `"/var/lib/dns-filter"`) fields
 - Split `DnsServer::run()` into `DnsServer::bind()` + `BoundDnsServer::serve()` to allow privilege dropping between socket binding and request serving
