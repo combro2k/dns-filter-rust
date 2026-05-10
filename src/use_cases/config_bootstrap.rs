@@ -6,7 +6,10 @@ use anyhow::{anyhow, bail, Result};
 
 use crate::entities::resolution::UpstreamStrategy;
 use crate::frameworks::config::schema::{DnsFilterConfig, UpstreamServer};
-use crate::frameworks::upstream::{DnsTlsClient, DnsUdpTcpClient};
+use crate::frameworks::upstream::recursive_resolver::{
+    load_root_hints, IpPreference, DEFAULT_MAX_HOPS,
+};
+use crate::frameworks::upstream::{DnsTlsClient, DnsUdpTcpClient, RecursiveResolver};
 use crate::use_cases::filtering::{parse_interval, DomainFilter, ListFilterEngine};
 use crate::use_cases::request_pipeline::{
     AnyQueryPolicy, DnsAnyQueryPolicyStage, DnsFilterStage, DnsRequestPipeline,
@@ -20,11 +23,11 @@ pub fn validate_config(config: DnsFilterConfig) -> DnsFilterConfig {
 }
 
 pub fn build_upstream_resolver(config: &DnsFilterConfig) -> Result<Arc<dyn UpstreamResolver>> {
-    let strategy = UpstreamStrategy::from_str(&config.upstreams.strategy)
-        .map_err(|_| anyhow!("invalid upstream strategy: {}", config.upstreams.strategy))?;
+    let strategy = UpstreamStrategy::from_str(&config.resolvers.strategy)
+        .map_err(|_| anyhow!("invalid upstream strategy: {}", config.resolvers.strategy))?;
 
     let enabled_servers = config
-        .upstreams
+        .resolvers
         .servers
         .iter()
         .filter(|server| server.enabled)
@@ -34,7 +37,13 @@ pub fn build_upstream_resolver(config: &DnsFilterConfig) -> Result<Arc<dyn Upstr
         bail!("at least one enabled upstream server is required");
     }
 
-    let bootstrap_resolvers = parse_bootstrap_resolvers(&config.upstreams.bootstrap_resolvers)?;
+    // Bootstrap resolvers are only needed for DoT servers with hostname endpoints.
+    let needs_bootstrap = enabled_servers.iter().any(|s| s.protocol == "dot");
+    let bootstrap_resolvers = if needs_bootstrap {
+        parse_bootstrap_resolvers(&config.resolvers.bootstrap_resolvers)?
+    } else {
+        vec![]
+    };
 
     let resolvers = enabled_servers
         .into_iter()
@@ -108,7 +117,22 @@ fn build_single_upstream_resolver(
                 client.with_bootstrap_resolvers(bootstrap_resolvers.to_vec()),
             ))
         }
-        other => bail!("unsupported upstream protocol: {other}; supported values are: dns, dot"),
+        "recursive" => {
+            let max_hops = server.max_hops.unwrap_or(DEFAULT_MAX_HOPS);
+            let ip_preference = match server.ip_preference.as_deref() {
+                Some("ipv6") => IpPreference::PreferIpv6,
+                _ => IpPreference::PreferIpv4,
+            };
+            let root_hints = load_root_hints(server.root_hints_path.as_deref());
+            Ok(Arc::new(RecursiveResolver::new(
+                root_hints,
+                max_hops,
+                ip_preference,
+            )))
+        }
+        other => bail!(
+            "unsupported upstream protocol: {other}; supported values are: dns, dot, recursive"
+        ),
     }
 }
 
@@ -144,8 +168,8 @@ fn parse_bootstrap_resolvers(values: &[String]) -> Result<Vec<SocketAddr>> {
 #[cfg(test)]
 mod tests {
     use crate::frameworks::config::schema::{
-        DnsFilterConfig, FilteringConfig, ListenConfig, LoggingConfig, NamedList, SocketConfig,
-        StdoutLogConfig, UpstreamServer, UpstreamsConfig,
+        DnsFilterConfig, FilteringConfig, ListenConfig, LoggingConfig, NamedList, ResolversConfig,
+        SocketConfig, StdoutLogConfig, UpstreamServer,
     };
 
     use super::*;
@@ -167,7 +191,7 @@ mod tests {
             blocklists: Vec::<NamedList>::new(),
             allowlists: Vec::<NamedList>::new(),
             filtering: None,
-            upstreams: UpstreamsConfig {
+            resolvers: ResolversConfig {
                 strategy: "round_robin".into(),
                 bootstrap_resolvers: vec!["1.1.1.1".into()],
                 servers,
@@ -189,6 +213,7 @@ mod tests {
             enabled: true,
             protocol: "dot".into(),
             address: "tls://1.1.1.1".into(),
+            ..Default::default()
         }]);
 
         let resolver = build_upstream_resolver(&config);
@@ -201,6 +226,7 @@ mod tests {
             enabled: true,
             protocol: "doh".into(),
             address: "https://dns.example.com/dns-query".into(),
+            ..Default::default()
         }]);
 
         let result = build_upstream_resolver(&config);
@@ -215,6 +241,7 @@ mod tests {
             enabled: true,
             protocol: "dot".into(),
             address: "tls://dns_example.com".into(),
+            ..Default::default()
         }]);
 
         let result = build_upstream_resolver(&config);
@@ -229,6 +256,7 @@ mod tests {
             enabled: true,
             protocol: "dot".into(),
             address: "tls://dns.example.com:853".into(),
+            ..Default::default()
         }]);
 
         let resolver = build_upstream_resolver(&config);
@@ -254,11 +282,13 @@ mod tests {
                 enabled: false,
                 protocol: "doh".into(),
                 address: "https://dns.example.com/dns-query".into(),
+                ..Default::default()
             },
             UpstreamServer {
                 enabled: true,
                 protocol: "dns".into(),
                 address: "8.8.8.8:53".into(),
+                ..Default::default()
             },
         ]);
 
@@ -272,6 +302,7 @@ mod tests {
             enabled: false,
             protocol: "dns".into(),
             address: "8.8.8.8:53".into(),
+            ..Default::default()
         }]);
 
         let result = build_upstream_resolver(&config);
@@ -288,8 +319,9 @@ mod tests {
             enabled: true,
             protocol: "dot".into(),
             address: "tls://dns.example.com:853".into(),
+            ..Default::default()
         }]);
-        config.upstreams.bootstrap_resolvers = vec!["not-an-ip".into()];
+        config.resolvers.bootstrap_resolvers = vec!["not-an-ip".into()];
 
         let result = build_upstream_resolver(&config);
         assert!(result.is_err());
@@ -305,6 +337,7 @@ mod tests {
             enabled: true,
             protocol: "dns".into(),
             address: "8.8.8.8:53".into(),
+            ..Default::default()
         }]);
         config.blocklists = vec![NamedList {
             name: "ads".into(),
@@ -324,6 +357,7 @@ mod tests {
             enabled: true,
             protocol: "dns".into(),
             address: "8.8.8.8:53".into(),
+            ..Default::default()
         }]);
         config.blocklists = vec![NamedList {
             name: "ads".into(),
@@ -346,6 +380,7 @@ mod tests {
             enabled: true,
             protocol: "dns".into(),
             address: "8.8.8.8:53".into(),
+            ..Default::default()
         }]);
         config.filtering = Some(FilteringConfig {
             sinkhole_ipv4: Some("10.10.10.10".into()),
@@ -365,6 +400,7 @@ mod tests {
             enabled: true,
             protocol: "dns".into(),
             address: "8.8.8.8:53".into(),
+            ..Default::default()
         }]);
 
         let policy = build_any_query_policy(&config).expect("policy should parse");
@@ -377,6 +413,7 @@ mod tests {
             enabled: true,
             protocol: "dns".into(),
             address: "8.8.8.8:53".into(),
+            ..Default::default()
         }]);
         refused_config.filtering = Some(FilteringConfig {
             sinkhole_ipv4: None,
@@ -392,6 +429,7 @@ mod tests {
             enabled: true,
             protocol: "dns".into(),
             address: "8.8.8.8:53".into(),
+            ..Default::default()
         }]);
         notimp_config.filtering = Some(FilteringConfig {
             sinkhole_ipv4: None,
@@ -410,6 +448,7 @@ mod tests {
             enabled: true,
             protocol: "dns".into(),
             address: "8.8.8.8:53".into(),
+            ..Default::default()
         }]);
         config.filtering = Some(FilteringConfig {
             sinkhole_ipv4: None,

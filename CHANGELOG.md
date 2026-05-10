@@ -3,6 +3,15 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Recursive resolver now loads root-server addresses from `/usr/share/dns/root.hints` (or other well-known OS paths) at startup, falling back to compiled-in IANA addresses when the file is absent; added optional `root_hints_path` config field for explicit override
+- Added compiled-in IPv6 root-server addresses (`ROOT_HINTS_V6`) alongside the existing IPv4 set, so iterative resolution uses both address families by default
+- Fixed `RecursiveResolver` failing with DNSSEC validation errors ("could not validate negative response missing SOA") and timeouts during iterative resolution by replacing `DnssecClient` with plain `Client` — referral responses are not authoritative and cannot pass DNSSEC validation
+- Fixed slow iterative resolution for domains whose glue records list AAAA (IPv6) addresses before A (IPv4): glue addresses are now sorted IPv4-first, and `try_nameservers` races up to 3 candidates concurrently via `select_ok` instead of trying each sequentially
+- Added `ip_preference` config option for the recursive resolver (`"ipv4"` default, `"ipv6"`): controls whether IPv4 or IPv6 glue addresses are tried first during iterative resolution
+- Added iterative recursive DNS resolver (`RecursiveResolver`) in [src/frameworks/upstream/recursive_resolver.rs](src/frameworks/upstream/recursive_resolver.rs): resolves queries from IANA root hints without a configured upstream, following NS referrals and using glue records where available; no-glue NS names are resolved via sub-lookups bounded by a configurable `max_hops` limit (default 12)
+- Renamed config section `upstreams:` to `resolvers:` in all configs and the `UpstreamsConfig` struct to `ResolversConfig` in [src/frameworks/config/schema.rs](src/frameworks/config/schema.rs) to reflect that the section now covers both forwarding and recursive resolvers
+- Added `protocol: "recursive"` as a valid resolver protocol; `address` is optional for this protocol and `max_hops` (optional `u8`) controls the referral hop limit
+- Bootstrap resolvers are now only parsed when at least one `dot` server is configured, removing a spurious validation error for purely recursive setups
 - Added listener batch smoke-test script at [tests/listener_batch_test.sh](tests/listener_batch_test.sh) to start a local instance on non-default loopback ports, probe DNS UDP/TCP end-to-end, and report DoT/DoH/DoQ/HTTP/metrics checks as pass/fail/skip with optional strict mode
 - Aligned `hickory-client` dependency to latest stable `0.25.2` while keeping existing DNSSEC/TLS feature flags
 - Started one-shot Chain of Responsibility compliance migration for request handling: added async, explicit-error CoR support in [src/use_cases/request_pipeline.rs](src/use_cases/request_pipeline.rs) with `AsyncRequestStage` + `AsyncPipelineHandler` (`Result<Option<Response>, Error>` contract)

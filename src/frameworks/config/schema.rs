@@ -10,7 +10,7 @@ pub struct DnsFilterConfig {
     pub blocklists: Vec<NamedList>,
     pub allowlists: Vec<NamedList>,
     pub filtering: Option<FilteringConfig>,
-    pub upstreams: UpstreamsConfig,
+    pub resolvers: ResolversConfig,
     pub logging: LoggingConfig,
 }
 
@@ -132,7 +132,7 @@ pub struct FilteringCacheConfig {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct UpstreamsConfig {
+pub struct ResolversConfig {
     pub strategy: String,
     #[serde(default = "default_bootstrap_resolvers")]
     pub bootstrap_resolvers: Vec<String>,
@@ -143,11 +143,20 @@ fn default_bootstrap_resolvers() -> Vec<String> {
     vec!["1.1.1.1".to_string()]
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct UpstreamServer {
     pub enabled: bool,
     pub protocol: String,
+    #[serde(default)]
     pub address: String,
+    pub max_hops: Option<u8>,
+    /// IP version preference for iterative resolution: `"ipv4"` (default) or
+    /// `"ipv6"`.  Controls whether IPv4 or IPv6 glue addresses are tried first.
+    pub ip_preference: Option<String>,
+    /// Path to a `root.hints` file for iterative resolution.  When omitted the
+    /// resolver probes well-known OS paths and falls back to compiled-in IANA
+    /// addresses.
+    pub root_hints_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

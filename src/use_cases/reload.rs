@@ -87,7 +87,7 @@ listen:
     enabled: true
     address: "127.0.0.1"
     port: 53
-upstreams:
+resolvers:
   strategy: round_robin
   servers: []
 blocklists: []
@@ -110,7 +110,12 @@ listen:
     enabled: true
     address: "127.0.0.1"
     port: 53
-upstreams:
+  dot: null
+  doh: null
+  doq: null
+  http: null
+  metrics: null
+resolvers:
   strategy: round_robin
   servers:
     - protocol: dns
@@ -119,7 +124,11 @@ upstreams:
 blocklists: []
 allowlists: []
 logging:
-  enabled: false
+  syslog: null
+  file: null
+  stdout:
+    enabled: true
+    level: "info"
 "#;
         let path = create_temp_config(content);
         let result = reload_config(path.to_str().unwrap());

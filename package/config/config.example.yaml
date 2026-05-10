@@ -73,12 +73,12 @@ filtering:
     mode: "memory"
     document_path: "/var/lib/dns-filter/filter-cache.db"
 
-upstreams:
+resolvers:
   strategy: "round_robin"
   bootstrap_resolvers:
     - "1.1.1.1"
   servers:
-    - enabled: true
+    - enabled: false
       protocol: "dns"
       address: "8.8.8.8:53"
     - enabled: false
@@ -102,6 +102,11 @@ upstreams:
       tls:
         cert_path: "/etc/dns-filter/upstream-cert.pem"
         autogenerate: true
+    - enabled: true
+      protocol: "recursive"
+      # root_hints_path: "/usr/share/dns/root.hints"  # optional, auto-detected or compiled-in fallback
+      # max_hops: 12  # optional, default is 12
+      # ip_preference: "ipv4"  # optional: "ipv4" (default) or "ipv6"
 
 logging:
   syslog:

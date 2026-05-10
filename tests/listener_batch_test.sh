@@ -184,7 +184,7 @@ allowlists: []
 filtering:
   any_query_policy: "passthrough"
 
-upstreams:
+resolvers:
   strategy: "round_robin"
   bootstrap_resolvers:
     - "1.1.1.1"
@@ -192,6 +192,9 @@ upstreams:
     - enabled: true
       protocol: "dns"
       address: "1.1.1.1:53"
+    - enabled: false
+      protocol: "recursive"
+      max_hops: 12
 
 logging:
   syslog: null
@@ -267,6 +270,31 @@ dns_query_tcp() {
 
   if command_exists kdig; then
     output="$(kdig +tcp @"$DNS_HOST" -p "$DNS_PORT" "$DOMAIN" A 2>&1)" || return 1
+    [[ "$output" == *"status:"* ]]
+    return $?
+  fi
+
+  return 2
+}
+
+dns_query_udp_on_port() {
+  local port="$1"
+  local output
+
+  if command_exists dig; then
+    output="$(dig @"$DNS_HOST" -p "$port" "$DOMAIN" A +time=2 +tries=1 2>&1)" || return 1
+    [[ "$output" == *"status:"* ]]
+    return $?
+  fi
+
+  if command_exists drill; then
+    output="$(drill @"$DNS_HOST" -p "$port" "$DOMAIN" A 2>&1)" || return 1
+    [[ "$output" == *"ANSWER SECTION"* || "$output" == *"rcode:"* ]]
+    return $?
+  fi
+
+  if command_exists kdig; then
+    output="$(kdig @"$DNS_HOST" -p "$port" "$DOMAIN" A 2>&1)" || return 1
     [[ "$output" == *"status:"* ]]
     return $?
   fi
@@ -389,6 +417,70 @@ if command_exists kdig; then
   fi
 else
   skip "DoQ check skipped (install kdig)"
+fi
+
+# Test recursive resolver (optional, disabled by default in the main config above)
+if [ "${TEST_RECURSIVE:-0}" -eq 1 ]; then
+  note "Testing recursive resolver..."
+
+  # Create a temporary config with recursive resolver enabled
+  RECURSIVE_CONFIG_FILE="$TEMP_DIR/config-recursive.yaml"
+  cat >"$RECURSIVE_CONFIG_FILE" <<RECEOF
+listen:
+  dns:
+    enabled: true
+    address: "$DNS_HOST"
+    port: 25353
+  dot: null
+  doh: null
+  doq: null
+  http: null
+  metrics: null
+
+blocklists: []
+allowlists: []
+
+filtering:
+  any_query_policy: "passthrough"
+
+resolvers:
+  strategy: "failover"
+  servers:
+    - enabled: true
+      protocol: "recursive"
+      max_hops: 12
+
+logging:
+  syslog: null
+  file: null
+  stdout:
+    enabled: true
+    level: "info"
+RECEOF
+
+  note "Starting dns-filter with recursive resolver on port 25353"
+  "$BINARY" --config "$RECURSIVE_CONFIG_FILE" >"$TEMP_DIR/recursive.log" 2>&1 &
+  RECURSIVE_PID=$!
+
+  # Give it time to start
+  sleep 1
+
+  if dns_query_udp_on_port 25353; then
+    pass "recursive resolver UDP query succeeded"
+  else
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      skip "recursive resolver UDP query skipped (install dig, drill, or kdig)"
+    else
+      fail "recursive resolver UDP query failed"
+    fi
+  fi
+
+  # Cleanup recursive test process
+  if [ -n "$RECURSIVE_PID" ] && kill -0 "$RECURSIVE_PID" >/dev/null 2>&1; then
+    kill "$RECURSIVE_PID" >/dev/null 2>&1 || true
+    wait "$RECURSIVE_PID" 2>/dev/null || true
+  fi
 fi
 
 note "listener process log: $LOG_FILE"

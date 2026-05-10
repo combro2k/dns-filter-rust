@@ -46,8 +46,8 @@ fn hint_for_path(field_path: &str) -> &'static str {
         "Use either '- name: my_list\\n  url: https://...\\n  interval: 12h' or '- my_list:\\n    url: https://...\\n    interval: 12h' for each list item."
     } else if field_path.starts_with("listen") {
         "Check listener fields and types (for example, ports must be numbers and TLS sections must be nested under 'tls')."
-    } else if field_path.starts_with("upstreams") {
-        "Check that 'strategy' is valid, each server includes 'protocol'/'address', and optional 'bootstrap_resolvers' values are IP or IP:port (default: 1.1.1.1; protocol support: dns, dot; DoT examples: tls://1.1.1.1, tls://dns.example.com:853, or 1.1.1.1:853)."
+    } else if field_path.starts_with("resolvers") {
+        "Check that 'strategy' is valid, each server includes 'protocol'/'address', and optional 'bootstrap_resolvers' values are IP or IP:port (default: 1.1.1.1; protocol support: dns, dot, recursive; DoT examples: tls://1.1.1.1, tls://dns.example.com:853, or 1.1.1.1:853)."
     } else if field_path.starts_with("logging") {
         "Check each logging target uses the expected keys (enabled/level and location for file logging)."
     } else if field_path.starts_with("filtering") {
@@ -76,7 +76,7 @@ listen:
   metrics: null
 blocklists: []
 allowlists: []
-upstreams:
+resolvers:
   strategy: "round_robin"
   servers: []
 logging:
@@ -114,7 +114,7 @@ allowlists:
       url: "/etc/dns-filter/allowlist.txt"
       interval: "45m"
       enabled: false
-upstreams:
+resolvers:
   strategy: "round_robin"
   servers: []
 logging:
@@ -155,7 +155,7 @@ blocklists:
 allowlists:
   - name: "local_allow"
     url: "/etc/dns-filter/allowlist.txt"
-upstreams:
+resolvers:
   strategy: "round_robin"
   servers: []
 logging:
@@ -185,7 +185,7 @@ listen:
   metrics: null
 blocklists: []
 allowlists: []
-upstreams:
+resolvers:
   strategy: "round_robin"
   servers: []
 logging:
@@ -217,7 +217,7 @@ listen:
   metrics: null
 blocklists: []
 allowlists: []
-upstreams:
+resolvers:
   strategy: "round_robin"
   servers:
     - protocol: "dns"
@@ -233,7 +233,7 @@ logging:
         let error =
             parse_config("missing-upstream-enabled.yaml", yaml).expect_err("parse should fail");
         let message = format!("{error:#}");
-        assert!(message.contains("upstreams.servers[0]"));
+        assert!(message.contains("resolvers.servers[0]"));
         assert!(message.contains("missing field `enabled`"));
     }
 
@@ -252,7 +252,7 @@ listen:
   metrics: null
 blocklists: []
 allowlists: []
-upstreams:
+resolvers:
   strategy: "round_robin"
   servers: []
 logging:
@@ -296,7 +296,7 @@ filtering:
   cache:
     mode: "sqlite"
     document_path: "/var/lib/dns-filter/filter-cache.db"
-upstreams:
+resolvers:
   strategy: "round_robin"
   servers: []
 logging:
