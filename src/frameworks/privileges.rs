@@ -22,9 +22,9 @@ pub const DEFAULT_CHROOT_DIR: &str = "/var/lib/dns-filter";
 /// Drops process privileges after sockets have been bound.
 ///
 /// Execution order (security-critical):
-/// 1. `chroot` into the configured directory (if set), then `chdir("/")`
-/// 2. On Linux: `prctl(PR_SET_KEEPCAPS, 1)` to preserve capabilities across setuid
-/// 3. Resolve user → uid and group → gid
+/// 1. Resolve user → uid and group → gid (before chroot, needs real `/etc/passwd`)
+/// 2. `chroot` into the configured directory (if set), then `chdir("/")`
+/// 3. On Linux: `prctl(PR_SET_KEEPCAPS, 1)` to preserve capabilities across setuid
 /// 4. `setgroups([gid])` — drop all supplementary groups
 /// 5. `setgid(gid)` — drop group privilege
 /// 6. `setuid(uid)` — drop user privilege (point of no return)
@@ -45,19 +45,8 @@ pub fn drop_privileges(config: &PrivilegeDropConfig<'_>) -> Result<()> {
         return Ok(());
     }
 
-    // Step 1: chroot (requires root, must happen before setuid)
-    if let Some(chroot_dir) = config.chroot_dir {
-        unistd::chroot(chroot_dir)
-            .with_context(|| format!("chroot to {}", chroot_dir.display()))?;
-        unistd::chdir("/").context("chdir to / after chroot")?;
-        tracing::info!(dir = %chroot_dir.display(), "chroot complete");
-    }
-
-    // Step 2: On Linux, set PR_SET_KEEPCAPS so capabilities survive setuid
-    #[cfg(target_os = "linux")]
-    nix::sys::prctl::set_keepcaps(true).context("prctl(PR_SET_KEEPCAPS, 1)")?;
-
-    // Step 3: Resolve user and group
+    // Step 1: Resolve user and group (must happen before chroot — needs real
+    // /etc/passwd and /etc/group which are not available inside the chroot).
     let user = unistd::User::from_name(config.user)
         .with_context(|| format!("looking up user '{}'", config.user))?
         .ok_or_else(|| anyhow::anyhow!("user '{}' not found", config.user))?;
@@ -68,6 +57,18 @@ pub fn drop_privileges(config: &PrivilegeDropConfig<'_>) -> Result<()> {
 
     let uid = user.uid;
     let gid = group.gid;
+
+    // Step 2: chroot (requires root, must happen before setuid)
+    if let Some(chroot_dir) = config.chroot_dir {
+        unistd::chroot(chroot_dir)
+            .with_context(|| format!("chroot to {}", chroot_dir.display()))?;
+        unistd::chdir("/").context("chdir to / after chroot")?;
+        tracing::info!(dir = %chroot_dir.display(), "chroot complete");
+    }
+
+    // Step 3: On Linux, set PR_SET_KEEPCAPS so capabilities survive setuid
+    #[cfg(target_os = "linux")]
+    nix::sys::prctl::set_keepcaps(true).context("prctl(PR_SET_KEEPCAPS, 1)")?;
 
     // Step 4: Drop supplementary groups
     unistd::setgroups(&[gid]).context("setgroups")?;
