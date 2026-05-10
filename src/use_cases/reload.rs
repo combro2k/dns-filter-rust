@@ -55,10 +55,13 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn create_temp_config(content: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         let temp_dir = std::env::temp_dir();
-        let path = temp_dir.join(format!("dns-filter-test-{}.yaml", std::process::id()));
+        let path = temp_dir.join(format!("dns-filter-test-{}-{id}.yaml", std::process::id()));
         let mut file = fs::File::create(&path).expect("failed to create temp file");
         file.write_all(content.as_bytes())
             .expect("failed to write to temp file");

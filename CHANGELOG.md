@@ -3,6 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Fixed `reload_config_succeeds_with_valid_config` test flaking due to parallel tests sharing the same temp file path; each test now gets a unique file via an atomic counter
 - Fixed recursive resolver returning SERVFAIL for NXDOMAIN and NODATA responses (e.g. DS queries for unsigned domains like `google.com`): the recursor's "no records found" errors are now translated into proper DNS NODATA (NOERROR + SOA + NSEC/NSEC3 proof records) or NXDOMAIN responses instead of propagating as pipeline failures, fixing `delv` "broken trust chain" errors for unsigned delegations
 - Fixed AD (Authenticated Data) flag being set unconditionally for all recursive responses when DNSSEC validation is enabled; the flag is now only set when every answer record carries `Proof::Secure`, so unsigned delegations (e.g. `google.com`) no longer cause `delv` to report "broken trust chain"
 - Fixed DNSSEC-aware clients (`delv +noroot`, `dig +dnssec`) seeing "answer not validated" / missing AD flag: recursive resolver responses now set the AD (Authenticated Data) flag when DNSSEC validation succeeded, and echo back an EDNS OPT record with the DO bit when the client sends one
