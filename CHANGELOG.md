@@ -3,6 +3,8 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Fixed recursive resolver returning SERVFAIL for NXDOMAIN and NODATA responses (e.g. DS queries for unsigned domains like `google.com`): the recursor's "no records found" errors are now translated into proper DNS NODATA (NOERROR + SOA + NSEC/NSEC3 proof records) or NXDOMAIN responses instead of propagating as pipeline failures, fixing `delv` "broken trust chain" errors for unsigned delegations
+- Fixed AD (Authenticated Data) flag being set unconditionally for all recursive responses when DNSSEC validation is enabled; the flag is now only set when every answer record carries `Proof::Secure`, so unsigned delegations (e.g. `google.com`) no longer cause `delv` to report "broken trust chain"
 - Fixed DNSSEC-aware clients (`delv +noroot`, `dig +dnssec`) seeing "answer not validated" / missing AD flag: recursive resolver responses now set the AD (Authenticated Data) flag when DNSSEC validation succeeded, and echo back an EDNS OPT record with the DO bit when the client sends one
 - Changed `ip_preference` to `nameserver_ip_family` for the recursive resolver; now an enforced constraint using `hickory-recursor`'s `nameserver_filter`: `"ipv4"` blocks all IPv6 nameservers, `"ipv6"` blocks all IPv4 nameservers, and omitting the option (new default) allows both families; added `ipnet` dependency
 - Replaced custom iterative `RecursiveResolver` with `hickory-recursor` crate, gaining built-in DNSSEC chain-of-trust validation from the IANA root KSK; queries like `delv @127.0.0.1 cloudflare.com A` now validate successfully instead of reporting "broken trust chain"

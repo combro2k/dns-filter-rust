@@ -3,13 +3,20 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use hickory_client::proto::op::{Message, MessageType, OpCode};
+use hickory_client::proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_client::proto::rr::{Name, RecordType};
-use hickory_proto::dnssec::TrustAnchors;
-use hickory_recursor::{DnssecPolicy, NameServerConfigGroup, Recursor};
+use hickory_proto::dnssec::{Proof, TrustAnchors};
+use hickory_proto::ProtoErrorKind;
+use hickory_recursor::{DnssecPolicy, ErrorKind, NameServerConfigGroup, Recursor};
 use ipnet::IpNet;
 
 use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
+
+/// SOA + authority records extracted from a negative DNS response.
+type NegativeRecords = (
+    Option<Box<hickory_client::proto::rr::resource::Record<hickory_client::proto::rr::rdata::SOA>>>,
+    Option<Arc<[hickory_client::proto::rr::resource::Record]>>,
+);
 
 /// Default maximum number of referral hops before the resolver gives up.
 pub const DEFAULT_MAX_HOPS: u8 = 12;
@@ -317,11 +324,7 @@ impl UpstreamResolver for RecursiveResolver {
 
         let query = hickory_client::proto::op::Query::query(name, qtype);
 
-        let lookup = self
-            .recursor
-            .resolve(query, Instant::now(), do_bit)
-            .await
-            .map_err(|e| UpstreamResolveError::Protocol(format!("{e}")))?;
+        let lookup_result = self.recursor.resolve(query, Instant::now(), do_bit).await;
 
         // Build a DNS response message from the Lookup result
         let mut response = Message::new();
@@ -336,11 +339,6 @@ impl UpstreamResolver for RecursiveResolver {
             response.add_query(q.clone());
         }
 
-        // Signal that validation was performed when the resolver is DNSSEC-aware
-        if self.recursor.is_validating() {
-            response.set_authentic_data(true);
-        }
-
         // Echo EDNS OPT back when the client sent one
         if let Some(client_edns) = msg.extensions() {
             let mut edns = hickory_client::proto::op::Edns::new();
@@ -350,14 +348,82 @@ impl UpstreamResolver for RecursiveResolver {
             response.set_edns(edns);
         }
 
-        // Add all answer records from the Lookup
-        for record in lookup.records() {
-            response.add_answer(record.clone());
+        match lookup_result {
+            Ok(lookup) => {
+                // Set AD only when validating and every answer record was DNSSEC-verified.
+                // Unsigned delegations (e.g. google.com) carry Proof::Insecure and must NOT
+                // get the AD flag, otherwise downstream validators like `delv` see a bogus
+                // trust chain.
+                if self.recursor.is_validating()
+                    && !lookup.records().is_empty()
+                    && lookup.records().iter().all(|r| r.proof() == Proof::Secure)
+                {
+                    response.set_authentic_data(true);
+                }
+
+                // Add all answer records from the Lookup
+                for record in lookup.records() {
+                    response.add_answer(record.clone());
+                }
+            }
+            Err(e) if e.is_nx_domain() || e.is_no_records_found() => {
+                // Extract response code, SOA, and authority records (NSEC/NSEC3 +
+                // RRSIG) from the error.  These proof records are essential for
+                // DNSSEC validators like `delv` that need to verify insecure
+                // delegations (e.g. google.com has no DS record).
+                let is_nx = e.is_nx_domain();
+                let (soa, authorities) = extract_negative_records(e);
+
+                if is_nx {
+                    response.set_response_code(ResponseCode::NXDomain);
+                } else {
+                    response.set_response_code(ResponseCode::NoError);
+                }
+
+                if let Some(soa) = soa {
+                    response.add_name_server(soa.into_record_of_rdata());
+                }
+                if let Some(auths) = authorities {
+                    for record in auths.iter() {
+                        response.add_name_server(record.clone());
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(UpstreamResolveError::Protocol(format!("{e}")));
+            }
         }
 
         response
             .to_vec()
             .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))
+    }
+}
+
+/// Extract the SOA record and authority records (NSEC/NSEC3 + RRSIG) from
+/// a hickory-recursor error.  The recursor wraps negative responses in
+/// `ErrorKind::Proto(ProtoErrorKind::NoRecordsFound { .. })` or
+/// `ErrorKind::Forward(ForwardData { .. })`.  We destructure both variants
+/// so that the caller can include the full proof chain in the DNS response.
+fn extract_negative_records(err: hickory_recursor::Error) -> NegativeRecords {
+    match err.into_kind() {
+        ErrorKind::Proto(proto) => match *proto.kind {
+            ProtoErrorKind::NoRecordsFound {
+                soa, authorities, ..
+            } => (soa, authorities),
+            _ => (None, None),
+        },
+        ErrorKind::Forward(fwd) => (Some(fwd.soa), fwd.authorities),
+        ErrorKind::Resolve(resolve) => match resolve.kind() {
+            hickory_recursor::resolver::ResolveErrorKind::Proto(proto) => match proto.kind() {
+                ProtoErrorKind::NoRecordsFound {
+                    soa, authorities, ..
+                } => (soa.clone(), authorities.clone()),
+                _ => (None, None),
+            },
+            _ => (None, None),
+        },
+        _ => (None, None),
     }
 }
 
