@@ -89,7 +89,9 @@ async fn main() {
     let filter = if cli_options.debug {
         tracing_subscriber::EnvFilter::new("debug")
     } else {
-        tracing_subscriber::EnvFilter::new("info,hickory_proto::dnssec=error")
+        tracing_subscriber::EnvFilter::new(
+            "info,hickory_proto::dnssec=error,hickory_recursor=error",
+        )
     };
     tracing_subscriber::fmt()
         .with_env_filter(filter)

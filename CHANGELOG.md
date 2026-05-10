@@ -3,7 +3,9 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Added domain name and query type to SERVFAIL log messages in the DNS pipeline (`forward_query`), making it easier to diagnose upstream failures
 - Fixed chroot breaking user/group resolution: moved name→uid/gid lookup before `chroot()` so `/etc/passwd` and `/etc/group` are still accessible from the real root filesystem
+- Extended hickory log filtering: in normal mode `hickory_recursor` is now also filtered to ERROR-only (in addition to `hickory_proto::dnssec`), suppressing expected WARN-level "no records found for DS" messages during unsigned delegation probing; all messages remain visible in `--debug` mode
 - Changed hickory DNSSEC warnings (e.g. "response does not contain NSEC or NSEC3 records" for missing DS/NSEC/NSEC3) from WARN to effectively DEBUG level: in normal mode the `hickory_proto::dnssec` module is filtered to ERROR-only; in `--debug` mode all messages are shown; switched `tracing-subscriber` from `with_max_level` to `EnvFilter` and added the `env-filter` feature
 - Added privilege dropping after socket bind: the process now starts as root to bind privileged ports, then performs chroot + setgroups + setgid + setuid to an unprivileged user; on Linux, `CAP_NET_BIND_SERVICE` is retained via `prctl(PR_SET_KEEPCAPS)` + capability manipulation for potential rebinds on config reload
 - Added `security` config section with `user` (default: `"nobody"`), `group` (default: `"nogroup"`), and `chroot_dir` (default: `"/var/lib/dns-filter"`) fields

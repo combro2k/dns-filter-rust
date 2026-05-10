@@ -6,6 +6,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
+use hickory_client::proto::op::Message;
+
 use crate::frameworks::config::schema::SocketConfig;
 use crate::use_cases::request_pipeline::{
     build_servfail_response, DnsPipelineRequest, DnsRequestPipeline,
@@ -245,15 +247,24 @@ async fn forward_query(
     tracing::debug!(query_len = query.len(), "calling request pipeline");
     let pipeline = Arc::clone(&*pipeline_slot.lock().await);
 
+    let (domain, qtype) = Message::from_vec(query)
+        .ok()
+        .and_then(|msg| {
+            msg.queries()
+                .first()
+                .map(|q| (q.name().to_ascii(), q.query_type().to_string()))
+        })
+        .unwrap_or_else(|| ("<unparseable>".to_string(), "<unknown>".to_string()));
+
     let request = DnsPipelineRequest::new(query.to_vec());
     match pipeline.handle_request(&request).await {
         Ok(Some(response)) => response.into_bytes(),
         Ok(None) => {
-            tracing::warn!("pipeline returned no response; returning SERVFAIL");
+            tracing::warn!(domain = %domain, qtype = %qtype, "pipeline returned no response; returning SERVFAIL");
             build_servfail_response(query)
         }
         Err(error) => {
-            tracing::warn!(error = %error, "pipeline failed; returning SERVFAIL");
+            tracing::warn!(domain = %domain, qtype = %qtype, error = %error, "pipeline failed; returning SERVFAIL");
             build_servfail_response(query)
         }
     }
