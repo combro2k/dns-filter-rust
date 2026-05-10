@@ -105,8 +105,10 @@ resolvers:
     - enabled: true
       protocol: "recursive"
       # root_hints_path: "/usr/share/dns/root.hints"  # optional, auto-detected or compiled-in fallback
+      # root_key_path: "/usr/share/dns/root.key"  # optional, auto-detected or compiled-in fallback
       # max_hops: 12  # optional, default is 12
-      # ip_preference: "ipv4"  # optional: "ipv4" (default) or "ipv6"
+      nameserver_ip_family: "ipv4"  # optional: "ipv4" (IPv4 only), "ipv6" (IPv6 only), or omit for both
+      dnssec: true  # enable DNSSEC chain-of-trust validation (default: true)
 
 logging:
   syslog:

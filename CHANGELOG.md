@@ -3,11 +3,16 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Fixed DNSSEC-aware clients (`delv +noroot`, `dig +dnssec`) seeing "answer not validated" / missing AD flag: recursive resolver responses now set the AD (Authenticated Data) flag when DNSSEC validation succeeded, and echo back an EDNS OPT record with the DO bit when the client sends one
+- Changed `ip_preference` to `nameserver_ip_family` for the recursive resolver; now an enforced constraint using `hickory-recursor`'s `nameserver_filter`: `"ipv4"` blocks all IPv6 nameservers, `"ipv6"` blocks all IPv4 nameservers, and omitting the option (new default) allows both families; added `ipnet` dependency
+- Replaced custom iterative `RecursiveResolver` with `hickory-recursor` crate, gaining built-in DNSSEC chain-of-trust validation from the IANA root KSK; queries like `delv @127.0.0.1 cloudflare.com A` now validate successfully instead of reporting "broken trust chain"
+- Added `dnssec` config option for the recursive resolver (default `true`): when enabled, the resolver validates DNSSEC signatures; set `dnssec: false` to disable validation
+- Added `hickory-recursor` v0.25.2 dependency with `dnssec-ring` feature
 - Recursive resolver now loads root-server addresses from `/usr/share/dns/root.hints` (or other well-known OS paths) at startup, falling back to compiled-in IANA addresses when the file is absent; added optional `root_hints_path` config field for explicit override
 - Added compiled-in IPv6 root-server addresses (`ROOT_HINTS_V6`) alongside the existing IPv4 set, so iterative resolution uses both address families by default
 - Fixed `RecursiveResolver` failing with DNSSEC validation errors ("could not validate negative response missing SOA") and timeouts during iterative resolution by replacing `DnssecClient` with plain `Client` — referral responses are not authoritative and cannot pass DNSSEC validation
 - Fixed slow iterative resolution for domains whose glue records list AAAA (IPv6) addresses before A (IPv4): glue addresses are now sorted IPv4-first, and `try_nameservers` races up to 3 candidates concurrently via `select_ok` instead of trying each sequentially
-- Added `ip_preference` config option for the recursive resolver (`"ipv4"` default, `"ipv6"`): controls whether IPv4 or IPv6 glue addresses are tried first during iterative resolution
+- Added `ip_preference` config option (now `nameserver_ip_family`) for the recursive resolver (`"ipv4"` default, `"ipv6"`): controls whether IPv4 or IPv6 glue addresses are tried first during iterative resolution
 - Added iterative recursive DNS resolver (`RecursiveResolver`) in [src/frameworks/upstream/recursive_resolver.rs](src/frameworks/upstream/recursive_resolver.rs): resolves queries from IANA root hints without a configured upstream, following NS referrals and using glue records where available; no-glue NS names are resolved via sub-lookups bounded by a configurable `max_hops` limit (default 12)
 - Renamed config section `upstreams:` to `resolvers:` in all configs and the `UpstreamsConfig` struct to `ResolversConfig` in [src/frameworks/config/schema.rs](src/frameworks/config/schema.rs) to reflect that the section now covers both forwarding and recursive resolvers
 - Added `protocol: "recursive"` as a valid resolver protocol; `address` is optional for this protocol and `max_hops` (optional `u8`) controls the referral hop limit

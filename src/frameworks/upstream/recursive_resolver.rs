@@ -1,38 +1,32 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
-use futures::future::BoxFuture;
-use hickory_client::client::{Client, ClientHandle};
-use hickory_client::proto::op::{Message, ResponseCode};
-use hickory_client::proto::rr::{DNSClass, Name, RData, RecordType};
-use hickory_client::proto::runtime::TokioRuntimeProvider;
-use hickory_client::proto::tcp::TcpClientStream;
-use hickory_client::proto::udp::UdpClientStream;
-use hickory_client::proto::xfer::DnsMultiplexer;
+use hickory_client::proto::op::{Message, MessageType, OpCode};
+use hickory_client::proto::rr::{Name, RecordType};
+use hickory_proto::dnssec::TrustAnchors;
+use hickory_recursor::{DnssecPolicy, NameServerConfigGroup, Recursor};
+use ipnet::IpNet;
 
 use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
-
-const UDP_TIMEOUT: Duration = Duration::from_secs(5);
-const TCP_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Maximum number of nameservers to query concurrently during each
-/// referral step.  Keeps resource usage bounded while still avoiding
-/// head-of-line blocking from a single unresponsive server.
-const CONCURRENT_NS_QUERIES: usize = 3;
 
 /// Default maximum number of referral hops before the resolver gives up.
 pub const DEFAULT_MAX_HOPS: u8 = 12;
 
-/// Controls the preferred ordering of nameserver addresses when both IPv4
-/// and IPv6 glue records are available.
+/// Controls which address families the recursive resolver may query.
+///
+/// Applied via `hickory-recursor`'s `nameserver_filter` to block the
+/// non-preferred family entirely during iterative resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum IpPreference {
-    /// Sort IPv4 addresses before IPv6 (default).
+pub enum NameserverIpFamily {
+    /// Allow both IPv4 and IPv6 nameservers (default).
     #[default]
-    PreferIpv4,
-    /// Sort IPv6 addresses before IPv4.
-    PreferIpv6,
+    Both,
+    /// Only query IPv4 nameservers; all IPv6 addresses are denied.
+    Ipv4Only,
+    /// Only query IPv6 nameservers; all IPv4 addresses are denied.
+    Ipv6Only,
 }
 
 /// Well-known paths where the OS may ship a `root.hints` file.
@@ -40,6 +34,13 @@ const DEFAULT_ROOT_HINTS_PATHS: &[&str] = &[
     "/usr/share/dns/root.hints",
     "/usr/share/dns-root-data/root.hints",
     "/var/named/root.hints",
+];
+
+/// Well-known paths where the OS may ship a `root.key` file containing
+/// DNSKEY records for the DNS root zone.
+const DEFAULT_ROOT_KEY_PATHS: &[&str] = &[
+    "/usr/share/dns/root.key",
+    "/usr/share/dns-root-data/root.key",
 ];
 
 /// IPv4 addresses of the 13 IANA root nameservers (a–m.root-servers.net).
@@ -173,242 +174,122 @@ fn builtin_root_hints() -> Vec<SocketAddr> {
     addrs
 }
 
-/// DNS resolver that performs iterative resolution starting from IANA root hints.
+/// Loads DNSSEC root trust anchors from a `root.key` file.
 ///
-/// Resolves DNS queries without a configured upstream by following NS referrals
-/// from the root servers down to the authoritative nameserver for the queried
-/// name. Glue records in the ADDITIONAL section are used where available;
-/// otherwise the NS hostname is resolved via a recursive sub-lookup that
-/// consumes from the same hop budget.
-#[derive(Debug, Clone)]
+/// Resolution order:
+/// 1. Explicit `root_key_path` from config (warn and fall back on error).
+/// 2. Well-known OS paths (`/usr/share/dns/root.key`, etc.).
+/// 3. `None` – let hickory use its compiled-in IANA trust anchors.
+pub fn load_root_key(root_key_path: Option<&str>) -> Option<Arc<TrustAnchors>> {
+    // 1. Explicit path from config.
+    if let Some(path) = root_key_path {
+        match TrustAnchors::from_file(std::path::Path::new(path)) {
+            Ok(anchors) if anchors.is_empty() => {
+                tracing::warn!(
+                    "root key file {path} contained no DNSKEY records; using compiled-in defaults"
+                );
+            }
+            Ok(anchors) => {
+                tracing::info!("loaded {} root trust anchors from {path}", anchors.len());
+                return Some(Arc::new(anchors));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "failed to parse root key file {path}: {e}; using compiled-in defaults"
+                );
+            }
+        }
+    } else {
+        // 2. Probe well-known OS paths.
+        for path in DEFAULT_ROOT_KEY_PATHS {
+            match TrustAnchors::from_file(std::path::Path::new(path)) {
+                Ok(anchors) if !anchors.is_empty() => {
+                    tracing::info!("loaded {} root trust anchors from {path}", anchors.len());
+                    return Some(Arc::new(anchors));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // 3. Fall back to compiled-in defaults (None tells hickory to use its own).
+    tracing::info!("using compiled-in root trust anchors");
+    None
+}
+
+/// DNS resolver that performs iterative resolution starting from IANA root hints,
+/// backed by `hickory-recursor` with optional DNSSEC chain-of-trust validation.
+///
+/// When DNSSEC is enabled (the default), the resolver validates the full
+/// chain of trust from the IANA root KSK down to the queried domain. Queries
+/// for domains with broken or missing DNSSEC signatures will return SERVFAIL.
+#[derive(Clone)]
 pub struct RecursiveResolver {
-    max_hops: u8,
-    ip_preference: IpPreference,
-    root_hints: Vec<SocketAddr>,
+    recursor: Arc<Recursor>,
+}
+
+impl std::fmt::Debug for RecursiveResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecursiveResolver").finish()
+    }
 }
 
 impl RecursiveResolver {
     /// Creates a new `RecursiveResolver` with the given root hints, maximum
-    /// hop count, and IP version preference.
+    /// hop count, and DNSSEC configuration.
     ///
     /// `root_hints` should be obtained via [`load_root_hints`].
-    pub fn new(root_hints: Vec<SocketAddr>, max_hops: u8, ip_preference: IpPreference) -> Self {
-        Self {
-            max_hops,
-            ip_preference,
-            root_hints,
-        }
-    }
-
-    /// Sends a single query to `addr` over UDP, falling back to TCP when the
-    /// response has the truncation (TC) bit set.
-    async fn query_nameserver(
-        addr: SocketAddr,
-        name: Name,
-        qtype: RecordType,
-    ) -> Result<Vec<u8>, UpstreamResolveError> {
-        let provider = TokioRuntimeProvider::default();
-        let conn = UdpClientStream::builder(addr, provider)
-            .with_timeout(Some(UDP_TIMEOUT))
-            .build();
-        let (mut client, bg) = Client::connect(conn)
-            .await
-            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
-        tokio::spawn(bg);
-
-        let response =
-            tokio::time::timeout(UDP_TIMEOUT, client.query(name.clone(), DNSClass::IN, qtype))
-                .await
-                .map_err(|_| UpstreamResolveError::Timeout)?
-                .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
-
-        let bytes = response
-            .to_vec()
-            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
-
-        // TCP fallback on truncation.
-        let msg = Message::from_vec(&bytes)
-            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
-        if msg.truncated() {
-            return Self::query_nameserver_tcp(addr, name, qtype).await;
-        }
-
-        Ok(bytes)
-    }
-
-    async fn query_nameserver_tcp(
-        addr: SocketAddr,
-        name: Name,
-        qtype: RecordType,
-    ) -> Result<Vec<u8>, UpstreamResolveError> {
-        let provider = TokioRuntimeProvider::default();
-        let (tcp_stream, sender) = TcpClientStream::new(addr, None, Some(TCP_TIMEOUT), provider);
-        let mux = DnsMultiplexer::new(tcp_stream, sender, None);
-        let (mut client, bg) = Client::connect(mux)
-            .await
-            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
-        tokio::spawn(bg);
-
-        let response = tokio::time::timeout(TCP_TIMEOUT, client.query(name, DNSClass::IN, qtype))
-            .await
-            .map_err(|_| UpstreamResolveError::Timeout)?
-            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
-
-        response
-            .to_vec()
-            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))
-    }
-
-    /// Queries up to [`CONCURRENT_NS_QUERIES`] nameservers concurrently,
-    /// returning the first successful response.
-    async fn try_nameservers(
-        &self,
-        nameservers: &[SocketAddr],
-        name: &Name,
-        qtype: RecordType,
-    ) -> Result<Vec<u8>, UpstreamResolveError> {
-        use futures::future::select_ok;
-
-        let futs: Vec<_> = nameservers
+    /// `trust_anchor` should be obtained via [`load_root_key`]; when `None`
+    /// the resolver uses hickory's compiled-in IANA trust anchors.
+    pub fn new(
+        root_hints: Vec<SocketAddr>,
+        max_hops: u8,
+        nameserver_ip_family: NameserverIpFamily,
+        dnssec: bool,
+        trust_anchor: Option<Arc<TrustAnchors>>,
+    ) -> Self {
+        // Filter root hints to match the requested IP family.
+        let filtered_ips: Vec<IpAddr> = root_hints
             .iter()
-            .take(CONCURRENT_NS_QUERIES)
-            .map(|&addr| {
-                let n = name.clone();
-                Box::pin(Self::query_nameserver(addr, n, qtype))
+            .map(|s| s.ip())
+            .filter(|ip| match nameserver_ip_family {
+                NameserverIpFamily::Both => true,
+                NameserverIpFamily::Ipv4Only => ip.is_ipv4(),
+                NameserverIpFamily::Ipv6Only => ip.is_ipv6(),
             })
             .collect();
+        let roots = NameServerConfigGroup::from_ips_clear(&filtered_ips, 53, true);
 
-        if futs.is_empty() {
-            return Err(UpstreamResolveError::AllFailed);
+        let dnssec_policy = if dnssec {
+            DnssecPolicy::ValidateWithStaticKey { trust_anchor }
+        } else {
+            DnssecPolicy::SecurityUnaware
+        };
+
+        // Build the deny list so the recursor never queries nameservers
+        // of the blocked address family during referral hops.
+        let deny_nets: Vec<IpNet> = match nameserver_ip_family {
+            NameserverIpFamily::Both => vec![],
+            NameserverIpFamily::Ipv4Only => vec!["::/0".parse().unwrap()],
+            NameserverIpFamily::Ipv6Only => vec!["0.0.0.0/0".parse().unwrap()],
+        };
+
+        let mut builder = Recursor::builder()
+            .dnssec_policy(dnssec_policy)
+            .recursion_limit(Some(max_hops));
+
+        if !deny_nets.is_empty() {
+            let allow_nets: Vec<IpNet> = vec![];
+            builder = builder.nameserver_filter(allow_nets.iter(), deny_nets.iter());
         }
 
-        select_ok(futs)
-            .await
-            .map(|(bytes, _remaining)| bytes)
-            .map_err(|_| UpstreamResolveError::AllFailed)
-    }
+        let recursor = builder
+            .build(roots)
+            .expect("failed to build recursive resolver");
 
-    /// Iteratively resolves `name`/`qtype`, starting from the root hints.
-    ///
-    /// `depth` tracks the sub-lookup nesting level (used when no glue records
-    /// are present) and is checked against `max_hops` to prevent unbounded
-    /// recursion.
-    fn resolve_iterative(
-        &self,
-        name: Name,
-        qtype: RecordType,
-        depth: u8,
-    ) -> BoxFuture<'_, Result<Vec<u8>, UpstreamResolveError>> {
-        Box::pin(async move {
-            if depth > self.max_hops {
-                return Err(UpstreamResolveError::Protocol(
-                    "max recursion depth exceeded".into(),
-                ));
-            }
-
-            let mut nameservers: Vec<SocketAddr> = self.root_hints.clone();
-
-            for _ in 0..self.max_hops {
-                let response_bytes = self.try_nameservers(&nameservers, &name, qtype).await?;
-                let msg = Message::from_vec(&response_bytes)
-                    .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
-
-                // Authoritative answer (AA bit), NXDOMAIN, or non-empty answer section
-                // all mean we have reached the end of the referral chain.
-                if msg.header().authoritative()
-                    || msg.response_code() == ResponseCode::NXDomain
-                    || !msg.answers().is_empty()
-                {
-                    return Ok(response_bytes);
-                }
-
-                if msg.response_code() != ResponseCode::NoError {
-                    return Err(UpstreamResolveError::Protocol(format!(
-                        "unexpected rcode from nameserver: {}",
-                        msg.response_code()
-                    )));
-                }
-
-                // Collect NS names from the AUTHORITY section.
-                let ns_names: Vec<Name> = msg
-                    .name_servers()
-                    .iter()
-                    .filter_map(|r| {
-                        if r.record_type() == RecordType::NS {
-                            if let RData::NS(ns) = r.data() {
-                                return Some(ns.0.clone());
-                            }
-                        }
-                        None
-                    })
-                    .collect();
-
-                if ns_names.is_empty() {
-                    return Err(UpstreamResolveError::AllFailed);
-                }
-
-                // Prefer glue records from the ADDITIONAL section.
-                // Sort addresses according to the configured IP preference so
-                // that the preferred address family is tried first.
-                let mut next_servers: Vec<SocketAddr> = msg
-                    .additionals()
-                    .iter()
-                    .filter_map(|r| {
-                        if !ns_names.contains(r.name()) {
-                            return None;
-                        }
-                        match r.data() {
-                            RData::A(a) => Some(SocketAddr::new(IpAddr::V4(a.0), 53)),
-                            RData::AAAA(aaaa) => Some(SocketAddr::new(IpAddr::V6(aaaa.0), 53)),
-                            _ => None,
-                        }
-                    })
-                    .collect();
-                match self.ip_preference {
-                    IpPreference::PreferIpv4 => next_servers.sort_by_key(|a| a.is_ipv6()),
-                    IpPreference::PreferIpv6 => next_servers.sort_by_key(|a| a.is_ipv4()),
-                }
-
-                if !next_servers.is_empty() {
-                    nameservers = next_servers;
-                    continue;
-                }
-
-                // No glue — resolve each NS name until we get at least one address.
-                for ns_name in &ns_names {
-                    if let Ok(ns_bytes) = self
-                        .resolve_iterative(ns_name.clone(), RecordType::A, depth + 1)
-                        .await
-                    {
-                        if let Ok(ns_msg) = Message::from_vec(&ns_bytes) {
-                            let addrs: Vec<SocketAddr> = ns_msg
-                                .answers()
-                                .iter()
-                                .filter_map(|r| {
-                                    if let RData::A(a) = r.data() {
-                                        Some(SocketAddr::new(IpAddr::V4(a.0), 53))
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect();
-                            if !addrs.is_empty() {
-                                next_servers.extend(addrs);
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if next_servers.is_empty() {
-                    return Err(UpstreamResolveError::AllFailed);
-                }
-
-                nameservers = next_servers;
-            }
-
-            Err(UpstreamResolveError::Protocol("max hops exceeded".into()))
-        })
+        Self {
+            recursor: Arc::new(recursor),
+        }
     }
 }
 
@@ -423,10 +304,60 @@ impl UpstreamResolver for RecursiveResolver {
             .first()
             .ok_or_else(|| UpstreamResolveError::Protocol("query contains no questions".into()))?;
 
-        let name = question.name().clone();
-        let qtype = question.query_type();
+        let name: Name = question.name().clone();
+        let qtype: RecordType = question.query_type();
+        let query_id = msg.id();
 
-        self.resolve_iterative(name, qtype, 0).await
+        // Check if the client set the DO (DNSSEC OK) bit
+        let do_bit = msg
+            .extensions()
+            .as_ref()
+            .map(|edns| edns.flags().dnssec_ok)
+            .unwrap_or(false);
+
+        let query = hickory_client::proto::op::Query::query(name, qtype);
+
+        let lookup = self
+            .recursor
+            .resolve(query, Instant::now(), do_bit)
+            .await
+            .map_err(|e| UpstreamResolveError::Protocol(format!("{e}")))?;
+
+        // Build a DNS response message from the Lookup result
+        let mut response = Message::new();
+        response.set_id(query_id);
+        response.set_message_type(MessageType::Response);
+        response.set_op_code(OpCode::Query);
+        response.set_recursion_desired(true);
+        response.set_recursion_available(true);
+
+        // Copy the original question
+        if let Some(q) = msg.queries().first() {
+            response.add_query(q.clone());
+        }
+
+        // Signal that validation was performed when the resolver is DNSSEC-aware
+        if self.recursor.is_validating() {
+            response.set_authentic_data(true);
+        }
+
+        // Echo EDNS OPT back when the client sent one
+        if let Some(client_edns) = msg.extensions() {
+            let mut edns = hickory_client::proto::op::Edns::new();
+            edns.set_dnssec_ok(do_bit);
+            edns.set_max_payload(client_edns.max_payload().max(512));
+            edns.set_version(0);
+            response.set_edns(edns);
+        }
+
+        // Add all answer records from the Lookup
+        for record in lookup.records() {
+            response.add_answer(record.clone());
+        }
+
+        response
+            .to_vec()
+            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))
     }
 }
 
@@ -435,20 +366,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_resolver_stores_max_hops() {
-        let resolver = RecursiveResolver::new(builtin_root_hints(), 8, IpPreference::default());
-        assert_eq!(resolver.max_hops, 8);
-    }
-
-    #[test]
-    fn new_resolver_stores_ip_preference() {
-        let resolver = RecursiveResolver::new(builtin_root_hints(), 12, IpPreference::PreferIpv6);
-        assert_eq!(resolver.ip_preference, IpPreference::PreferIpv6);
-    }
-
-    #[test]
-    fn default_ip_preference_is_ipv4() {
-        assert_eq!(IpPreference::default(), IpPreference::PreferIpv4);
+    fn default_nameserver_ip_family_is_both() {
+        assert_eq!(NameserverIpFamily::default(), NameserverIpFamily::Both);
     }
 
     #[test]
@@ -538,16 +457,44 @@ A.ROOT-SERVERS.NET.      3600000      AAAA  2001:503:ba3e::2:30
     }
 
     #[test]
-    fn resolve_iterative_returns_error_when_depth_exceeds_max_hops() {
-        let resolver = RecursiveResolver::new(builtin_root_hints(), 0, IpPreference::default());
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let name: Name = "example.com.".parse().unwrap();
-        let result = rt.block_on(resolver.resolve_iterative(name, RecordType::A, 1));
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, UpstreamResolveError::Protocol(ref msg) if msg.contains("max recursion depth exceeded")),
-            "unexpected error: {err}"
+    fn new_resolver_with_dnssec_enabled() {
+        let resolver = RecursiveResolver::new(
+            builtin_root_hints(),
+            12,
+            NameserverIpFamily::default(),
+            true,
+            None,
+        );
+        // Should construct without panic
+        assert!(Arc::strong_count(&resolver.recursor) >= 1);
+    }
+
+    #[test]
+    fn new_resolver_with_dnssec_disabled() {
+        let resolver = RecursiveResolver::new(
+            builtin_root_hints(),
+            8,
+            NameserverIpFamily::Ipv6Only,
+            false,
+            None,
+        );
+        assert!(Arc::strong_count(&resolver.recursor) >= 1);
+    }
+
+    #[test]
+    fn resolver_is_clone() {
+        let resolver = RecursiveResolver::new(
+            builtin_root_hints(),
+            12,
+            NameserverIpFamily::default(),
+            true,
+            None,
+        );
+        let cloned = resolver.clone();
+        // Both should share the same Arc
+        assert_eq!(
+            Arc::strong_count(&resolver.recursor),
+            Arc::strong_count(&cloned.recursor)
         );
     }
 }

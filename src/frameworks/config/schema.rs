@@ -150,13 +150,23 @@ pub struct UpstreamServer {
     #[serde(default)]
     pub address: String,
     pub max_hops: Option<u8>,
-    /// IP version preference for iterative resolution: `"ipv4"` (default) or
-    /// `"ipv6"`.  Controls whether IPv4 or IPv6 glue addresses are tried first.
-    pub ip_preference: Option<String>,
+    /// IP family restriction for iterative resolution: `"ipv4"` (IPv4 only),
+    /// `"ipv6"` (IPv6 only), or omit for both families (default).
+    /// Uses `nameserver_filter` to block the non-selected family entirely.
+    pub nameserver_ip_family: Option<String>,
     /// Path to a `root.hints` file for iterative resolution.  When omitted the
     /// resolver probes well-known OS paths and falls back to compiled-in IANA
     /// addresses.
     pub root_hints_path: Option<String>,
+    /// Path to a DNSSEC `root.key` file containing root DNSKEY records.
+    /// When omitted the resolver probes well-known OS paths
+    /// (`/usr/share/dns/root.key`) and falls back to compiled-in IANA trust
+    /// anchors.
+    pub root_key_path: Option<String>,
+    /// Enable DNSSEC validation for the recursive resolver.  Defaults to `true`.
+    /// When enabled, the resolver validates the full chain of trust from the
+    /// IANA root KSK.  Set to `false` to disable validation.
+    pub dnssec: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

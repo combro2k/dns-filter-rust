@@ -7,7 +7,7 @@ use anyhow::{anyhow, bail, Result};
 use crate::entities::resolution::UpstreamStrategy;
 use crate::frameworks::config::schema::{DnsFilterConfig, UpstreamServer};
 use crate::frameworks::upstream::recursive_resolver::{
-    load_root_hints, IpPreference, DEFAULT_MAX_HOPS,
+    load_root_hints, load_root_key, NameserverIpFamily, DEFAULT_MAX_HOPS,
 };
 use crate::frameworks::upstream::{DnsTlsClient, DnsUdpTcpClient, RecursiveResolver};
 use crate::use_cases::filtering::{parse_interval, DomainFilter, ListFilterEngine};
@@ -119,15 +119,24 @@ fn build_single_upstream_resolver(
         }
         "recursive" => {
             let max_hops = server.max_hops.unwrap_or(DEFAULT_MAX_HOPS);
-            let ip_preference = match server.ip_preference.as_deref() {
-                Some("ipv6") => IpPreference::PreferIpv6,
-                _ => IpPreference::PreferIpv4,
+            let nameserver_ip_family = match server.nameserver_ip_family.as_deref() {
+                Some("ipv4") => NameserverIpFamily::Ipv4Only,
+                Some("ipv6") => NameserverIpFamily::Ipv6Only,
+                _ => NameserverIpFamily::Both,
             };
+            let dnssec = server.dnssec.unwrap_or(true);
             let root_hints = load_root_hints(server.root_hints_path.as_deref());
+            let trust_anchor = if dnssec {
+                load_root_key(server.root_key_path.as_deref())
+            } else {
+                None
+            };
             Ok(Arc::new(RecursiveResolver::new(
                 root_hints,
                 max_hops,
-                ip_preference,
+                nameserver_ip_family,
+                dnssec,
+                trust_anchor,
             )))
         }
         other => bail!(
