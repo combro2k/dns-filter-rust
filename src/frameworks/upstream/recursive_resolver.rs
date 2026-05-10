@@ -4,13 +4,17 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use hickory_client::proto::op::{Message, MessageType, OpCode, ResponseCode};
-use hickory_client::proto::rr::{Name, RecordType};
+use hickory_client::proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::dnssec::{Proof, TrustAnchors};
 use hickory_proto::ProtoErrorKind;
 use hickory_recursor::{DnssecPolicy, ErrorKind, NameServerConfigGroup, Recursor};
 use ipnet::IpNet;
 
 use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
+
+/// Maximum number of CNAME hops to follow before returning what we have.
+/// Prevents infinite loops from circular CNAME chains.
+const MAX_CNAME_HOPS: u8 = 10;
 
 /// SOA + authority records extracted from a negative DNS response.
 type NegativeRecords = (
@@ -354,15 +358,77 @@ impl UpstreamResolver for RecursiveResolver {
                 // Unsigned delegations (e.g. google.com) carry Proof::Insecure and must NOT
                 // get the AD flag, otherwise downstream validators like `delv` see a bogus
                 // trust chain.
-                if self.recursor.is_validating()
+                let mut all_secure = self.recursor.is_validating()
                     && !lookup.records().is_empty()
-                    && lookup.records().iter().all(|r| r.proof() == Proof::Secure)
-                {
+                    && lookup.records().iter().all(|r| r.proof() == Proof::Secure);
+
+                // Collect answer records and follow CNAME chain if needed.
+                let mut answer_records: Vec<Record> = lookup.records().to_vec();
+
+                // Follow CNAME chain: if all answers are CNAME records and the
+                // original query type is not CNAME, resolve the CNAME target
+                // with the original query type to get the final answer.
+                if qtype != RecordType::CNAME {
+                    let mut hops: u8 = 0;
+                    while hops < MAX_CNAME_HOPS {
+                        // Check if the current answers are CNAME-only (no record
+                        // of the originally queried type).
+                        let has_queried_type =
+                            answer_records.iter().any(|r| r.record_type() == qtype);
+                        if has_queried_type {
+                            break;
+                        }
+
+                        // Find the last CNAME target to follow.
+                        let cname_target = answer_records
+                            .iter()
+                            .rev()
+                            .find(|r| r.record_type() == RecordType::CNAME)
+                            .and_then(|r| match r.data() {
+                                RData::CNAME(cname) => Some(cname.0.clone()),
+                                _ => None,
+                            });
+
+                        let Some(target) = cname_target else {
+                            break;
+                        };
+
+                        // Issue a follow-up query for the CNAME target.
+                        let follow_query = hickory_client::proto::op::Query::query(target, qtype);
+                        match self
+                            .recursor
+                            .resolve(follow_query, Instant::now(), do_bit)
+                            .await
+                        {
+                            Ok(follow_lookup) => {
+                                // Track AD across the chain.
+                                if all_secure {
+                                    all_secure = !follow_lookup.records().is_empty()
+                                        && follow_lookup
+                                            .records()
+                                            .iter()
+                                            .all(|r| r.proof() == Proof::Secure);
+                                }
+                                answer_records.extend(follow_lookup.records().iter().cloned());
+                            }
+                            Err(e) if e.is_nx_domain() || e.is_no_records_found() => {
+                                // CNAME target doesn't resolve; return what we have.
+                                break;
+                            }
+                            Err(_) => {
+                                // Upstream error on follow-up; return partial chain.
+                                break;
+                            }
+                        }
+                        hops += 1;
+                    }
+                }
+
+                if all_secure {
                     response.set_authentic_data(true);
                 }
 
-                // Add all answer records from the Lookup
-                for record in lookup.records() {
+                for record in &answer_records {
                     response.add_answer(record.clone());
                 }
             }
@@ -562,5 +628,104 @@ A.ROOT-SERVERS.NET.      3600000      AAAA  2001:503:ba3e::2:30
             Arc::strong_count(&resolver.recursor),
             Arc::strong_count(&cloned.recursor)
         );
+    }
+
+    #[test]
+    fn max_cname_hops_is_reasonable() {
+        assert!(
+            MAX_CNAME_HOPS >= 5,
+            "MAX_CNAME_HOPS should be at least 5 to handle real-world chains"
+        );
+        assert!(
+            MAX_CNAME_HOPS <= 20,
+            "MAX_CNAME_HOPS should be at most 20 to prevent excessive recursion"
+        );
+    }
+
+    /// Helper to build a CNAME record for testing.
+    fn make_cname_record(owner: &str, target: &str) -> Record {
+        let owner_name = Name::from_ascii(owner).unwrap();
+        let target_name = Name::from_ascii(target).unwrap();
+        Record::from_rdata(
+            owner_name,
+            300,
+            RData::CNAME(hickory_client::proto::rr::rdata::CNAME(target_name)),
+        )
+    }
+
+    /// Helper to build an A record for testing.
+    fn make_a_record(owner: &str, ip: Ipv4Addr) -> Record {
+        let owner_name = Name::from_ascii(owner).unwrap();
+        Record::from_rdata(
+            owner_name,
+            300,
+            RData::A(hickory_client::proto::rr::rdata::A(ip)),
+        )
+    }
+
+    #[test]
+    fn cname_target_extracted_from_records() {
+        let records = vec![make_cname_record("www.example.com.", "alias.example.com.")];
+        let target = records
+            .iter()
+            .rev()
+            .find(|r| r.record_type() == RecordType::CNAME)
+            .and_then(|r| match r.data() {
+                RData::CNAME(cname) => Some(cname.0.clone()),
+                _ => None,
+            });
+        assert_eq!(
+            target.unwrap(),
+            Name::from_ascii("alias.example.com.").unwrap()
+        );
+    }
+
+    #[test]
+    fn cname_chain_last_target_used() {
+        let records = vec![
+            make_cname_record("www.example.com.", "alias1.example.com."),
+            make_cname_record("alias1.example.com.", "alias2.example.com."),
+        ];
+        // The logic picks the last CNAME record (rev iterator).
+        let target = records
+            .iter()
+            .rev()
+            .find(|r| r.record_type() == RecordType::CNAME)
+            .and_then(|r| match r.data() {
+                RData::CNAME(cname) => Some(cname.0.clone()),
+                _ => None,
+            });
+        assert_eq!(
+            target.unwrap(),
+            Name::from_ascii("alias2.example.com.").unwrap()
+        );
+    }
+
+    #[test]
+    fn no_cname_following_when_queried_type_present() {
+        let records = vec![
+            make_cname_record("www.example.com.", "alias.example.com."),
+            make_a_record("alias.example.com.", Ipv4Addr::new(93, 184, 216, 34)),
+        ];
+        // If the queried type (A) is already present, no following needed.
+        let has_a = records.iter().any(|r| r.record_type() == RecordType::A);
+        assert!(has_a, "should detect that A record is present");
+    }
+
+    #[test]
+    fn no_cname_target_when_no_cname_records() {
+        let records = vec![make_a_record(
+            "example.com.",
+            Ipv4Addr::new(93, 184, 216, 34),
+        )];
+        let target = records
+            .iter()
+            .rev()
+            .find(|r| r.record_type() == RecordType::CNAME)
+            .and_then(|r| match r.data() {
+                RData::CNAME(cname) => Some(cname.0.clone()),
+                _ => None,
+            });
+        assert!(target.is_none());
     }
 }

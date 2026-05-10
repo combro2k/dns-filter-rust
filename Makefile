@@ -34,7 +34,15 @@ install-binary: build
 	install -D -m 0755 target/$(BUILD_PROFILE)/$(BINARY_NAME) $(DESTDIR)$(BINDIR)/$(BINARY_NAME)
 
 install-config:
-	install -D -m 0644 $(CONFIG_SRC) $(DESTDIR)$(ETCDIR)/config.yaml
+	install -d -m 0755 $(DESTDIR)$(ETCDIR)
+	@if [ -f "$(DESTDIR)$(ETCDIR)/config.yaml" ]; then \
+		install -m 0644 $(CONFIG_SRC) $(DESTDIR)$(ETCDIR)/config.yaml.dist; \
+		echo "config.yaml already exists, installed new config as config.yaml.dist"; \
+		echo "Differences:"; \
+		diff -u $(DESTDIR)$(ETCDIR)/config.yaml $(DESTDIR)$(ETCDIR)/config.yaml.dist || true; \
+	else \
+		install -m 0644 $(CONFIG_SRC) $(DESTDIR)$(ETCDIR)/config.yaml; \
+	fi
 
 install-data:
 	install -d -m 0755 $(DESTDIR)$(DATADIR)
