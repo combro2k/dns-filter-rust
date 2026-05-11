@@ -62,7 +62,7 @@ impl AgentHandler for ConcreteAgentA {
 ## Project Rules
 - **Always add changes to `CHANGELOG.md`**
 - **Always add cargo tests if implementing a new feature**
-- **Always run `cargo fmt` and `cargo clippy --all -- -D warnings` before committing**
+- **Always run `tests/release-check.sh` before committing**
 - **Code must not contain any formatting errors or clippy warnings/errors**
 - **Always run `./tests/listener_batch_test.sh` after finishing changes**
 - **Reject changes that invert layer dependencies**
@@ -106,6 +106,26 @@ All code changes must be designed, implemented, and reviewed with a security-fir
 - `AGENTS.md`: Documents agent architecture and design patterns
 - `CHANGELOG.md`: All changes must be recorded here
 - `Cargo.toml` and `src/`: Standard Rust project structure
+
+## Release and Compliance Requirements
+
+- **Changelog is mandatory for every version update**: Each version update **MUST** be documented in `CHANGELOG.md` with a clear summary of what changed.
+- **Version is mandatory for every version update**: `Cargo.toml` **MUST** have the exact same version.
+- **Version update workflow is mandatory**: A version update **MUST** explicitly include all of the following steps:
+    - Update the version in all required files. If the exact target version is assumed rather than provided, explicitly ask the user to confirm the version before proceeding.
+    - If the user asks for a version update without specifying a target version, calculate and suggest:
+        - Next minor version (`x.x.(y+1)`) as the default/recommended option.
+        - Next major version (`(x+1).0.0`) as an alternative option.
+            Present these choices using an input selector (interactive option picker), with next minor preselected/recommended, while still allowing explicit freeform version input.
+      Always ask for explicit confirmation before applying any version change.
+    - Commit scope policy for version updates: All files, including version-update files.
+    - Create a Git tag for the version.
+    - Push only when the user explicitly asks for a push.
+- **Release validation is mandatory**: `bash tests/release-check.sh` **MUST** be run and pass without errors on every version update.
+    - `cargo clean` is conditional inside the script and only runs when relevant code/assets/test/migration paths changed.
+- **No personal or private information in the codebase**:
+    - The repository **MUST NOT** contain personal/private data or secrets.
+    - This includes (but is not limited to): tokens, passwords, usernames, API keys, credentials, private identifiers, or similar sensitive values.
 
 ---
 

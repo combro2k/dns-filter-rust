@@ -504,12 +504,13 @@ mod tests {
 
     #[test]
     fn default_max_hops_is_within_expected_range() {
+        let default_max_hops = std::hint::black_box(DEFAULT_MAX_HOPS);
         assert!(
-            DEFAULT_MAX_HOPS >= 8,
+            default_max_hops >= 8,
             "DEFAULT_MAX_HOPS should be at least 8"
         );
         assert!(
-            DEFAULT_MAX_HOPS <= 20,
+            default_max_hops <= 20,
             "DEFAULT_MAX_HOPS should be at most 20"
         );
     }
@@ -632,12 +633,13 @@ A.ROOT-SERVERS.NET.      3600000      AAAA  2001:503:ba3e::2:30
 
     #[test]
     fn max_cname_hops_is_reasonable() {
+        let max_cname_hops = std::hint::black_box(MAX_CNAME_HOPS);
         assert!(
-            MAX_CNAME_HOPS >= 5,
+            max_cname_hops >= 5,
             "MAX_CNAME_HOPS should be at least 5 to handle real-world chains"
         );
         assert!(
-            MAX_CNAME_HOPS <= 20,
+            max_cname_hops <= 20,
             "MAX_CNAME_HOPS should be at most 20 to prevent excessive recursion"
         );
     }
@@ -665,7 +667,7 @@ A.ROOT-SERVERS.NET.      3600000      AAAA  2001:503:ba3e::2:30
 
     #[test]
     fn cname_target_extracted_from_records() {
-        let records = vec![make_cname_record("www.example.com.", "alias.example.com.")];
+        let records = [make_cname_record("www.example.com.", "alias.example.com.")];
         let target = records
             .iter()
             .rev()
@@ -682,7 +684,7 @@ A.ROOT-SERVERS.NET.      3600000      AAAA  2001:503:ba3e::2:30
 
     #[test]
     fn cname_chain_last_target_used() {
-        let records = vec![
+        let records = [
             make_cname_record("www.example.com.", "alias1.example.com."),
             make_cname_record("alias1.example.com.", "alias2.example.com."),
         ];
@@ -703,7 +705,7 @@ A.ROOT-SERVERS.NET.      3600000      AAAA  2001:503:ba3e::2:30
 
     #[test]
     fn no_cname_following_when_queried_type_present() {
-        let records = vec![
+        let records = [
             make_cname_record("www.example.com.", "alias.example.com."),
             make_a_record("alias.example.com.", Ipv4Addr::new(93, 184, 216, 34)),
         ];
@@ -714,7 +716,7 @@ A.ROOT-SERVERS.NET.      3600000      AAAA  2001:503:ba3e::2:30
 
     #[test]
     fn no_cname_target_when_no_cname_records() {
-        let records = vec![make_a_record(
+        let records = [make_a_record(
             "example.com.",
             Ipv4Addr::new(93, 184, 216, 34),
         )];
