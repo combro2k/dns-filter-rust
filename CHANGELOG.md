@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Implemented configuration-driven logging initialization with support for syslog, file, and stdout targets; logging now initializes after config load and before privilege drop/chroot
+- Implemented syslog transport support with local unix socket defaults and remote endpoints: `transport` (`unix`/`udp`/`tcp`/`tls`), `server`, and `format` (`rfc3164`/`rfc5424`) under `logging.syslog`
+- Integrated `syslog` crate for unix/udp/tcp client transports and kept custom TLS transport path for remote TLS syslog
+- Updated example config with syslog transport/format/TLS options and chroot notes for `/dev/log` bind-mount requirements
+- Updated OpenRC script to bind-mount `/dev/log` into `/var/lib/dns-filter/dev/log` during start (for chrooted local syslog) and unmount on stop
 - Added domain name and query type to SERVFAIL log messages in the DNS pipeline (`forward_query`), making it easier to diagnose upstream failures
 - Fixed chroot breaking user/group resolution: moved name→uid/gid lookup before `chroot()` so `/etc/passwd` and `/etc/group` are still accessible from the real root filesystem
 - Extended hickory log filtering: in normal mode `hickory_recursor` is now also filtered to ERROR-only (in addition to `hickory_proto::dnssec`), suppressing expected WARN-level "no records found for DS" messages during unsigned delegation probing; all messages remain visible in `--debug` mode

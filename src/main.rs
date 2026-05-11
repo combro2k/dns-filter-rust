@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use dns_filter::frameworks::config::loader::load_config;
+use dns_filter::frameworks::logging;
 use dns_filter::frameworks::privileges::{
     drop_privileges, PrivilegeDropConfig, DEFAULT_CHROOT_DIR, DEFAULT_GROUP, DEFAULT_USER,
 };
@@ -82,29 +83,22 @@ async fn main() {
         unreachable!("version action is handled above");
     };
 
-    // Initialize tracing/logging.
-    // In normal mode, suppress noisy WARN-level messages from hickory's DNSSEC
-    // module (e.g. "response does not contain NSEC or NSEC3 records") that are
-    // expected for unsigned delegations.  In debug mode, show everything.
-    let filter = if cli_options.debug {
-        tracing_subscriber::EnvFilter::new("debug")
-    } else {
-        tracing_subscriber::EnvFilter::new(
-            "info,hickory_proto::dnssec=error,hickory_recursor=error",
-        )
-    };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(true)
-        .with_thread_ids(true)
-        .init();
-
     let config_path = cli_options.config_path;
 
     let config = match load_config(&config_path) {
         Ok(cfg) => validate_config(cfg),
         Err(e) => {
             eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Initialize logging from configuration.
+    // Must be done BEFORE drop_privileges() so syslog can access /dev/log.
+    let _logging_guard = match logging::init_logging(&config, cli_options.debug) {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("failed to initialize logging: {e:#}");
             std::process::exit(1);
         }
     };

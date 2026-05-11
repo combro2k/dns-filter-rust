@@ -120,8 +120,19 @@ resolvers:
 logging:
   syslog:
     enabled: true
+    # Syslog transport: "unix" (default local), "udp", "tcp", or "tls".
+    transport: "unix"
+    # For transport "unix": a socket path (default: /dev/log).
+    # For network transports: host:port (e.g. 192.0.2.10:514).
+    server: "/dev/log"
+    # Syslog message format: "rfc3164" (default) or "rfc5424".
+    format: "rfc3164"
     facility: local0
     level: info
+    # TLS settings are only used when transport: "tls".
+    # tls:
+    #   ca_cert_path: "/etc/ssl/certs/ca-certificates.crt"
+    #   verify_hostname: true
   file:
     enabled: false
     location: /var/log/dns-filter.log
@@ -137,6 +148,10 @@ logging:
 #
 # NOTE: After chroot, config files and blocklist caches must be accessible
 # from within the chroot directory (e.g. bind-mount or copy into it).
+# NOTE: If syslog transport is "unix" and server is /dev/log (default),
+#       make /var/lib/dns-filter/dev/log available inside chroot via bind-mount.
+#       Alternatively, use transport: "udp" with server: "127.0.0.1:514"
+#       (or a remote syslog endpoint) to avoid the /dev/log bind-mount.
 security:
   user: "nobody"
   group: "nogroup"

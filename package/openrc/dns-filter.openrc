@@ -15,9 +15,23 @@ depend() {
 
 start_pre() {
 	checkpath -d /var/lib/dns-filter
+	checkpath -d /var/lib/dns-filter/dev
 	# Ensure the chroot directory is owned by the target user so the
 	# process can write state files (e.g. filter cache) after priv-drop.
 	checkpath -d -o nobody:nogroup /var/lib/dns-filter
+
+	# Provide /dev/log inside chroot for local unix-socket syslog.
+	if [ -S /dev/log ]; then
+		if ! grep -qs " /var/lib/dns-filter/dev/log " /proc/mounts; then
+			mount --bind /dev/log /var/lib/dns-filter/dev/log || return 1
+		fi
+	fi
+}
+
+stop_post() {
+	if grep -qs " /var/lib/dns-filter/dev/log " /proc/mounts; then
+		umount /var/lib/dns-filter/dev/log || return 1
+	fi
 }
 
 reload() {

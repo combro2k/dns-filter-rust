@@ -231,6 +231,24 @@ pub struct SyslogConfig {
     pub enabled: bool,
     pub facility: String,
     pub level: String,
+    /// Syslog transport: "unix" (default), "udp", "tcp", or "tls".
+    pub transport: Option<String>,
+    /// Syslog server address.
+    /// - For "unix": path (default: "/dev/log")
+    /// - For "udp", "tcp", "tls": host:port (default: "127.0.0.1:514")
+    pub server: Option<String>,
+    /// Syslog message format: "rfc3164" (default) or "rfc5424".
+    pub format: Option<String>,
+    /// TLS configuration (only for transport="tls").
+    pub tls: Option<SyslogTlsConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SyslogTlsConfig {
+    /// Path to CA certificate file for TLS verification.
+    pub ca_cert_path: Option<String>,
+    /// Whether to verify the hostname (default: true).
+    pub verify_hostname: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
