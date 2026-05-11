@@ -209,6 +209,9 @@ pub struct ResolverZoneConfig {
     #[serde(default)]
     pub fallback_to_default_resolvers: bool,
     pub strategy: Option<String>,
+    pub zone_source: Option<String>,
+    pub zone_source_check_interval: Option<String>,
+    #[serde(default)]
     pub servers: Vec<UpstreamServer>,
 }
 

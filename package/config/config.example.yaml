@@ -117,6 +117,9 @@ resolvers:
       nameserver_ip_family: "ipv4"  # optional: "ipv4" (IPv4 only), "ipv6" (IPv6 only), or omit for both
       dnssec: true  # enable DNSSEC chain-of-trust validation (default: true)
   zones:
+    # Zone mode is strict: choose exactly one of:
+    # 1) forwarding mode via servers[]
+    # 2) authoritative mode via zone_source (JSON file or HTTP/HTTPS URL)
     - zone: "home.arpa"
       enabled: false
       bypass_filter: true
@@ -126,6 +129,20 @@ resolvers:
         - enabled: true
           protocol: "dns"
           address: "192.168.1.1:53"
+    # Example authoritative JSON zone from local file (static: startup + SIGHUP reload only).
+    # - zone: "example.com"
+    #   enabled: false
+    #   bypass_filter: false
+    #   fallback_to_default_resolvers: false
+    #   zone_source: "/etc/dns-filter/zones/example.com.json"
+    #
+    # Example authoritative JSON zone from URL (periodically checked).
+    # - zone: "example.net"
+    #   enabled: false
+    #   bypass_filter: false
+    #   fallback_to_default_resolvers: false
+    #   zone_source: "https://zones.example.net/example.net.json"
+    #   zone_source_check_interval: "15m"
     - zone: "168.192.in-addr.arpa"
       enabled: false
       bypass_filter: true

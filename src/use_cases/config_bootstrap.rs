@@ -16,6 +16,7 @@ use crate::use_cases::request_pipeline::{
     DnsServfailFallbackStage, DnsUpstreamStage,
 };
 use crate::use_cases::upstream_resolver::{StrategyUpstreamResolver, UpstreamResolver};
+use crate::use_cases::zone_authority::ZoneAuthorityResolver;
 use crate::use_cases::zone_forwarding::{ZoneEntry, ZoneForwardingStage};
 
 pub fn validate_config(config: DnsFilterConfig) -> DnsFilterConfig {
@@ -107,6 +108,32 @@ fn build_zone_entry(
     zone: &ResolverZoneConfig,
     bootstrap_resolvers: &[String],
 ) -> Result<ZoneEntry> {
+    let has_source = zone
+        .zone_source
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_servers = zone.servers.iter().any(|server| server.enabled);
+
+    match (has_source, has_servers) {
+        (true, true) => {
+            bail!(
+                "zone '{}' must define exactly one mode: either zone_source or at least one enabled servers entry",
+                zone.zone
+            );
+        }
+        (false, false) => {
+            bail!(
+                "zone '{}' must define exactly one mode: either zone_source or at least one enabled servers entry",
+                zone.zone
+            );
+        }
+        _ => {}
+    }
+
+    if has_source {
+        return build_zone_source_entry(zone);
+    }
+
     let strategy = zone.strategy.as_deref().unwrap_or("failover");
     let resolver = build_upstream_resolver_group(strategy, bootstrap_resolvers, &zone.servers)
         .map_err(|error| anyhow!("invalid resolver zone '{}': {error}", zone.zone))?;
@@ -116,6 +143,46 @@ fn build_zone_entry(
         zone.bypass_filter,
         zone.fallback_to_default_resolvers,
         resolver,
+    )
+}
+
+fn build_zone_source_entry(zone: &ResolverZoneConfig) -> Result<ZoneEntry> {
+    let source = zone
+        .zone_source
+        .as_deref()
+        .ok_or_else(|| anyhow!("missing zone_source for zone '{}'", zone.zone))?
+        .trim();
+    if source.is_empty() {
+        bail!("zone '{}' has an empty zone_source", zone.zone);
+    }
+
+    let is_url = source.starts_with("http://") || source.starts_with("https://");
+    if !is_url && zone.zone_source_check_interval.is_some() {
+        bail!(
+            "zone '{}' sets zone_source_check_interval but zone_source is not an HTTP(S) URL",
+            zone.zone
+        );
+    }
+
+    let check_interval = match (is_url, zone.zone_source_check_interval.as_deref()) {
+        (true, Some(value)) => Some(parse_interval(value).map_err(|error| {
+            anyhow!(
+                "invalid zone_source_check_interval for zone '{}': {} ({error})",
+                zone.zone,
+                value
+            )
+        })?),
+        _ => None,
+    };
+
+    let resolver = ZoneAuthorityResolver::from_source(&zone.zone, source, check_interval)
+        .map_err(|error| anyhow!("invalid resolver zone '{}': {error}", zone.zone))?;
+
+    ZoneEntry::new(
+        zone.zone.clone(),
+        zone.bypass_filter,
+        zone.fallback_to_default_resolvers,
+        Arc::new(resolver),
     )
 }
 
@@ -226,12 +293,26 @@ fn parse_bootstrap_resolvers(values: &[String]) -> Result<Vec<SocketAddr>> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use crate::frameworks::config::schema::{
         DnsFilterConfig, FilteringConfig, ListenConfig, LoggingConfig, NamedList,
         ResolverZoneConfig, ResolversConfig, SocketConfig, StdoutLogConfig, UpstreamServer,
     };
 
     use super::*;
+
+    fn create_temp_zone_json(content: &str) -> String {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "dns-filter-zone-source-{}-{id}.json",
+            std::process::id()
+        ));
+        fs::write(&path, content).expect("failed to write zone source file");
+        path.to_string_lossy().to_string()
+    }
 
     fn base_config(servers: Vec<UpstreamServer>) -> DnsFilterConfig {
         DnsFilterConfig {
@@ -536,6 +617,8 @@ mod tests {
             bypass_filter: true,
             fallback_to_default_resolvers: false,
             strategy: None,
+            zone_source: None,
+            zone_source_check_interval: None,
             servers: vec![UpstreamServer {
                 enabled: true,
                 protocol: "dns".into(),
@@ -565,6 +648,8 @@ mod tests {
             bypass_filter: true,
             fallback_to_default_resolvers: false,
             strategy: Some("failover".into()),
+            zone_source: None,
+            zone_source_check_interval: None,
             servers: vec![UpstreamServer {
                 enabled: true,
                 protocol: "dns".into(),
@@ -575,5 +660,116 @@ mod tests {
 
         let zones = build_zone_entries(&config).expect("zone entries should build");
         assert!(zones.is_empty());
+    }
+
+    #[test]
+    fn build_zone_entries_rejects_zone_with_source_and_servers() {
+        let zone_file =
+            create_temp_zone_json(r#"{"zone":"home.arpa","ttl_default":300,"records":[]}"#);
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+            ..Default::default()
+        }]);
+        config.resolvers.zones = vec![ResolverZoneConfig {
+            zone: "home.arpa".into(),
+            enabled: true,
+            bypass_filter: false,
+            fallback_to_default_resolvers: false,
+            strategy: Some("failover".into()),
+            zone_source: Some(zone_file.clone()),
+            zone_source_check_interval: None,
+            servers: vec![UpstreamServer {
+                enabled: true,
+                protocol: "dns".into(),
+                address: "192.168.1.1:53".into(),
+                ..Default::default()
+            }],
+        }];
+
+        let result = build_zone_entries(&config);
+        assert!(result.is_err());
+        let error = match result {
+            Ok(_) => panic!("expected XOR mode error"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("exactly one mode"));
+
+        let _ = fs::remove_file(zone_file);
+    }
+
+    #[test]
+    fn build_zone_entries_accepts_zone_source_mode() {
+        let zone_file = create_temp_zone_json(
+            r#"{
+                "zone":"home.arpa",
+                "ttl_default":300,
+                "records":[
+                    {"name":"@","type":"A","ttl":300,"data":{"address":"192.168.1.50"}}
+                ]
+            }"#,
+        );
+
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+            ..Default::default()
+        }]);
+        config.resolvers.zones = vec![ResolverZoneConfig {
+            zone: "home.arpa".into(),
+            enabled: true,
+            bypass_filter: false,
+            fallback_to_default_resolvers: false,
+            strategy: None,
+            zone_source: Some(zone_file.clone()),
+            zone_source_check_interval: None,
+            servers: vec![],
+        }];
+
+        let zones = build_zone_entries(&config).expect("zone entries should build");
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].zone(), "home.arpa");
+
+        let _ = fs::remove_file(zone_file);
+    }
+
+    #[test]
+    fn build_zone_entries_rejects_interval_for_file_zone_source() {
+        let zone_file = create_temp_zone_json(
+            r#"{
+                "zone":"home.arpa",
+                "ttl_default":300,
+                "records":[]
+            }"#,
+        );
+
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+            ..Default::default()
+        }]);
+        config.resolvers.zones = vec![ResolverZoneConfig {
+            zone: "home.arpa".into(),
+            enabled: true,
+            bypass_filter: false,
+            fallback_to_default_resolvers: false,
+            strategy: None,
+            zone_source: Some(zone_file.clone()),
+            zone_source_check_interval: Some("15m".into()),
+            servers: vec![],
+        }];
+
+        let result = build_zone_entries(&config);
+        assert!(result.is_err());
+        let error = match result {
+            Ok(_) => panic!("expected file interval validation error"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("zone_source_check_interval"));
+
+        let _ = fs::remove_file(zone_file);
     }
 }

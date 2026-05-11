@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-05-12
+- Added per-zone authoritative JSON source mode with `resolvers.zones[*].zone_source` (local file, `http://`, or `https://`) and strict XOR validation against forwarding `servers[]` mode
+- Added optional per-zone `resolvers.zones[*].zone_source_check_interval` for URL-backed authoritative zones, including background refresh that keeps the last good snapshot on refresh failure
+- Added startup/reload validation for zone-source mode combinations and zone consistency (`resolvers.zones[*].zone` must match JSON `zone`)
+- Added initial authoritative JSON zone resolver implementation (`src/use_cases/zone_authority.rs`) with DNS answer synthesis for `A`, `AAAA`, `SOA`, `NS`, `MX`, `TXT`, `SRV`, `CNAME`, `PTR`, `CAA`, `TLSA`, and `NAPTR` records
+- Added NS glue synthesis for authoritative JSON zones: `NS` answers now include in-zone `A`/`AAAA` host records in the DNS additional section when available
+- Added authoritative JSON fallback synthesis for missing apex records: when JSON omits apex `NS` or `SOA`, the resolver now auto-generates defaults (`NS ns1.<zone>`, `SOA ns1.<zone> hostmaster.<zone>`) so authority responses remain valid
+- Updated config parse guidance and example configuration to document `zone_source` mode and URL check interval behavior
+- Added unit tests covering zone mode XOR validation, file source acceptance, and file-source interval rejection
+- Added authoritative-zone tests covering NS glue, auto-generated apex NS/SOA fallback records, and JSON parsing for `CAA`, `TLSA`, and `NAPTR`
+
 ## [1.0.0] - 2026-05-11
 - Expanded `tests/release-check.sh` to run the required release gates: `gitleaks`, `cargo fmt --all -- --check`, `cargo test --all-targets --all-features`, and `cargo clippy --all-targets --all-features -- -D warnings`
 - Added bash-only zone-forwarding smoke coverage to `tests/listener_batch_test.sh`, including `resolvers.zones[*].enabled` on/off behavior
