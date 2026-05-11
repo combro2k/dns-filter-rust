@@ -186,11 +186,30 @@ pub struct ResolversConfig {
     pub strategy: String,
     #[serde(default = "default_bootstrap_resolvers")]
     pub bootstrap_resolvers: Vec<String>,
+    #[serde(default)]
+    pub zones: Vec<ResolverZoneConfig>,
     pub servers: Vec<UpstreamServer>,
 }
 
 fn default_bootstrap_resolvers() -> Vec<String> {
     vec!["1.1.1.1".to_string()]
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResolverZoneConfig {
+    pub zone: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub bypass_filter: bool,
+    #[serde(default)]
+    pub fallback_to_default_resolvers: bool,
+    pub strategy: Option<String>,
+    pub servers: Vec<UpstreamServer>,
 }
 
 #[derive(Debug, Default, Deserialize)]

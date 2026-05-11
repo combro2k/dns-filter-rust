@@ -3,6 +3,8 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Added optional `resolvers.zones[*].enabled` flag so zone-forwarding entries can be kept in config but turned on/off without removal; omitted `enabled` defaults to `true`
+- Added zone-based forwarding under `resolvers.zones[]`: queries matching configured suffixes can use dedicated zone-specific upstream resolvers, optionally bypass blocklist filtering, and optionally fall back to the default resolver set when all zone resolvers fail
 - Consolidated duplicated governance rules in `AGENTS.md` by making `Project Rules` the single source of truth and simplifying/reordering the AI role and security sections
 - Documented the coding agent role in `AGENTS.md` as a security-first engineer responsible for flaw/race-condition review and required quality-gate checks
 - Added explicit security-first engineering requirements to `AGENTS.md`, including a mandatory security review checklist and concurrency/race-condition review requirements

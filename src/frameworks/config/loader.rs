@@ -46,6 +46,8 @@ fn hint_for_path(field_path: &str) -> &'static str {
         "Use either '- name: my_list\\n  url: https://...\\n  interval: 12h' or '- my_list:\\n    url: https://...\\n    interval: 12h' for each list item."
     } else if field_path.starts_with("listen") {
         "Check listener fields and types (for example, ports must be numbers and TLS sections must be nested under 'tls')."
+    } else if field_path.starts_with("resolvers.zones") {
+        "Check each zone includes 'zone' and a 'servers' list; optional flags are 'enabled', 'bypass_filter', and 'fallback_to_default_resolvers', and zone-level 'strategy' supports round_robin, random, or failover."
     } else if field_path.starts_with("resolvers") {
         "Check that 'strategy' is valid, each server includes 'protocol'/'address', and optional 'bootstrap_resolvers' values are IP or IP:port (default: 1.1.1.1; protocol support: dns, dot, recursive; DoT examples: tls://1.1.1.1, tls://dns.example.com:853, or 1.1.1.1:853)."
     } else if field_path.starts_with("logging") {
@@ -316,6 +318,56 @@ logging:
             cache.document_path.as_deref(),
             Some("/var/lib/dns-filter/filter-cache.db")
         );
+    }
+
+    #[test]
+    fn parses_zone_resolver_configuration() {
+        let yaml = r#"
+listen:
+  dns:
+    enabled: true
+    address: "127.0.0.1"
+    port: 5353
+  dot: null
+  doh: null
+  doq: null
+  http: null
+  metrics: null
+blocklists: []
+allowlists: []
+resolvers:
+  strategy: "round_robin"
+  servers:
+    - enabled: true
+      protocol: "dns"
+      address: "1.1.1.1:53"
+  zones:
+    - zone: "home.arpa"
+      enabled: true
+      bypass_filter: true
+      fallback_to_default_resolvers: false
+      strategy: "failover"
+      servers:
+        - enabled: true
+          protocol: "dns"
+          address: "192.168.1.1:53"
+logging:
+  syslog: null
+  file: null
+  stdout:
+    enabled: true
+    level: "info"
+"#;
+
+        let parsed = parse_config("zones.yaml", yaml).expect("config should parse");
+        assert_eq!(parsed.resolvers.zones.len(), 1);
+        let zone = &parsed.resolvers.zones[0];
+        assert_eq!(zone.zone, "home.arpa");
+        assert!(zone.enabled);
+        assert!(zone.bypass_filter);
+        assert!(!zone.fallback_to_default_resolvers);
+        assert_eq!(zone.strategy.as_deref(), Some("failover"));
+        assert_eq!(zone.servers.len(), 1);
     }
 
     #[test]

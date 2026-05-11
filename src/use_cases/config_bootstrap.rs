@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Result};
 
 use crate::entities::resolution::UpstreamStrategy;
-use crate::frameworks::config::schema::{DnsFilterConfig, UpstreamServer};
+use crate::frameworks::config::schema::{DnsFilterConfig, ResolverZoneConfig, UpstreamServer};
 use crate::frameworks::upstream::recursive_resolver::{
     load_root_hints, load_root_key, NameserverIpFamily, DEFAULT_MAX_HOPS,
 };
@@ -16,6 +16,7 @@ use crate::use_cases::request_pipeline::{
     DnsServfailFallbackStage, DnsUpstreamStage,
 };
 use crate::use_cases::upstream_resolver::{StrategyUpstreamResolver, UpstreamResolver};
+use crate::use_cases::zone_forwarding::{ZoneEntry, ZoneForwardingStage};
 
 pub fn validate_config(config: DnsFilterConfig) -> DnsFilterConfig {
     // Keep validation simple for the first migration step.
@@ -23,34 +24,21 @@ pub fn validate_config(config: DnsFilterConfig) -> DnsFilterConfig {
 }
 
 pub fn build_upstream_resolver(config: &DnsFilterConfig) -> Result<Arc<dyn UpstreamResolver>> {
-    let strategy = UpstreamStrategy::from_str(&config.resolvers.strategy)
-        .map_err(|_| anyhow!("invalid upstream strategy: {}", config.resolvers.strategy))?;
+    build_upstream_resolver_group(
+        &config.resolvers.strategy,
+        &config.resolvers.bootstrap_resolvers,
+        &config.resolvers.servers,
+    )
+}
 
-    let enabled_servers = config
+pub fn build_zone_entries(config: &DnsFilterConfig) -> Result<Vec<ZoneEntry>> {
+    config
         .resolvers
-        .servers
+        .zones
         .iter()
-        .filter(|server| server.enabled)
-        .collect::<Vec<_>>();
-
-    if enabled_servers.is_empty() {
-        bail!("at least one enabled upstream server is required");
-    }
-
-    // Bootstrap resolvers are only needed for DoT servers with hostname endpoints.
-    let needs_bootstrap = enabled_servers.iter().any(|s| s.protocol == "dot");
-    let bootstrap_resolvers = if needs_bootstrap {
-        parse_bootstrap_resolvers(&config.resolvers.bootstrap_resolvers)?
-    } else {
-        vec![]
-    };
-
-    let resolvers = enabled_servers
-        .into_iter()
-        .map(|server| build_single_upstream_resolver(server, &bootstrap_resolvers))
-        .collect::<Result<Vec<_>>>()?;
-
-    Ok(Arc::new(StrategyUpstreamResolver::new(resolvers, strategy)))
+        .filter(|zone| zone.enabled)
+        .map(|zone| build_zone_entry(zone, &config.resolvers.bootstrap_resolvers))
+        .collect()
 }
 
 pub fn build_domain_filter(config: &DnsFilterConfig) -> Result<Arc<dyn DomainFilter>> {
@@ -94,11 +82,73 @@ pub fn build_dns_request_pipeline(
     filter: Arc<dyn DomainFilter>,
     any_query_policy: AnyQueryPolicy,
 ) -> DnsRequestPipeline {
+    build_dns_request_pipeline_with_zone_entries(resolver, filter, any_query_policy, Vec::new())
+}
+
+pub fn build_dns_request_pipeline_with_zone_entries(
+    resolver: Arc<dyn UpstreamResolver>,
+    filter: Arc<dyn DomainFilter>,
+    any_query_policy: AnyQueryPolicy,
+    zone_entries: Vec<ZoneEntry>,
+) -> DnsRequestPipeline {
+    let bypass_stage = ZoneForwardingStage::bypass_only(zone_entries.clone());
+    let filtered_stage = ZoneForwardingStage::non_bypass(zone_entries);
+
     DnsRequestPipeline::default()
+        .add_stage(bypass_stage)
         .add_stage(DnsFilterStage::new(filter))
         .add_stage(DnsAnyQueryPolicyStage::new(any_query_policy))
+        .add_stage(filtered_stage)
         .add_stage(DnsUpstreamStage::new(resolver))
         .add_stage(DnsServfailFallbackStage)
+}
+
+fn build_zone_entry(
+    zone: &ResolverZoneConfig,
+    bootstrap_resolvers: &[String],
+) -> Result<ZoneEntry> {
+    let strategy = zone.strategy.as_deref().unwrap_or("failover");
+    let resolver = build_upstream_resolver_group(strategy, bootstrap_resolvers, &zone.servers)
+        .map_err(|error| anyhow!("invalid resolver zone '{}': {error}", zone.zone))?;
+
+    ZoneEntry::new(
+        zone.zone.clone(),
+        zone.bypass_filter,
+        zone.fallback_to_default_resolvers,
+        resolver,
+    )
+}
+
+fn build_upstream_resolver_group(
+    strategy: &str,
+    bootstrap_resolvers: &[String],
+    servers: &[UpstreamServer],
+) -> Result<Arc<dyn UpstreamResolver>> {
+    let strategy = UpstreamStrategy::from_str(strategy)
+        .map_err(|_| anyhow!("invalid upstream strategy: {strategy}"))?;
+
+    let enabled_servers = servers
+        .iter()
+        .filter(|server| server.enabled)
+        .collect::<Vec<_>>();
+
+    if enabled_servers.is_empty() {
+        bail!("at least one enabled upstream server is required");
+    }
+
+    let needs_bootstrap = enabled_servers.iter().any(|s| s.protocol == "dot");
+    let bootstrap_resolvers = if needs_bootstrap {
+        parse_bootstrap_resolvers(bootstrap_resolvers)?
+    } else {
+        vec![]
+    };
+
+    let resolvers = enabled_servers
+        .into_iter()
+        .map(|server| build_single_upstream_resolver(server, &bootstrap_resolvers))
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(Arc::new(StrategyUpstreamResolver::new(resolvers, strategy)))
 }
 
 fn build_single_upstream_resolver(
@@ -177,8 +227,8 @@ fn parse_bootstrap_resolvers(values: &[String]) -> Result<Vec<SocketAddr>> {
 #[cfg(test)]
 mod tests {
     use crate::frameworks::config::schema::{
-        DnsFilterConfig, FilteringConfig, ListenConfig, LoggingConfig, NamedList, ResolversConfig,
-        SocketConfig, StdoutLogConfig, UpstreamServer,
+        DnsFilterConfig, FilteringConfig, ListenConfig, LoggingConfig, NamedList,
+        ResolverZoneConfig, ResolversConfig, SocketConfig, StdoutLogConfig, UpstreamServer,
     };
 
     use super::*;
@@ -203,6 +253,7 @@ mod tests {
             resolvers: ResolversConfig {
                 strategy: "round_robin".into(),
                 bootstrap_resolvers: vec!["1.1.1.1".into()],
+                zones: Vec::new(),
                 servers,
             },
             logging: LoggingConfig {
@@ -469,5 +520,60 @@ mod tests {
 
         let result = build_any_query_policy(&config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_zone_entries_defaults_zone_strategy_to_failover() {
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+            ..Default::default()
+        }]);
+        config.resolvers.zones = vec![ResolverZoneConfig {
+            zone: "home.arpa".into(),
+            enabled: true,
+            bypass_filter: true,
+            fallback_to_default_resolvers: false,
+            strategy: None,
+            servers: vec![UpstreamServer {
+                enabled: true,
+                protocol: "dns".into(),
+                address: "192.168.1.1:53".into(),
+                ..Default::default()
+            }],
+        }];
+
+        let zones = build_zone_entries(&config).expect("zone entries should build");
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].zone(), "home.arpa");
+        assert!(zones[0].bypass_filter());
+        assert!(!zones[0].fallback_to_default_resolvers());
+    }
+
+    #[test]
+    fn build_zone_entries_skips_disabled_zones() {
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+            ..Default::default()
+        }]);
+        config.resolvers.zones = vec![ResolverZoneConfig {
+            zone: "home.arpa".into(),
+            enabled: false,
+            bypass_filter: true,
+            fallback_to_default_resolvers: false,
+            strategy: Some("failover".into()),
+            servers: vec![UpstreamServer {
+                enabled: true,
+                protocol: "dns".into(),
+                address: "192.168.1.1:53".into(),
+                ..Default::default()
+            }],
+        }];
+
+        let zones = build_zone_entries(&config).expect("zone entries should build");
+        assert!(zones.is_empty());
     }
 }

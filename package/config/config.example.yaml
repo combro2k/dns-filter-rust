@@ -116,6 +116,25 @@ resolvers:
       # max_hops: 12  # optional, default is 12
       nameserver_ip_family: "ipv4"  # optional: "ipv4" (IPv4 only), "ipv6" (IPv6 only), or omit for both
       dnssec: true  # enable DNSSEC chain-of-trust validation (default: true)
+  zones:
+    - zone: "home.arpa"
+      enabled: false
+      bypass_filter: true
+      fallback_to_default_resolvers: false
+      strategy: "failover"
+      servers:
+        - enabled: true
+          protocol: "dns"
+          address: "192.168.1.1:53"
+    - zone: "168.192.in-addr.arpa"
+      enabled: false
+      bypass_filter: true
+      fallback_to_default_resolvers: false
+      strategy: "failover"
+      servers:
+        - enabled: true
+          protocol: "dns"
+          address: "192.168.1.1:53"
 
 logging:
   syslog:

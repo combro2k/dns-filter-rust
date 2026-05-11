@@ -8,16 +8,19 @@ use std::sync::Arc;
 
 use crate::frameworks::config::loader::load_config;
 use crate::use_cases::config_bootstrap::{
-    build_any_query_policy, build_domain_filter, build_upstream_resolver, validate_config,
+    build_any_query_policy, build_domain_filter, build_upstream_resolver, build_zone_entries,
+    validate_config,
 };
 use crate::use_cases::filtering::DomainFilter;
 use crate::use_cases::request_pipeline::AnyQueryPolicy;
 use crate::use_cases::upstream_resolver::UpstreamResolver;
+use crate::use_cases::zone_forwarding::ZoneEntry;
 
 pub type ReloadedConfig = (
     Arc<dyn UpstreamResolver>,
     Arc<dyn DomainFilter>,
     AnyQueryPolicy,
+    Vec<ZoneEntry>,
 );
 
 /// Reloads the configuration from disk and rebuilds the resolver and filter.
@@ -32,7 +35,7 @@ pub type ReloadedConfig = (
 /// swapping on success and keeping the old state on error).
 ///
 /// # Returns
-/// A tuple of `(Arc<dyn UpstreamResolver>, Arc<dyn DomainFilter>, AnyQueryPolicy)` if all steps succeed,
+/// A tuple of `(Arc<dyn UpstreamResolver>, Arc<dyn DomainFilter>, AnyQueryPolicy, Vec<ZoneEntry>)` if all steps succeed,
 /// or an error if any step fails.
 pub fn reload_config(config_path: &str) -> Result<ReloadedConfig> {
     tracing::info!(path = %config_path, "reloading configuration");
@@ -43,10 +46,11 @@ pub fn reload_config(config_path: &str) -> Result<ReloadedConfig> {
     let resolver = build_upstream_resolver(&config)?;
     let filter = build_domain_filter(&config)?;
     let any_query_policy = build_any_query_policy(&config)?;
+    let zone_entries = build_zone_entries(&config)?;
 
     tracing::info!("configuration reloaded successfully");
 
-    Ok((resolver, filter, any_query_policy))
+    Ok((resolver, filter, any_query_policy, zone_entries))
 }
 
 #[cfg(test)]
@@ -140,12 +144,13 @@ logging:
         }
         assert!(result.is_ok(), "should succeed with valid config");
 
-        let (resolver, filter, _policy) = result.expect("unwrap result");
+        let (resolver, filter, _policy, zone_entries) = result.expect("unwrap result");
         // Verify we got valid instances by checking they are not null
         let resolver_ptr = &*resolver as *const _ as *const ();
         let filter_ptr = &*filter as *const _ as *const ();
         assert!(!resolver_ptr.is_null());
         assert!(!filter_ptr.is_null());
+        assert!(zone_entries.is_empty());
         let _ = fs::remove_file(path);
     }
 }
