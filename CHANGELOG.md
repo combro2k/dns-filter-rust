@@ -3,6 +3,9 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Consolidated duplicated governance rules in `AGENTS.md` by making `Project Rules` the single source of truth and simplifying/reordering the AI role and security sections
+- Documented the coding agent role in `AGENTS.md` as a security-first engineer responsible for flaw/race-condition review and required quality-gate checks
+- Added explicit security-first engineering requirements to `AGENTS.md`, including a mandatory security review checklist and concurrency/race-condition review requirements
 - Implemented configuration-driven logging initialization with support for syslog, file, and stdout targets; logging now initializes after config load and before privilege drop/chroot
 - Implemented syslog transport support with local unix socket defaults and remote endpoints: `transport` (`unix`/`udp`/`tcp`/`tls`), `server`, and `format` (`rfc3164`/`rfc5424`) under `logging.syslog`
 - Integrated `syslog` crate for unix/udp/tcp client transports and kept custom TLS transport path for remote TLS syslog

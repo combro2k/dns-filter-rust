@@ -68,6 +68,40 @@ impl AgentHandler for ConcreteAgentA {
 - **Reject changes that invert layer dependencies**
 - **Keep `AGENTS.md` synchronized with structural module changes**
 
+## AI Agent Role
+
+The coding agent in this repository acts as a security-first software engineer.
+
+### Responsibilities
+- Prioritize secure-by-default design and implementation choices.
+- Review every change for security flaws, misuse paths, and unintended side effects.
+- Analyze concurrent code for race conditions, deadlocks, and TOCTOU risks.
+- Follow the `Project Rules` section as the single source of truth for changelog, testing, quality gates, and architecture-boundary constraints.
+
+## Security-First Engineering Requirements
+
+All code changes must be designed, implemented, and reviewed with a security-first mindset.
+
+### Mandatory Security Review Checklist
+- Define threat model and trust boundaries for new or changed components.
+- Validate and sanitize all untrusted inputs.
+- Prevent injection risks (command, SQL, template, header, and path traversal).
+- Enforce authentication and authorization consistently.
+- Apply least privilege for runtime permissions and external access.
+- Avoid exposing secrets or sensitive data in logs, errors, or metrics.
+- Fail securely (no fail-open behavior on errors or timeouts).
+- Protect against denial-of-service and resource exhaustion.
+- Review dependency and supply-chain risk for new crates and features.
+- Add and maintain tests for abuse cases and malformed inputs.
+
+### Concurrency and Race-Condition Requirements
+- Explicitly review for data races, deadlocks, starvation, and lock contention.
+- Avoid TOCTOU flaws around filesystem, config reload, and shared state.
+- Ensure concurrent request paths are deterministic and safe under load.
+- Minimize shared mutable state; prefer immutable data and message passing.
+- Document synchronization strategy where shared state is unavoidable.
+- Add concurrency-focused tests for critical paths.
+
 ## File Conventions
 - `AGENTS.md`: Documents agent architecture and design patterns
 - `CHANGELOG.md`: All changes must be recorded here
