@@ -14,6 +14,8 @@ DOH_PORT="1443"
 DOQ_PORT="18853"
 HTTP_PORT="18080"
 METRICS_PORT="19100"
+ZONE_UPSTREAM_PORT="25354"
+ZONE_TEST_PORT="25355"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -22,6 +24,8 @@ SKIP_COUNT=0
 TEMP_DIR=""
 PID=""
 LOG_FILE=""
+ZONE_UPSTREAM_PID=""
+ZONE_TEST_PID=""
 
 usage() {
   cat <<'EOF'
@@ -80,10 +84,9 @@ has_tcp_connect() {
 }
 
 cleanup() {
-  if [ -n "$PID" ] && kill -0 "$PID" >/dev/null 2>&1; then
-    kill "$PID" >/dev/null 2>&1 || true
-    wait "$PID" 2>/dev/null || true
-  fi
+  stop_pid "$ZONE_TEST_PID"
+  stop_pid "$ZONE_UPSTREAM_PID"
+  stop_pid "$PID"
 
   if [ "$KEEP_ARTIFACTS" -ne 1 ] && [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
     rm -rf "$TEMP_DIR"
@@ -127,13 +130,34 @@ if [ -z "$BINARY" ]; then
   exit 2
 fi
 
-if [ ! -x "$BINARY" ]; then
-  note "Building debug binary because $BINARY is missing"
+needs_build() {
+  [ ! -x "$BINARY" ] && return 0
+
+  find \
+    "$ROOT_DIR/src" \
+    "$ROOT_DIR/tests" \
+    "$ROOT_DIR/Cargo.toml" \
+    "$ROOT_DIR/Cargo.lock" \
+    -newer "$BINARY" \
+    -print -quit 2>/dev/null | grep -q .
+}
+
+if needs_build; then
+  note "Building debug binary because $BINARY is missing or stale"
   (cd "$ROOT_DIR" && cargo build) || {
     printf 'Failed to build binary\n' >&2
     exit 1
   }
 fi
+
+stop_pid() {
+  local pid="$1"
+
+  if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" 2>/dev/null || true
+  fi
+}
 
 TEMP_DIR="$(mktemp -d)"
 CONFIG_FILE="$TEMP_DIR/config.yaml"
@@ -209,13 +233,20 @@ note "Starting dns-filter with temporary config: $CONFIG_FILE"
 PID=$!
 
 wait_for_dns() {
+  wait_for_tcp_port "$DNS_PORT"
+}
+
+wait_for_tcp_port() {
+  local port="$1"
   local i
+
   for i in $(seq 1 40); do
-    if has_tcp_connect "$DNS_HOST" "$DNS_PORT"; then
+    if has_tcp_connect "$DNS_HOST" "$port"; then
       return 0
     fi
     sleep 0.25
   done
+
   return 1
 }
 
@@ -302,6 +333,194 @@ dns_query_udp_on_port() {
   return 2
 }
 
+dns_query_udp_expect_status_on_port() {
+  local port="$1"
+  local expected_status="$2"
+  local domain="${3:-$DOMAIN}"
+  local output
+
+  if command_exists dig; then
+    output="$(dig @"$DNS_HOST" -p "$port" "$domain" A +time=8 +tries=1 2>&1)" || return 1
+    [[ "$output" == *"status: $expected_status"* ]]
+    return $?
+  fi
+
+  if command_exists drill; then
+    output="$(drill @"$DNS_HOST" -p "$port" "$domain" A 2>&1)" || return 1
+    [[ "$output" == *"rcode: $expected_status"* ]]
+    return $?
+  fi
+
+  if command_exists kdig; then
+    output="$(kdig @"$DNS_HOST" -p "$port" "$domain" A 2>&1)" || return 1
+    [[ "$output" == *"status: $expected_status"* ]]
+    return $?
+  fi
+
+  return 2
+}
+
+write_zone_test_config() {
+  local config_file="$1"
+  local zone_enabled="$2"
+
+  cat >"$config_file" <<EOF
+listen:
+  dns:
+    enabled: true
+    address: "$DNS_HOST"
+    port: $ZONE_TEST_PORT
+  dot: null
+  doh: null
+  doq: null
+  http: null
+  metrics: null
+
+blocklists: []
+allowlists: []
+
+filtering:
+  any_query_policy: "passthrough"
+
+resolvers:
+  strategy: "failover"
+  servers:
+    - enabled: true
+      protocol: "dot"
+      address: "$DNS_HOST:1"
+  zones:
+    - zone: "$DOMAIN"
+      enabled: $zone_enabled
+      bypass_filter: true
+      fallback_to_default_resolvers: false
+      strategy: "failover"
+      servers:
+        - enabled: true
+          protocol: "dns"
+          address: "$DNS_HOST:$ZONE_UPSTREAM_PORT"
+
+logging:
+  syslog: null
+  file: null
+  stdout:
+    enabled: true
+    level: "info"
+EOF
+}
+
+run_zone_forwarding_smoke_test() {
+  local upstream_config_file="$TEMP_DIR/zone-upstream-config.yaml"
+  local upstream_log_file="$TEMP_DIR/zone-upstream.log"
+  local zone_enabled_config_file="$TEMP_DIR/zone-enabled-config.yaml"
+  local zone_enabled_log_file="$TEMP_DIR/zone-enabled.log"
+  local zone_disabled_config_file="$TEMP_DIR/zone-disabled-config.yaml"
+  local zone_disabled_log_file="$TEMP_DIR/zone-disabled.log"
+
+  cat >"$upstream_config_file" <<EOF
+listen:
+  dns:
+    enabled: true
+    address: "$DNS_HOST"
+    port: $ZONE_UPSTREAM_PORT
+  dot: null
+  doh: null
+  doq: null
+  http: null
+  metrics: null
+
+blocklists: []
+allowlists: []
+
+filtering:
+  any_query_policy: "passthrough"
+
+resolvers:
+  strategy: "round_robin"
+  bootstrap_resolvers:
+    - "1.1.1.1"
+  servers:
+    - enabled: true
+      protocol: "dns"
+      address: "1.1.1.1:53"
+
+logging:
+  syslog: null
+  file: null
+  stdout:
+    enabled: true
+    level: "info"
+EOF
+
+  note "Starting auxiliary zone upstream on ${DNS_HOST}:${ZONE_UPSTREAM_PORT}"
+  "$BINARY" --config "$upstream_config_file" >"$upstream_log_file" 2>&1 &
+  ZONE_UPSTREAM_PID=$!
+
+  if ! wait_for_tcp_port "$ZONE_UPSTREAM_PORT"; then
+    fail "zone upstream listener did not start on ${DNS_HOST}:${ZONE_UPSTREAM_PORT}"
+    note "zone upstream log follows"
+    sed -n '1,160p' "$upstream_log_file"
+    return
+  fi
+
+  write_zone_test_config "$zone_enabled_config_file" true
+  note "Starting zone forwarding test instance with zone enabled on ${DNS_HOST}:${ZONE_TEST_PORT}"
+  "$BINARY" --config "$zone_enabled_config_file" >"$zone_enabled_log_file" 2>&1 &
+  ZONE_TEST_PID=$!
+
+  if ! wait_for_tcp_port "$ZONE_TEST_PORT"; then
+    fail "zone forwarding test instance did not start on ${DNS_HOST}:${ZONE_TEST_PORT}"
+    note "zone enabled test log follows"
+    sed -n '1,160p' "$zone_enabled_log_file"
+    return
+  fi
+
+  if dns_query_udp_expect_status_on_port "$ZONE_TEST_PORT" "NOERROR" "$DOMAIN"; then
+    pass "zone forwarding query succeeded when zone is enabled"
+  else
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      skip "zone forwarding query skipped (install dig, drill, or kdig)"
+    else
+      fail "zone forwarding query failed when zone is enabled"
+      note "zone enabled test log follows"
+      sed -n '1,160p' "$zone_enabled_log_file"
+    fi
+  fi
+
+  stop_pid "$ZONE_TEST_PID"
+  ZONE_TEST_PID=""
+
+  write_zone_test_config "$zone_disabled_config_file" false
+  note "Starting zone forwarding test instance with zone disabled on ${DNS_HOST}:${ZONE_TEST_PORT}"
+  "$BINARY" --config "$zone_disabled_config_file" >"$zone_disabled_log_file" 2>&1 &
+  ZONE_TEST_PID=$!
+
+  if ! wait_for_tcp_port "$ZONE_TEST_PORT"; then
+    fail "zone disabled test instance did not start on ${DNS_HOST}:${ZONE_TEST_PORT}"
+    note "zone disabled test log follows"
+    sed -n '1,160p' "$zone_disabled_log_file"
+    return
+  fi
+
+  if dns_query_udp_expect_status_on_port "$ZONE_TEST_PORT" "SERVFAIL" "$DOMAIN"; then
+    pass "zone forwarding falls back to failing default resolver when zone is disabled"
+  else
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      skip "zone disabled query skipped (install dig, drill, or kdig)"
+    else
+      fail "zone disabled query did not return SERVFAIL"
+      note "zone disabled test log follows"
+      sed -n '1,160p' "$zone_disabled_log_file"
+    fi
+  fi
+
+  stop_pid "$ZONE_TEST_PID"
+  ZONE_TEST_PID=""
+  stop_pid "$ZONE_UPSTREAM_PID"
+  ZONE_UPSTREAM_PID=""
+}
+
 if dns_query_udp; then
   pass "dns UDP query succeeded"
 else
@@ -323,6 +542,8 @@ else
     fail "dns TCP query failed"
   fi
 fi
+
+run_zone_forwarding_smoke_test
 
 check_optional_listener_port() {
   local listener_name="$1"

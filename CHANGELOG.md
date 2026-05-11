@@ -3,6 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+- Added bash-only zone-forwarding smoke coverage to `tests/listener_batch_test.sh`, including `resolvers.zones[*].enabled` on/off behavior
 - Added optional `resolvers.zones[*].enabled` flag so zone-forwarding entries can be kept in config but turned on/off without removal; omitted `enabled` defaults to `true`
 - Added zone-based forwarding under `resolvers.zones[]`: queries matching configured suffixes can use dedicated zone-specific upstream resolvers, optionally bypass blocklist filtering, and optionally fall back to the default resolver set when all zone resolvers fail
 - Consolidated duplicated governance rules in `AGENTS.md` by making `Project Rules` the single source of truth and simplifying/reordering the AI role and security sections
