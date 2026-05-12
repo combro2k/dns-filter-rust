@@ -34,15 +34,66 @@ fn deep_merge(base: Value, overlay: Value) -> Value {
 ///
 /// Returns the merged YAML as a string.
 pub fn merge_with_example(user_config: &str) -> Result<String> {
-    let base: Value = serde_yaml::from_str(EXAMPLE_CONFIG)
+    let mut base: Value = serde_yaml::from_str(EXAMPLE_CONFIG)
         .context("failed to parse embedded example config (this is a bug)")?;
 
-    let overlay: Value =
+    let mut overlay: Value =
         serde_yaml::from_str(user_config).context("failed to parse user config file")?;
+
+    // Normalize legacy `address` → `addresses` before merging so the keys
+    // align and the overlay (user) value properly wins over the base.
+    normalize_listen_addresses(&mut base);
+    normalize_listen_addresses(&mut overlay);
 
     let merged = deep_merge(base, overlay);
 
     serde_yaml::to_string(&merged).context("failed to serialize merged config")
+}
+
+/// Normalize `address` (singular, legacy) to `addresses` (list) in all
+/// listener socket sections under `listen:`.
+///
+/// This ensures the deep-merge sees a single canonical key (`addresses`)
+/// rather than treating `address` and `addresses` as separate entries.
+///
+/// - If both `address` and `addresses` exist, `address` is removed (the
+///   canonical `addresses` list wins).
+/// - If only `address` exists (string), it is converted to a single-element
+///   `addresses` list.
+fn normalize_listen_addresses(root: &mut Value) {
+    let listen = match root.get_mut("listen").and_then(Value::as_mapping_mut) {
+        Some(m) => m,
+        None => return,
+    };
+
+    let listener_keys: Vec<Value> = listen.keys().cloned().collect();
+    for key in listener_keys {
+        let section = match listen.get_mut(&key).and_then(Value::as_mapping_mut) {
+            Some(m) => m,
+            None => continue,
+        };
+
+        let addr_key = Value::String("address".into());
+        let addrs_key = Value::String("addresses".into());
+
+        let has_addresses = section.contains_key(&addrs_key);
+        let has_address = section.contains_key(&addr_key);
+
+        if has_address && has_addresses {
+            // Both present: remove the legacy key; `addresses` wins.
+            section.remove(&addr_key);
+        } else if has_address && !has_addresses {
+            // Only legacy key: convert to canonical list form.
+            if let Some(addr_val) = section.remove(&addr_key) {
+                let list = match addr_val {
+                    Value::String(_) => Value::Sequence(vec![addr_val]),
+                    Value::Sequence(_) => addr_val,
+                    other => Value::Sequence(vec![other]),
+                };
+                section.insert(addrs_key, list);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -148,5 +199,38 @@ mod tests {
         let lists = merged["blocklists"].as_sequence().unwrap();
         // User's list should replace example lists entirely.
         assert_eq!(lists.len(), 1);
+    }
+
+    #[test]
+    fn legacy_address_key_normalized_to_addresses() {
+        let user = "listen:\n  dns:\n    enabled: true\n    address: \"0.0.0.0\"\n    port: 53\n";
+        let result = merge_with_example(user).unwrap();
+        let merged: Value = serde_yaml::from_str(&result).unwrap();
+        let dns = &merged["listen"]["dns"];
+        // Legacy `address` key must not appear in output.
+        assert!(
+            dns.get("address").is_none(),
+            "legacy 'address' key should be removed after merge"
+        );
+        // Canonical `addresses` key must be present as a list.
+        let addrs = dns["addresses"]
+            .as_sequence()
+            .expect("addresses should be a sequence");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].as_str().unwrap(), "0.0.0.0");
+    }
+
+    #[test]
+    fn both_address_and_addresses_keeps_only_addresses() {
+        let user = "listen:\n  dns:\n    enabled: true\n    address: \"127.0.0.1\"\n    addresses:\n      - \"0.0.0.0\"\n    port: 53\n";
+        let result = merge_with_example(user).unwrap();
+        let merged: Value = serde_yaml::from_str(&result).unwrap();
+        let dns = &merged["listen"]["dns"];
+        assert!(
+            dns.get("address").is_none(),
+            "legacy 'address' key should be removed when both are present"
+        );
+        let addrs = dns["addresses"].as_sequence().unwrap();
+        assert_eq!(addrs[0].as_str().unwrap(), "0.0.0.0");
     }
 }

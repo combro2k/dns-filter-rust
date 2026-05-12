@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [2.0.2] - 2026-05-12
 
+### Fixed
+- Fixed recursive resolver responses missing the DNS question section (RFC 1035 §4.1.2): `Recursor::resolve()` returns a `Message` without a question section, which caused `host`/`dig` to warn `;; missing question section`; the original query's question is now copied into the success-path response
+- Fixed `merge-config` producing both `address` and `addresses` keys under `listen.*` when the user config uses the legacy singular `address` format: both base and overlay are now normalized to the canonical `addresses` list before merging, so the user's value wins and no stale `address` key appears in the output
+
 ### Changed
 - Removed `/dev/log` bind-mount from OpenRC init script, config example, and README; the syslog socket is opened before chroot so the file descriptor survives privilege drop
 

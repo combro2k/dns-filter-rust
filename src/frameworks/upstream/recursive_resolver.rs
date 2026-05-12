@@ -333,6 +333,13 @@ impl UpstreamResolver for RecursiveResolver {
                 response.metadata.recursion_desired = true;
                 response.metadata.recursion_available = true;
 
+                // Ensure the question section is present (RFC 1035 §4.1.2).
+                if response.queries.is_empty() {
+                    if let Some(q) = msg.queries.first() {
+                        response.add_query(q.clone());
+                    }
+                }
+
                 // Echo EDNS OPT back when the client sent one
                 if let Some(client_edns) = msg.edns.as_ref() {
                     let mut edns = hickory_proto::op::Edns::new();
@@ -528,6 +535,47 @@ A.ROOT-SERVERS.NET.      3600000      AAAA  2001:503:ba3e::2:30
         assert_eq!(
             Arc::strong_count(&resolver.recursor),
             Arc::strong_count(&cloned.recursor)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network access for iterative resolution"]
+    async fn resolve_response_includes_question_section() {
+        let resolver = RecursiveResolver::new(
+            builtin_root_hints(),
+            12,
+            NameserverIpFamily::Ipv4Only,
+            false,
+            None,
+        );
+
+        let mut query_msg = Message::new(
+            42,
+            hickory_proto::op::MessageType::Query,
+            hickory_proto::op::OpCode::Query,
+        );
+        query_msg.metadata.recursion_desired = true;
+        let mut q = hickory_proto::op::Query::new();
+        q.set_name("google.com.".parse().unwrap());
+        q.set_query_type(RecordType::A);
+        q.set_query_class(hickory_proto::rr::DNSClass::IN);
+        query_msg.add_query(q);
+        let query_bytes = query_msg.to_vec().unwrap();
+
+        let response_bytes = resolver
+            .resolve(query_bytes)
+            .await
+            .expect("resolution failed");
+
+        let response = Message::from_vec(&response_bytes).expect("failed to parse response");
+        assert_eq!(response.id, 42, "response ID must match query");
+        assert!(
+            !response.queries.is_empty(),
+            "response must include question section (RFC 1035 §4.1.2)"
+        );
+        assert_eq!(
+            response.queries.first().unwrap().name().to_ascii(),
+            "google.com."
         );
     }
 }
