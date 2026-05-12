@@ -515,9 +515,10 @@ fn split_domain_and_modifiers(stripped: &str) -> (&str, &str) {
     (stripped, "")
 }
 
-/// Returns the first modifier that restricts the rule to a specific request
-/// type or context that cannot be evaluated at DNS level, or `None` if all
-/// modifiers are universally applicable or purely behavioural.
+/// Returns the first modifier that is NOT applicable at DNS level, or `None`
+/// if all modifiers are DNS-safe. Uses an allowlist approach (fail-closed):
+/// only known DNS-safe modifiers are permitted; any unknown or
+/// response-modification modifier causes the rule to be skipped.
 fn restricting_modifier(modifiers: &str) -> Option<&str> {
     for raw in modifiers.split(',') {
         let m = raw.trim();
@@ -531,20 +532,14 @@ fn restricting_modifier(modifiers: &str) -> Option<&str> {
             .unwrap_or("")
             .trim();
         match key {
-            // Content-type restrictors — rule only applies to a specific resource type
-            "script" | "stylesheet" | "css" | "image" | "media" | "font" | "object" | "xhr"
-            | "xmlhttprequest" | "ping" | "websocket" | "frame" | "subdocument" | "document"
-            | "doc" | "other" | "popup" | "object-subrequest" => {
-                return Some(key);
-            }
-            // Context restrictors — rule only applies in a specific request context
-            "third-party" | "3p" | "first-party" | "1p" | "domain" | "from" | "to" | "method"
-            | "header" | "app" | "strict-first-party" | "strict1p" | "strict-third-party"
-            | "strict3p" | "denyallow" => {
-                return Some(key);
-            }
-            // Behaviour-only or universal modifiers — strip and continue
-            _ => {}
+            // DNS-safe modifiers — these do not restrict applicability at DNS level
+            "important" | "match-case" | "all" => {}
+            // AdGuard noop modifier (one or more underscores)
+            k if !k.is_empty() && k.chars().all(|c| c == '_') => {}
+            // Empty key (e.g. trailing comma) — ignore
+            "" => {}
+            // Everything else is not evaluable at DNS level — skip the rule
+            _ => return Some(key),
         }
     }
     None
@@ -583,8 +578,23 @@ fn parse_domain_line_with_status(line: &str) -> Option<ParseDomainLineResult> {
         return None;
     }
 
-    // Skip non-network rules: cosmetic, CSS injection, scriptlet, HTML filter
-    const COSMETIC_MARKERS: &[&str] = &["##", "#@#", "#$#", "#%#", "$$"];
+    // Skip non-network rules: cosmetic, CSS injection, scriptlet, HTML filter.
+    // Longer markers must be listed before shorter ones that are substrings,
+    // although `contains()` makes order irrelevant for correctness.
+    const COSMETIC_MARKERS: &[&str] = &[
+        "#@$?#", // Extended CSS + CSS injection exception
+        "#$?#",  // Extended CSS + CSS injection
+        "#@?#",  // Extended CSS element hiding exception
+        "#?#",   // Extended CSS element hiding
+        "#@$#",  // CSS injection exception
+        "#@%#",  // JavaScript injection exception
+        "#@#",   // Element hiding exception
+        "##",    // Element hiding
+        "#$#",   // CSS injection / scriptlet injection
+        "#%#",   // JavaScript injection (AdGuard)
+        "$@$",   // HTML filtering exception
+        "$$",    // HTML filtering
+    ];
     if COSMETIC_MARKERS.iter().any(|m| trimmed.contains(m)) {
         return Some(ParseDomainLineResult::Skipped);
     }
@@ -849,10 +859,37 @@ mod tests {
         assert_eq!(parse_domain_line("||example.com$third-party"), None);
         // Exception with narrowing modifier → skip
         assert_eq!(parse_domain_line("@@||example.com^$script"), None);
+        // Response-modification modifiers → skip (fail-closed allowlist)
+        assert_eq!(
+            parse_domain_line("||example.com^$csp=script-src 'self'"),
+            None
+        );
+        assert_eq!(parse_domain_line("||example.com^$redirect=noopjs"), None);
+        assert_eq!(
+            parse_domain_line("||example.com^$removeparam=utm_source"),
+            None
+        );
+        assert_eq!(
+            parse_domain_line("||example.com^$removeheader=refresh"),
+            None
+        );
+        assert_eq!(parse_domain_line("||example.com^$cookie"), None);
+        assert_eq!(parse_domain_line("||example.com^$stealth"), None);
+        assert_eq!(parse_domain_line("||example.com^$badfilter"), None);
+        assert_eq!(
+            parse_domain_line("||example.com^$replace=/test/test2/"),
+            None
+        );
+        // Noop modifier (underscores) should still be DNS-safe → Block
+        assert_eq!(
+            parse_domain_line("||example.com^$_____,important"),
+            Some(ParsedLine::Block("example.com".into()))
+        );
     }
 
     #[test]
     fn parse_domain_line_skips_cosmetic_rules() {
+        // Original markers
         assert_eq!(parse_domain_line("example.com##.advertisement"), None);
         assert_eq!(parse_domain_line("example.com#@#.selector"), None);
         assert_eq!(parse_domain_line("example.com#$#body { color: red }"), None);
@@ -861,6 +898,37 @@ mod tests {
             None
         );
         assert_eq!(parse_domain_line("example.com$$script[data-src]"), None);
+
+        // Extended CSS markers
+        assert_eq!(
+            parse_domain_line("imdb.com#$?#.interstitial-adWrapper { remove: true; }"),
+            None
+        );
+        assert_eq!(
+            parse_domain_line("example.com#?#.banner:matches-css(width: 360px)"),
+            None
+        );
+        assert_eq!(parse_domain_line("example.com#@?#.banner"), None);
+        assert_eq!(
+            parse_domain_line("example.com#@$?#div { remove: true; }"),
+            None
+        );
+
+        // Exception markers for injection rules
+        assert_eq!(
+            parse_domain_line("example.com#@$#.textad { visibility: hidden; }"),
+            None
+        );
+        assert_eq!(
+            parse_domain_line("example.com#@%#window.__gaq = undefined;"),
+            None
+        );
+
+        // HTML filtering exception
+        assert_eq!(
+            parse_domain_line("example.com$@$script[tag-content=\"banner\"]"),
+            None
+        );
     }
 
     #[test]

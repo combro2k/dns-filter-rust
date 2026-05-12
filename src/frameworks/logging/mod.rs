@@ -2,7 +2,7 @@ pub mod syslog;
 
 use anyhow::Context;
 use std::io;
-use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -77,7 +77,7 @@ pub fn init_logging(config: &DnsFilterConfig, debug: bool) -> anyhow::Result<Log
                 .with_target(true)
                 .with_thread_ids(true)
                 .with_span_events(FmtSpan::CLOSE)
-                .with_filter(LevelFilter::from_level(stdout_level)),
+                .with_filter(build_env_filter(stdout_level, debug)),
         )
     } else {
         None
@@ -101,7 +101,7 @@ pub fn init_logging(config: &DnsFilterConfig, debug: bool) -> anyhow::Result<Log
                 .with_thread_ids(true)
                 .with_span_events(FmtSpan::CLOSE)
                 .with_ansi(false)
-                .with_filter(LevelFilter::from_level(file_level)),
+                .with_filter(build_env_filter(file_level, debug)),
         )
     } else {
         None
@@ -131,13 +131,14 @@ pub fn init_logging(config: &DnsFilterConfig, debug: bool) -> anyhow::Result<Log
         let (sender, task) = syslog::SyslogSender::new(transport, facility, format.clone());
         syslog_task = Some(task);
 
-        Some(
-            SyslogLayer { sender }.with_filter(LevelFilter::from_level(if debug {
+        Some(SyslogLayer { sender }.with_filter(build_env_filter(
+            if debug {
                 tracing::Level::DEBUG
             } else {
                 syslog_level
-            })),
-        )
+            },
+            debug,
+        )))
     } else {
         None
     };
@@ -149,7 +150,7 @@ pub fn init_logging(config: &DnsFilterConfig, debug: bool) -> anyhow::Result<Log
                     .with_writer(io::stderr)
                     .with_target(true)
                     .with_thread_ids(true)
-                    .with_filter(LevelFilter::from_level(fallback_level)),
+                    .with_filter(build_env_filter(fallback_level, debug)),
             )
             .init();
     } else {
@@ -164,6 +165,21 @@ pub fn init_logging(config: &DnsFilterConfig, debug: bool) -> anyhow::Result<Log
         _file_guard: file_guard,
         _syslog_task: syslog_task,
     })
+}
+
+/// Build an `EnvFilter` for the given base level.
+///
+/// In normal mode, suppresses noisy third-party crate modules (hickory DNSSEC
+/// validation warnings such as "response does not contain NSEC or NSEC3 records")
+/// to ERROR-only.  In debug mode all messages pass through unfiltered.
+fn build_env_filter(level: tracing::Level, debug: bool) -> EnvFilter {
+    if debug {
+        EnvFilter::new(format!("{level}"))
+    } else {
+        EnvFilter::new(format!(
+            "{level},hickory_proto=error,hickory_resolver=error"
+        ))
+    }
 }
 
 /// Custom tracing layer for syslog output.

@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Fixed false-positive DNS blocks caused by missing AdGuard cosmetic rule markers (`#?#`, `#@?#`, `#$?#`, `#@$?#`, `#@$#`, `#@%#`, `$@$`) in the filter parser — rules using these markers (e.g. `imdb.com#$?#...`) were incorrectly treated as domain blocks
+- Fixed fail-open modifier logic in `restricting_modifier`: inverted to a DNS-safe allowlist (`important`, `match-case`, `all`, noop) so that unknown or response-modification modifiers (`$csp`, `$redirect`, `$removeparam`, `$cookie`, `$stealth`, `$badfilter`, etc.) correctly cause rules to be skipped at DNS level
+- Fixed log spam from hickory DNSSEC validation warnings (e.g. "response does not contain NSEC or NSEC3 records") flooding INFO-level output: `hickory_proto` and `hickory_resolver` modules are now filtered to ERROR-only in normal mode (all messages shown in `--debug` mode)
+
 ## [1.0.1] - 2026-05-12
 - Added per-zone authoritative JSON source mode with `resolvers.zones[*].zone_source` (local file, `http://`, or `https://`) and strict XOR validation against forwarding `servers[]` mode
 - Added optional per-zone `resolvers.zones[*].zone_source_check_interval` for URL-backed authoritative zones, including background refresh that keeps the last good snapshot on refresh failure
