@@ -10,7 +10,7 @@ use std::time::Duration;
 use crate::entities::filter::FilterDecision;
 use crate::frameworks::config::schema::{DnsFilterConfig, FilteringConfig, NamedList};
 use anyhow::{anyhow, Context, Result};
-use hickory_client::proto::rr::Name;
+use hickory_proto::rr::Name;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 

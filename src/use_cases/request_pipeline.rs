@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use hickory_client::proto::op::{Message, MessageType, OpCode, ResponseCode};
-use hickory_client::proto::rr::rdata::{A, AAAA};
-use hickory_client::proto::rr::{RData, Record, RecordType};
+use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
+use hickory_proto::rr::rdata::{A, AAAA};
+use hickory_proto::rr::{RData, Record, RecordType};
 
 use crate::entities::filter::FilterDecision;
 use crate::use_cases::filtering::DomainFilter;
@@ -185,7 +185,7 @@ impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError
             return Ok(None);
         };
 
-        let Some(first_query) = message.queries().first() else {
+        let Some(first_query) = message.queries.first() else {
             return Ok(None);
         };
 
@@ -229,7 +229,7 @@ impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError
             .await?;
 
         if let Ok(mut msg) = Message::from_vec(&response) {
-            msg.set_id(request.client_query_id);
+            msg.metadata.id = request.client_query_id;
             let fixed_response = msg.to_vec().unwrap_or(response);
             return Ok(Some(DnsPipelineResponse::new(fixed_response)));
         }
@@ -265,7 +265,7 @@ impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError
             return Ok(None);
         };
 
-        let Some(first_query) = message.queries().first() else {
+        let Some(first_query) = message.queries.first() else {
             return Ok(None);
         };
 
@@ -314,19 +314,16 @@ pub fn build_sinkhole_response(
     sinkhole_v4: Ipv4Addr,
     sinkhole_v6: Ipv6Addr,
 ) -> Vec<u8> {
-    let mut response = Message::new();
-    response.set_id(query.id());
-    response.set_message_type(MessageType::Response);
-    response.set_op_code(OpCode::Query);
-    response.set_recursion_desired(query.recursion_desired());
-    response.set_recursion_available(true);
-    response.set_response_code(ResponseCode::NoError);
+    let mut response = Message::new(query.id, MessageType::Response, OpCode::Query);
+    response.metadata.recursion_desired = query.recursion_desired;
+    response.metadata.recursion_available = true;
+    response.metadata.response_code = ResponseCode::NoError;
 
-    for q in query.queries() {
+    for q in &query.queries {
         response.add_query(q.clone());
     }
 
-    if let Some(question) = query.queries().first() {
+    if let Some(question) = query.queries.first() {
         let name = question.name().clone();
         match question.query_type() {
             RecordType::A => {
@@ -346,11 +343,11 @@ pub fn build_sinkhole_response(
     response.to_vec().unwrap_or_default()
 }
 
-fn make_a_record(name: hickory_client::proto::rr::Name, addr: Ipv4Addr) -> Record {
+fn make_a_record(name: hickory_proto::rr::Name, addr: Ipv4Addr) -> Record {
     Record::from_rdata(name, 60, RData::A(A(addr)))
 }
 
-fn make_aaaa_record(name: hickory_client::proto::rr::Name, addr: Ipv6Addr) -> Record {
+fn make_aaaa_record(name: hickory_proto::rr::Name, addr: Ipv6Addr) -> Record {
     Record::from_rdata(name, 60, RData::AAAA(AAAA(addr)))
 }
 
@@ -359,16 +356,14 @@ pub fn build_servfail_response(query_bytes: &[u8]) -> Vec<u8> {
 }
 
 fn build_error_response(query_bytes: &[u8], response_code: ResponseCode) -> Vec<u8> {
-    let mut response = Message::new();
-    response.set_message_type(MessageType::Response);
-    response.set_op_code(OpCode::Query);
-    response.set_recursion_available(true);
-    response.set_response_code(response_code);
+    let mut response = Message::new(0, MessageType::Response, OpCode::Query);
+    response.metadata.recursion_available = true;
+    response.metadata.response_code = response_code;
 
     if let Ok(query) = Message::from_vec(query_bytes) {
-        response.set_id(query.id());
-        response.set_recursion_desired(query.recursion_desired());
-        for q in query.queries() {
+        response.metadata.id = query.id;
+        response.metadata.recursion_desired = query.recursion_desired;
+        for q in &query.queries {
             response.add_query(q.clone());
         }
     }
@@ -384,8 +379,8 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use hickory_client::proto::op::{Message, MessageType, Query, ResponseCode};
-    use hickory_client::proto::rr::{DNSClass, RecordType};
+    use hickory_proto::op::{Message, MessageType, Query, ResponseCode};
+    use hickory_proto::rr::{DNSClass, RecordType};
 
     use crate::entities::filter::FilterDecision;
     use crate::use_cases::filtering::DomainFilter;
@@ -644,9 +639,8 @@ mod tests {
     }
 
     fn make_query_with_type(domain: &str, record_type: RecordType) -> Vec<u8> {
-        let mut msg = Message::new();
-        msg.set_id(42);
-        msg.set_recursion_desired(true);
+        let mut msg = Message::new(42, MessageType::Query, hickory_proto::op::OpCode::Query);
+        msg.metadata.recursion_desired = true;
         let mut q = Query::new();
         q.set_name(domain.parse().unwrap());
         q.set_query_type(record_type);
@@ -660,10 +654,8 @@ mod tests {
     }
 
     fn make_noerror_response(id: u16) -> Vec<u8> {
-        let mut msg = Message::new();
-        msg.set_id(id);
-        msg.set_message_type(MessageType::Response);
-        msg.set_response_code(ResponseCode::NoError);
+        let mut msg = Message::new(id, MessageType::Response, hickory_proto::op::OpCode::Query);
+        msg.metadata.response_code = ResponseCode::NoError;
         msg.to_vec().unwrap()
     }
 
@@ -688,8 +680,8 @@ mod tests {
             .into_bytes();
 
         let message = Message::from_vec(&response).expect("valid DNS message");
-        assert_eq!(message.response_code(), ResponseCode::NoError);
-        assert_eq!(message.answers().len(), 1);
+        assert_eq!(message.response_code, ResponseCode::NoError);
+        assert_eq!(message.answers.len(), 1);
     }
 
     #[tokio::test]
@@ -714,8 +706,8 @@ mod tests {
             .into_bytes();
 
         let message = Message::from_vec(&response).expect("valid DNS message");
-        assert_eq!(message.id(), 42);
-        assert_eq!(message.response_code(), ResponseCode::NoError);
+        assert_eq!(message.id, 42);
+        assert_eq!(message.response_code, ResponseCode::NoError);
     }
 
     #[tokio::test]
@@ -756,8 +748,8 @@ mod tests {
             .into_bytes();
 
         let message = Message::from_vec(&response).expect("valid DNS message");
-        assert_eq!(message.id(), 42);
-        assert_eq!(message.response_code(), ResponseCode::Refused);
+        assert_eq!(message.id, 42);
+        assert_eq!(message.response_code, ResponseCode::Refused);
     }
 
     #[tokio::test]
@@ -784,7 +776,7 @@ mod tests {
             .into_bytes();
 
         let message = Message::from_vec(&response).expect("valid DNS message");
-        assert_eq!(message.id(), 42);
-        assert_eq!(message.response_code(), ResponseCode::NotImp);
+        assert_eq!(message.id, 42);
+        assert_eq!(message.response_code, ResponseCode::NotImp);
     }
 }

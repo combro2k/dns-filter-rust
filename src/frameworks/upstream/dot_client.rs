@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use hickory_client::client::{ClientHandle, DnssecClient};
-use hickory_client::proto::op::{Message, Query};
-use hickory_client::proto::rr::{DNSClass, Name, RecordType};
-use hickory_client::proto::runtime::TokioRuntimeProvider;
-use hickory_client::proto::rustls::{client_config, tls_client_connect};
-use hickory_client::proto::xfer::DnsMultiplexer;
+use hickory_net::client::{ClientHandle, DnssecClient};
+use hickory_net::runtime::TokioRuntimeProvider;
+use hickory_net::tls::{client_config, tls_client_connect};
+use hickory_net::xfer::DnsMultiplexer;
+use hickory_proto::op::{Message, Query};
+use hickory_proto::rr::{DNSClass, Name, RData, RecordType};
 use tokio::sync::Mutex;
 
 use crate::frameworks::upstream::DnsUdpTcpClient;
@@ -162,7 +162,7 @@ impl DnsTlsClient {
         let message = Message::from_vec(query)
             .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
         let question = message
-            .queries()
+            .queries
             .first()
             .ok_or_else(|| UpstreamResolveError::Protocol("query contains no questions".into()))?;
 
@@ -200,11 +200,23 @@ impl DnsTlsClient {
         // Establish a fresh TLS connection.
         let address = self.resolve_address().await?;
         let provider = TokioRuntimeProvider::default();
-        let tls_config = Arc::new(client_config());
-        let (stream, sender) =
-            tls_client_connect(address, self.server_name.clone(), tls_config, provider);
-        let multiplexer = DnsMultiplexer::new(stream, sender, None);
-        let (mut client, background) = DnssecClient::connect(multiplexer)
+        let tls_config = Arc::new(
+            client_config()
+                .map_err(|e| UpstreamResolveError::Protocol(format!("TLS config error: {e}")))?,
+        );
+        let server_name = rustls_pki_types::ServerName::try_from(self.server_name.clone())
+            .map_err(|e| {
+                UpstreamResolveError::Protocol(format!(
+                    "invalid server name '{}': {e}",
+                    self.server_name
+                ))
+            })?;
+        let (tls_connect, sender) = tls_client_connect(address, server_name, tls_config, provider);
+        let tls_stream = tls_connect
+            .await
+            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
+        let multiplexer = DnsMultiplexer::new(tls_stream, sender);
+        let (mut client, background) = DnssecClient::connect(std::future::ready(Ok(multiplexer)))
             .await
             .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
 
@@ -250,9 +262,12 @@ fn build_dns_query(host: &str, query_type: RecordType) -> Result<Vec<u8>, Upstre
         UpstreamResolveError::Protocol(format!("invalid DoT hostname '{host}': {e}"))
     })?;
 
-    let mut message = Message::new();
-    message.set_id(1);
-    message.set_recursion_desired(true);
+    let mut message = Message::new(
+        1,
+        hickory_proto::op::MessageType::Query,
+        hickory_proto::op::OpCode::Query,
+    );
+    message.metadata.recursion_desired = true;
     message.add_query(Query::query(name, query_type));
 
     message
@@ -269,14 +284,14 @@ async fn try_extract_ip_from_response(
     let message = Message::from_vec(&response)
         .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
 
-    for answer in message.answers() {
-        let data = answer.data();
-        if let Some(ipv4) = data.as_a() {
-            return Ok(SocketAddr::new(IpAddr::V4(ipv4.0), port));
+    for answer in &message.answers {
+        let data = &answer.data;
+        if let RData::A(a) = data {
+            return Ok(SocketAddr::new(IpAddr::V4(a.0), port));
         }
 
-        if let Some(ipv6) = data.as_aaaa() {
-            return Ok(SocketAddr::new(IpAddr::V6(ipv6.0), port));
+        if let RData::AAAA(aaaa) = data {
+            return Ok(SocketAddr::new(IpAddr::V6(aaaa.0), port));
         }
     }
 

@@ -4,13 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use hickory_client::client::{ClientHandle, DnssecClient};
-use hickory_client::proto::op::Message;
-use hickory_client::proto::rr::{DNSClass, Name, RecordType};
-use hickory_client::proto::runtime::TokioRuntimeProvider;
-use hickory_client::proto::tcp::TcpClientStream;
-use hickory_client::proto::udp::UdpClientStream;
-use hickory_client::proto::xfer::DnsMultiplexer;
+use hickory_net::client::{ClientHandle, DnssecClient};
+use hickory_net::runtime::TokioRuntimeProvider;
+use hickory_net::tcp::TcpClientStream;
+use hickory_net::udp::UdpClientStream;
+use hickory_net::xfer::DnsMultiplexer;
+use hickory_proto::op::Message;
+use hickory_proto::rr::{DNSClass, Name, RecordType};
 
 use tokio::sync::Mutex;
 
@@ -54,7 +54,7 @@ impl DnsUdpTcpClient {
         let message = Message::from_vec(query)
             .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
         let question = message
-            .queries()
+            .queries
             .first()
             .ok_or_else(|| UpstreamResolveError::Protocol("query contains no questions".into()))?;
 
@@ -71,7 +71,7 @@ impl DnsUdpTcpClient {
         let conn = UdpClientStream::builder(self.address, provider)
             .with_timeout(Some(UDP_TIMEOUT))
             .build();
-        let (mut client, background) = DnssecClient::connect(conn)
+        let (mut client, background) = DnssecClient::connect(std::future::ready(Ok(conn)))
             .await
             .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
 
@@ -114,10 +114,13 @@ impl DnsUdpTcpClient {
 
         // Establish a fresh TCP connection.
         let provider = TokioRuntimeProvider::default();
-        let (tcp_stream, sender) =
+        let (tcp_connect, sender) =
             TcpClientStream::new(self.address, None, Some(TCP_TIMEOUT), provider);
-        let multiplexer = DnsMultiplexer::new(tcp_stream, sender, None);
-        let (mut client, background) = DnssecClient::connect(multiplexer)
+        let tcp_stream = tcp_connect
+            .await
+            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
+        let multiplexer = DnsMultiplexer::new(tcp_stream, sender);
+        let (mut client, background) = DnssecClient::connect(std::future::ready(Ok(multiplexer)))
             .await
             .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
 
@@ -146,7 +149,7 @@ impl UpstreamResolver for DnsUdpTcpClient {
         let msg = Message::from_vec(&response)
             .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
 
-        if msg.truncated() {
+        if msg.truncation {
             self.resolve_tcp(&query).await
         } else {
             Ok(response)
@@ -157,14 +160,17 @@ impl UpstreamResolver for DnsUdpTcpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hickory_client::proto::op::ResponseCode;
+    use hickory_proto::op::ResponseCode;
 
     fn build_query(domain: &str) -> Vec<u8> {
-        let mut msg = Message::new();
-        msg.set_id(1);
-        msg.set_recursion_desired(true);
+        let mut msg = Message::new(
+            1,
+            hickory_proto::op::MessageType::Query,
+            hickory_proto::op::OpCode::Query,
+        );
+        msg.metadata.recursion_desired = true;
         msg.add_query({
-            let mut q = hickory_client::proto::op::Query::new();
+            let mut q = hickory_proto::op::Query::new();
             q.set_name(domain.parse().unwrap());
             q.set_query_type(RecordType::A);
             q.set_query_class(DNSClass::IN);
@@ -228,9 +234,9 @@ mod tests {
             .expect("resolution failed");
 
         let msg = Message::from_vec(&response).expect("failed to parse response");
-        assert_eq!(msg.response_code(), ResponseCode::NoError);
+        assert_eq!(msg.response_code, ResponseCode::NoError);
         assert!(
-            !msg.answers().is_empty(),
+            !msg.answers.is_empty(),
             "expected at least one answer record"
         );
     }
@@ -246,8 +252,8 @@ mod tests {
             .expect("TCP resolution failed");
 
         let msg = Message::from_vec(&response).expect("failed to parse response");
-        assert_eq!(msg.response_code(), ResponseCode::NoError);
-        assert!(!msg.answers().is_empty());
+        assert_eq!(msg.response_code, ResponseCode::NoError);
+        assert!(!msg.answers.is_empty());
     }
 
     #[tokio::test]

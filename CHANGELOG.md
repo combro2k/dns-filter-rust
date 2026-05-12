@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.1] - 2026-05-12
+
+### Security
+- **Migrated hickory DNS crates from 0.25.2 to 0.26.1** to resolve 3 CVEs:
+  - RUSTSEC-2026-0106: cache poisoning via cross-zone NS injection (hickory-recursor)
+  - RUSTSEC-2026-0118: NSEC3 closest-encloser proof unbounded loop / OOM (hickory-proto)
+  - RUSTSEC-2026-0119: O(n²) name compression CPU exhaustion (hickory-proto)
+
+### Changed
+- Replaced `hickory-client` (removed upstream) with `hickory-net` 0.26.1 for DNS client/transport functionality
+- Replaced `hickory-recursor` (merged upstream) with `hickory-resolver` 0.26.1 `recursor` feature
+- Upgraded `hickory-proto` from 0.25.2 to 0.26.1
+- Simplified recursive resolver: `Recursor::resolve()` now returns `Message` directly, removing manual CNAME chain following and `Proof`-based AD bit tracking
+- Replaced `Recursor::builder()` pattern with `Recursor::new()` direct construction using `RecursorOptions`
+- Replaced `extract_negative_records()` error destructuring with `RecursorError::Negative(AuthorityData)` pattern matching
+- Removed 3 hickory CVE ignore entries from `deny.toml`
+
 ## [2.0.0] - 2026-05-12
 
 ### Breaking

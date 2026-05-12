@@ -1,6 +1,6 @@
 [package]
 name = "dns-filter"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 license = "MIT"
 
@@ -14,9 +14,9 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hyper = { version = "0.14", features = ["full"] }
-hickory-client = { version = "0.25.2", features = ["dnssec-ring", "tls-ring", "webpki-roots"] }
-hickory-proto = { version = "0.25.2", default-features = false, features = ["text-parsing", "dnssec-ring"] }
-hickory-recursor = { version = "0.25.2", features = ["dnssec-ring"] }
+hickory-proto = { version = "0.26.1", default-features = false, features = ["dnssec-ring"] }
+hickory-net = { version = "0.26.1", features = ["dnssec-ring", "tls-ring", "tokio"] }
+hickory-resolver = { version = "0.26.1", features = ["recursor", "dnssec-ring"] }
 ipnet = "2"
 thiserror = "1.0"
 anyhow = "1.0"
@@ -34,5 +34,6 @@ rustls-pemfile = "2.1"
 webpki-roots = "0.26"
 chrono = "0.4"
 rustls = "0.23"
+rustls-pki-types = "1"
 syslog = "6"
 url = "2"

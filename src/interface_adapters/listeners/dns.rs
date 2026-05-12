@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
-use hickory_client::proto::op::Message;
+use hickory_proto::op::Message;
 
 use crate::frameworks::config::schema::SocketConfig;
 use crate::use_cases::request_pipeline::{
@@ -250,7 +250,7 @@ async fn forward_query(
     let (domain, qtype) = Message::from_vec(query)
         .ok()
         .and_then(|msg| {
-            msg.queries()
+            msg.queries
                 .first()
                 .map(|q| (q.name().to_ascii(), q.query_type().to_string()))
         })
@@ -276,8 +276,8 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use hickory_client::proto::op::{Message, MessageType, Query, ResponseCode};
-    use hickory_client::proto::rr::{DNSClass, RecordType};
+    use hickory_proto::op::{Message, MessageType, Query, ResponseCode};
+    use hickory_proto::rr::{DNSClass, RecordType};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::Mutex;
 
@@ -351,9 +351,8 @@ mod tests {
     }
 
     fn make_query(domain: &str) -> Vec<u8> {
-        let mut msg = Message::new();
-        msg.set_id(42);
-        msg.set_recursion_desired(true);
+        let mut msg = Message::new(42, MessageType::Query, hickory_proto::op::OpCode::Query);
+        msg.metadata.recursion_desired = true;
         let mut q = Query::new();
         q.set_name(domain.parse().unwrap());
         q.set_query_type(RecordType::A);
@@ -363,10 +362,8 @@ mod tests {
     }
 
     fn make_noerror_response(id: u16) -> Vec<u8> {
-        let mut msg = Message::new();
-        msg.set_id(id);
-        msg.set_message_type(MessageType::Response);
-        msg.set_response_code(ResponseCode::NoError);
+        let mut msg = Message::new(id, MessageType::Response, hickory_proto::op::OpCode::Query);
+        msg.metadata.response_code = ResponseCode::NoError;
         msg.to_vec().unwrap()
     }
 
@@ -401,11 +398,11 @@ mod tests {
         let servfail = build_servfail_response(&query);
 
         let response = Message::from_vec(&servfail).expect("valid DNS message");
-        assert_eq!(response.id(), 42);
-        assert_eq!(response.response_code(), ResponseCode::ServFail);
-        assert_eq!(response.message_type(), MessageType::Response);
-        assert_eq!(response.queries().len(), 1);
-        assert_eq!(response.queries()[0].name().to_ascii(), "example.com.");
+        assert_eq!(response.id, 42);
+        assert_eq!(response.response_code, ResponseCode::ServFail);
+        assert_eq!(response.message_type, MessageType::Response);
+        assert_eq!(response.queries.len(), 1);
+        assert_eq!(response.queries[0].name().to_ascii(), "example.com.");
     }
 
     #[test]
@@ -413,9 +410,9 @@ mod tests {
         let servfail = build_servfail_response(&[]);
 
         let response = Message::from_vec(&servfail).expect("valid DNS message");
-        assert_eq!(response.id(), 0);
-        assert_eq!(response.response_code(), ResponseCode::ServFail);
-        assert_eq!(response.message_type(), MessageType::Response);
+        assert_eq!(response.id, 0);
+        assert_eq!(response.response_code, ResponseCode::ServFail);
+        assert_eq!(response.message_type, MessageType::Response);
     }
 
     // ── DnsServer::new ───────────────────────────────────────────────────────
@@ -476,8 +473,8 @@ mod tests {
         let pipeline = pipeline_slot(Arc::new(AlwaysFailResolver), neutral_filter());
         let result = forward_query(&pipeline, &make_query("example.com.")).await;
         let msg = Message::from_vec(&result).expect("valid DNS message");
-        assert_eq!(msg.response_code(), ResponseCode::ServFail);
-        assert_eq!(msg.id(), 42);
+        assert_eq!(msg.response_code, ResponseCode::ServFail);
+        assert_eq!(msg.id, 42);
     }
 
     #[tokio::test]
@@ -485,10 +482,10 @@ mod tests {
         let pipeline = pipeline_slot(Arc::new(AlwaysFailResolver), blocking_filter());
         let result = forward_query(&pipeline, &make_query("example.com.")).await;
         let msg = Message::from_vec(&result).expect("valid DNS message");
-        assert_eq!(msg.response_code(), ResponseCode::NoError);
-        assert_eq!(msg.id(), 42);
-        assert_eq!(msg.answers().len(), 1);
-        assert_eq!(msg.answers()[0].record_type(), RecordType::A);
+        assert_eq!(msg.response_code, ResponseCode::NoError);
+        assert_eq!(msg.id, 42);
+        assert_eq!(msg.answers.len(), 1);
+        assert_eq!(msg.answers[0].record_type(), RecordType::A);
     }
 
     // ── TCP framing ──────────────────────────────────────────────────────────

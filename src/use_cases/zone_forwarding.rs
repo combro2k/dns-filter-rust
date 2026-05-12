@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use hickory_client::proto::op::Message;
+use hickory_proto::op::Message;
 
 use crate::use_cases::request_pipeline::{
     AsyncRequestStage, DnsPipelineError, DnsPipelineRequest, DnsPipelineResponse,
@@ -122,13 +122,13 @@ fn sort_entries(entries: &mut [ZoneEntry]) {
 
 fn extract_query_name(query: &[u8]) -> Option<String> {
     let message = Message::from_vec(query).ok()?;
-    let query = message.queries().first()?;
+    let query = message.queries.first()?;
     Some(query.name().to_ascii())
 }
 
 fn fix_response_id(response: Vec<u8>, client_query_id: u16) -> Vec<u8> {
     if let Ok(mut message) = Message::from_vec(&response) {
-        message.set_id(client_query_id);
+        message.metadata.id = client_query_id;
         return message.to_vec().unwrap_or(response);
     }
 
@@ -165,8 +165,8 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use hickory_client::proto::op::{Message, MessageType, Query, ResponseCode};
-    use hickory_client::proto::rr::{DNSClass, RecordType};
+    use hickory_proto::op::{Message, MessageType, Query, ResponseCode};
+    use hickory_proto::rr::{DNSClass, RecordType};
 
     use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
 
@@ -208,8 +208,7 @@ mod tests {
     }
 
     fn make_query(name: &str) -> DnsPipelineRequest {
-        let mut message = Message::new();
-        message.set_id(42);
+        let mut message = Message::new(42, MessageType::Query, hickory_proto::op::OpCode::Query);
         let mut query = Query::new();
         query.set_name(name.parse().unwrap());
         query.set_query_type(RecordType::A);
@@ -219,10 +218,8 @@ mod tests {
     }
 
     fn make_response(id: u16) -> Vec<u8> {
-        let mut message = Message::new();
-        message.set_id(id);
-        message.set_message_type(MessageType::Response);
-        message.set_response_code(ResponseCode::NoError);
+        let mut message = Message::new(id, MessageType::Response, hickory_proto::op::OpCode::Query);
+        message.metadata.response_code = ResponseCode::NoError;
         message.to_vec().unwrap()
     }
 
@@ -290,7 +287,7 @@ mod tests {
             .expect("query should be handled");
 
         let message = Message::from_vec(&response.into_bytes()).expect("response should parse");
-        assert_eq!(message.id(), 42);
+        assert_eq!(message.id, 42);
     }
 
     #[tokio::test]

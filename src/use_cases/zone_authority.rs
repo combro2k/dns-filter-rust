@@ -5,17 +5,15 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
-use hickory_client::proto::op::{Message, MessageType, OpCode, ResponseCode};
-use hickory_client::proto::rr::rdata::{
-    A, AAAA, CAA, CNAME, MX, NAPTR, NS, PTR, SOA, SRV, TLSA, TXT,
-};
-use hickory_client::proto::rr::{Name, RData, Record, RecordType};
+use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
+use hickory_proto::rr::rdata::{A, AAAA, CAA, CNAME, MX, NAPTR, NS, PTR, SOA, SRV, TLSA, TXT};
+use hickory_proto::rr::{Name, RData, Record, RecordType};
 use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
 
-use hickory_client::proto::rr::rdata::caa::KeyValue;
-use hickory_client::proto::rr::rdata::tlsa::{CertUsage, Matching, Selector};
+use hickory_proto::rr::rdata::caa::KeyValue;
+use hickory_proto::rr::rdata::tlsa::{CertUsage, Matching, Selector};
 
 use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
 
@@ -67,7 +65,7 @@ impl UpstreamResolver for ZoneAuthorityResolver {
         let request = Message::from_vec(&query)
             .map_err(|e| UpstreamResolveError::Protocol(format!("invalid DNS query: {e}")))?;
 
-        let question = request.queries().first().ok_or_else(|| {
+        let question = request.queries.first().ok_or_else(|| {
             UpstreamResolveError::Protocol("DNS query has no question".to_string())
         })?;
 
@@ -80,17 +78,14 @@ impl UpstreamResolver for ZoneAuthorityResolver {
             .map_err(|_| UpstreamResolveError::Protocol("zone snapshot lock poisoned".to_string()))?
             .clone();
 
-        let mut response = Message::new();
-        response.set_id(request.id());
-        response.set_message_type(MessageType::Response);
-        response.set_op_code(OpCode::Query);
-        response.set_recursion_desired(request.recursion_desired());
-        response.set_recursion_available(false);
-        response.set_authoritative(true);
+        let mut response = Message::new(request.id, MessageType::Response, OpCode::Query);
+        response.metadata.recursion_desired = request.recursion_desired;
+        response.metadata.recursion_available = false;
+        response.metadata.authoritative = true;
         response.add_query(question.clone());
 
         if !domain_matches_zone(&query_name, &snapshot.zone) {
-            response.set_response_code(ResponseCode::Refused);
+            response.metadata.response_code = ResponseCode::Refused;
             return response.to_vec().map_err(|e| {
                 UpstreamResolveError::Protocol(format!("failed to encode refused response: {e}"))
             });
@@ -103,13 +98,13 @@ impl UpstreamResolver for ZoneAuthorityResolver {
             }
 
             if answers.is_empty() {
-                response.set_response_code(ResponseCode::NoError);
+                response.metadata.response_code = ResponseCode::NoError;
                 if let Some(soa) = &snapshot.soa {
-                    response.add_name_server(soa.clone());
+                    response.add_authority(soa.clone());
                 }
             } else {
                 let ns_glue = collect_ns_glue_records(&answers, &snapshot.records_by_name);
-                response.set_response_code(ResponseCode::NoError);
+                response.metadata.response_code = ResponseCode::NoError;
                 for answer in answers {
                     response.add_answer(answer);
                 }
@@ -118,9 +113,9 @@ impl UpstreamResolver for ZoneAuthorityResolver {
                 }
             }
         } else {
-            response.set_response_code(ResponseCode::NXDomain);
+            response.metadata.response_code = ResponseCode::NXDomain;
             if let Some(soa) = &snapshot.soa {
-                response.add_name_server(soa.clone());
+                response.add_authority(soa.clone());
             }
         }
 
@@ -153,7 +148,7 @@ fn collect_ns_glue_records(
             continue;
         }
 
-        let RData::NS(target) = answer.data() else {
+        let RData::NS(target) = &answer.data else {
             continue;
         };
 
@@ -675,8 +670,8 @@ struct ZoneJsonRecord {
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use hickory_client::proto::op::Query;
-    use hickory_client::proto::rr::{DNSClass, RecordType};
+    use hickory_proto::op::Query;
+    use hickory_proto::rr::{DNSClass, RecordType};
 
     use super::*;
 
@@ -692,8 +687,7 @@ mod tests {
     }
 
     fn make_query(name: &str, query_type: RecordType) -> Vec<u8> {
-        let mut message = Message::new();
-        message.set_id(42);
+        let mut message = Message::new(42, MessageType::Query, OpCode::Query);
         let mut query = Query::new();
         query.set_name(Name::from_ascii(name).expect("valid query name"));
         query.set_query_type(query_type);
@@ -750,15 +744,15 @@ mod tests {
         let response = Message::from_vec(&response_bytes).expect("response should parse");
 
         assert!(response
-            .answers()
+            .answers
             .iter()
             .any(|record| record.record_type() == RecordType::NS));
         assert!(response
-            .additionals()
+            .additionals
             .iter()
             .any(|record| record.record_type() == RecordType::A));
         assert!(response
-            .additionals()
+            .additionals
             .iter()
             .any(|record| record.record_type() == RecordType::AAAA));
 
@@ -788,7 +782,7 @@ mod tests {
         let response = Message::from_vec(&response_bytes).expect("response should parse");
 
         let ns_records: Vec<&Record> = response
-            .answers()
+            .answers
             .iter()
             .filter(|record| record.record_type() == RecordType::NS)
             .collect();
@@ -823,9 +817,9 @@ mod tests {
             .expect("resolver should answer missing-name query");
         let response = Message::from_vec(&response_bytes).expect("response should parse");
 
-        assert_eq!(response.response_code(), ResponseCode::NXDomain);
+        assert_eq!(response.response_code, ResponseCode::NXDomain);
         assert!(response
-            .name_servers()
+            .authorities
             .iter()
             .any(|record| record.record_type() == RecordType::SOA));
 
@@ -856,7 +850,7 @@ mod tests {
             .expect("resolver should answer CAA query");
         let caa_message = Message::from_vec(&caa_response).expect("CAA response should parse");
         assert!(caa_message
-            .answers()
+            .answers
             .iter()
             .any(|record| record.record_type() == RecordType::CAA));
 
@@ -867,7 +861,7 @@ mod tests {
             .expect("resolver should answer TLSA query");
         let tlsa_message = Message::from_vec(&tlsa_response).expect("TLSA response should parse");
         assert!(tlsa_message
-            .answers()
+            .answers
             .iter()
             .any(|record| record.record_type() == RecordType::TLSA));
 
@@ -879,7 +873,7 @@ mod tests {
         let naptr_message =
             Message::from_vec(&naptr_response).expect("NAPTR response should parse");
         assert!(naptr_message
-            .answers()
+            .answers
             .iter()
             .any(|record| record.record_type() == RecordType::NAPTR));
 

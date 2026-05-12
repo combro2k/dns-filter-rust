@@ -3,24 +3,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use hickory_client::proto::op::{Message, MessageType, OpCode, ResponseCode};
-use hickory_client::proto::rr::{Name, RData, Record, RecordType};
-use hickory_proto::dnssec::{Proof, TrustAnchors};
-use hickory_proto::ProtoErrorKind;
-use hickory_recursor::{DnssecPolicy, ErrorKind, NameServerConfigGroup, Recursor};
+use hickory_net::runtime::TokioRuntimeProvider;
+use hickory_proto::dnssec::TrustAnchors;
+use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
+use hickory_proto::rr::RecordType;
+use hickory_resolver::recursor::{
+    DnssecConfig, DnssecPolicy, Recursor, RecursorError, RecursorOptions,
+};
 use ipnet::IpNet;
 
 use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
-
-/// Maximum number of CNAME hops to follow before returning what we have.
-/// Prevents infinite loops from circular CNAME chains.
-const MAX_CNAME_HOPS: u8 = 10;
-
-/// SOA + authority records extracted from a negative DNS response.
-type NegativeRecords = (
-    Option<Box<hickory_client::proto::rr::resource::Record<hickory_client::proto::rr::rdata::SOA>>>,
-    Option<Arc<[hickory_client::proto::rr::resource::Record]>>,
-);
 
 /// Default maximum number of referral hops before the resolver gives up.
 pub const DEFAULT_MAX_HOPS: u8 = 12;
@@ -229,14 +221,14 @@ pub fn load_root_key(root_key_path: Option<&str>) -> Option<Arc<TrustAnchors>> {
 }
 
 /// DNS resolver that performs iterative resolution starting from IANA root hints,
-/// backed by `hickory-recursor` with optional DNSSEC chain-of-trust validation.
+/// backed by `hickory-resolver`'s `Recursor` with optional DNSSEC chain-of-trust validation.
 ///
 /// When DNSSEC is enabled (the default), the resolver validates the full
 /// chain of trust from the IANA root KSK down to the queried domain. Queries
 /// for domains with broken or missing DNSSEC signatures will return SERVFAIL.
 #[derive(Clone)]
 pub struct RecursiveResolver {
-    recursor: Arc<Recursor>,
+    recursor: Arc<Recursor<TokioRuntimeProvider>>,
 }
 
 impl std::fmt::Debug for RecursiveResolver {
@@ -269,10 +261,11 @@ impl RecursiveResolver {
                 NameserverIpFamily::Ipv6Only => ip.is_ipv6(),
             })
             .collect();
-        let roots = NameServerConfigGroup::from_ips_clear(&filtered_ips, 53, true);
 
         let dnssec_policy = if dnssec {
-            DnssecPolicy::ValidateWithStaticKey { trust_anchor }
+            let mut dnssec_config = DnssecConfig::default();
+            dnssec_config.trust_anchor = trust_anchor;
+            DnssecPolicy::ValidateWithStaticKey(dnssec_config)
         } else {
             DnssecPolicy::SecurityUnaware
         };
@@ -285,18 +278,23 @@ impl RecursiveResolver {
             NameserverIpFamily::Ipv6Only => vec!["0.0.0.0/0".parse().unwrap()],
         };
 
-        let mut builder = Recursor::builder()
-            .dnssec_policy(dnssec_policy)
-            .recursion_limit(Some(max_hops));
+        // RecursorOptions is #[non_exhaustive], so we must use Default + field assignment.
+        #[allow(clippy::field_reassign_with_default)]
+        let options = {
+            let mut opts = RecursorOptions::default();
+            opts.recursion_limit = max_hops;
+            opts.deny_server = deny_nets;
+            opts
+        };
 
-        if !deny_nets.is_empty() {
-            let allow_nets: Vec<IpNet> = vec![];
-            builder = builder.nameserver_filter(allow_nets.iter(), deny_nets.iter());
-        }
-
-        let recursor = builder
-            .build(roots)
-            .expect("failed to build recursive resolver");
+        let recursor = Recursor::new(
+            &filtered_ips,
+            dnssec_policy,
+            None,
+            options,
+            TokioRuntimeProvider::default(),
+        )
+        .expect("failed to build recursive resolver");
 
         Self {
             recursor: Arc::new(recursor),
@@ -311,185 +309,87 @@ impl UpstreamResolver for RecursiveResolver {
             .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))?;
 
         let question = msg
-            .queries()
+            .queries
             .first()
             .ok_or_else(|| UpstreamResolveError::Protocol("query contains no questions".into()))?;
 
-        let name: Name = question.name().clone();
         let qtype: RecordType = question.query_type();
-        let query_id = msg.id();
+        let query_id = msg.id;
 
         // Check if the client set the DO (DNSSEC OK) bit
         let do_bit = msg
-            .extensions()
+            .edns
             .as_ref()
             .map(|edns| edns.flags().dnssec_ok)
             .unwrap_or(false);
 
-        let query = hickory_client::proto::op::Query::query(name, qtype);
+        let query = hickory_proto::op::Query::query(question.name().clone(), qtype);
 
-        let lookup_result = self.recursor.resolve(query, Instant::now(), do_bit).await;
+        match self.recursor.resolve(query, Instant::now(), do_bit).await {
+            Ok(mut response) => {
+                // The recursor returns a full Message; adjust ID and flags
+                // to match the client's original query.
+                response.metadata.id = query_id;
+                response.metadata.recursion_desired = true;
+                response.metadata.recursion_available = true;
 
-        // Build a DNS response message from the Lookup result
-        let mut response = Message::new();
-        response.set_id(query_id);
-        response.set_message_type(MessageType::Response);
-        response.set_op_code(OpCode::Query);
-        response.set_recursion_desired(true);
-        response.set_recursion_available(true);
-
-        // Copy the original question
-        if let Some(q) = msg.queries().first() {
-            response.add_query(q.clone());
-        }
-
-        // Echo EDNS OPT back when the client sent one
-        if let Some(client_edns) = msg.extensions() {
-            let mut edns = hickory_client::proto::op::Edns::new();
-            edns.set_dnssec_ok(do_bit);
-            edns.set_max_payload(client_edns.max_payload().max(512));
-            edns.set_version(0);
-            response.set_edns(edns);
-        }
-
-        match lookup_result {
-            Ok(lookup) => {
-                // Set AD only when validating and every answer record was DNSSEC-verified.
-                // Unsigned delegations (e.g. google.com) carry Proof::Insecure and must NOT
-                // get the AD flag, otherwise downstream validators like `delv` see a bogus
-                // trust chain.
-                let mut all_secure = self.recursor.is_validating()
-                    && !lookup.records().is_empty()
-                    && lookup.records().iter().all(|r| r.proof() == Proof::Secure);
-
-                // Collect answer records and follow CNAME chain if needed.
-                let mut answer_records: Vec<Record> = lookup.records().to_vec();
-
-                // Follow CNAME chain: if all answers are CNAME records and the
-                // original query type is not CNAME, resolve the CNAME target
-                // with the original query type to get the final answer.
-                if qtype != RecordType::CNAME {
-                    let mut hops: u8 = 0;
-                    while hops < MAX_CNAME_HOPS {
-                        // Check if the current answers are CNAME-only (no record
-                        // of the originally queried type).
-                        let has_queried_type =
-                            answer_records.iter().any(|r| r.record_type() == qtype);
-                        if has_queried_type {
-                            break;
-                        }
-
-                        // Find the last CNAME target to follow.
-                        let cname_target = answer_records
-                            .iter()
-                            .rev()
-                            .find(|r| r.record_type() == RecordType::CNAME)
-                            .and_then(|r| match r.data() {
-                                RData::CNAME(cname) => Some(cname.0.clone()),
-                                _ => None,
-                            });
-
-                        let Some(target) = cname_target else {
-                            break;
-                        };
-
-                        // Issue a follow-up query for the CNAME target.
-                        let follow_query = hickory_client::proto::op::Query::query(target, qtype);
-                        match self
-                            .recursor
-                            .resolve(follow_query, Instant::now(), do_bit)
-                            .await
-                        {
-                            Ok(follow_lookup) => {
-                                // Track AD across the chain.
-                                if all_secure {
-                                    all_secure = !follow_lookup.records().is_empty()
-                                        && follow_lookup
-                                            .records()
-                                            .iter()
-                                            .all(|r| r.proof() == Proof::Secure);
-                                }
-                                answer_records.extend(follow_lookup.records().iter().cloned());
-                            }
-                            Err(e) if e.is_nx_domain() || e.is_no_records_found() => {
-                                // CNAME target doesn't resolve; return what we have.
-                                break;
-                            }
-                            Err(_) => {
-                                // Upstream error on follow-up; return partial chain.
-                                break;
-                            }
-                        }
-                        hops += 1;
-                    }
+                // Echo EDNS OPT back when the client sent one
+                if let Some(client_edns) = msg.edns.as_ref() {
+                    let mut edns = hickory_proto::op::Edns::new();
+                    edns.set_dnssec_ok(do_bit);
+                    edns.set_max_payload(client_edns.max_payload().max(512));
+                    edns.set_version(0);
+                    response.set_edns(edns);
                 }
 
-                if all_secure {
-                    response.set_authentic_data(true);
-                }
-
-                for record in &answer_records {
-                    response.add_answer(record.clone());
-                }
+                response
+                    .to_vec()
+                    .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))
             }
-            Err(e) if e.is_nx_domain() || e.is_no_records_found() => {
-                // Extract response code, SOA, and authority records (NSEC/NSEC3 +
-                // RRSIG) from the error.  These proof records are essential for
-                // DNSSEC validators like `delv` that need to verify insecure
-                // delegations (e.g. google.com has no DS record).
+            Err(ref e) if e.is_nx_domain() || e.is_no_records_found() => {
                 let is_nx = e.is_nx_domain();
-                let (soa, authorities) = extract_negative_records(e);
+
+                let mut response = Message::new(query_id, MessageType::Response, OpCode::Query);
+                response.metadata.recursion_desired = true;
+                response.metadata.recursion_available = true;
+
+                if let Some(q) = msg.queries.first() {
+                    response.add_query(q.clone());
+                }
 
                 if is_nx {
-                    response.set_response_code(ResponseCode::NXDomain);
+                    response.metadata.response_code = ResponseCode::NXDomain;
                 } else {
-                    response.set_response_code(ResponseCode::NoError);
+                    response.metadata.response_code = ResponseCode::NoError;
                 }
 
-                if let Some(soa) = soa {
-                    response.add_name_server(soa.into_record_of_rdata());
+                // Echo EDNS OPT back when the client sent one
+                if let Some(client_edns) = msg.edns.as_ref() {
+                    let mut edns = hickory_proto::op::Edns::new();
+                    edns.set_dnssec_ok(do_bit);
+                    edns.set_max_payload(client_edns.max_payload().max(512));
+                    edns.set_version(0);
+                    response.set_edns(edns);
                 }
-                if let Some(auths) = authorities {
-                    for record in auths.iter() {
-                        response.add_name_server(record.clone());
+
+                // Extract SOA and authority records from the negative response.
+                if let RecursorError::Negative(ref auth_data) = e {
+                    if let Some(ref soa) = auth_data.soa {
+                        response.add_authority(soa.clone().into_record_of_rdata());
+                    }
+                    if let Some(ref auths) = auth_data.authorities {
+                        for record in auths.iter() {
+                            response.add_authority(record.clone());
+                        }
                     }
                 }
+
+                response
+                    .to_vec()
+                    .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))
             }
-            Err(e) => {
-                return Err(UpstreamResolveError::Protocol(format!("{e}")));
-            }
+            Err(e) => Err(UpstreamResolveError::Protocol(format!("{e}"))),
         }
-
-        response
-            .to_vec()
-            .map_err(|e| UpstreamResolveError::Protocol(format!("{e:?}")))
-    }
-}
-
-/// Extract the SOA record and authority records (NSEC/NSEC3 + RRSIG) from
-/// a hickory-recursor error.  The recursor wraps negative responses in
-/// `ErrorKind::Proto(ProtoErrorKind::NoRecordsFound { .. })` or
-/// `ErrorKind::Forward(ForwardData { .. })`.  We destructure both variants
-/// so that the caller can include the full proof chain in the DNS response.
-fn extract_negative_records(err: hickory_recursor::Error) -> NegativeRecords {
-    match err.into_kind() {
-        ErrorKind::Proto(proto) => match *proto.kind {
-            ProtoErrorKind::NoRecordsFound {
-                soa, authorities, ..
-            } => (soa, authorities),
-            _ => (None, None),
-        },
-        ErrorKind::Forward(fwd) => (Some(fwd.soa), fwd.authorities),
-        ErrorKind::Resolve(resolve) => match resolve.kind() {
-            hickory_recursor::resolver::ResolveErrorKind::Proto(proto) => match proto.kind() {
-                ProtoErrorKind::NoRecordsFound {
-                    soa, authorities, ..
-                } => (soa.clone(), authorities.clone()),
-                _ => (None, None),
-            },
-            _ => (None, None),
-        },
-        _ => (None, None),
     }
 }
 
@@ -629,105 +529,5 @@ A.ROOT-SERVERS.NET.      3600000      AAAA  2001:503:ba3e::2:30
             Arc::strong_count(&resolver.recursor),
             Arc::strong_count(&cloned.recursor)
         );
-    }
-
-    #[test]
-    fn max_cname_hops_is_reasonable() {
-        let max_cname_hops = std::hint::black_box(MAX_CNAME_HOPS);
-        assert!(
-            max_cname_hops >= 5,
-            "MAX_CNAME_HOPS should be at least 5 to handle real-world chains"
-        );
-        assert!(
-            max_cname_hops <= 20,
-            "MAX_CNAME_HOPS should be at most 20 to prevent excessive recursion"
-        );
-    }
-
-    /// Helper to build a CNAME record for testing.
-    fn make_cname_record(owner: &str, target: &str) -> Record {
-        let owner_name = Name::from_ascii(owner).unwrap();
-        let target_name = Name::from_ascii(target).unwrap();
-        Record::from_rdata(
-            owner_name,
-            300,
-            RData::CNAME(hickory_client::proto::rr::rdata::CNAME(target_name)),
-        )
-    }
-
-    /// Helper to build an A record for testing.
-    fn make_a_record(owner: &str, ip: Ipv4Addr) -> Record {
-        let owner_name = Name::from_ascii(owner).unwrap();
-        Record::from_rdata(
-            owner_name,
-            300,
-            RData::A(hickory_client::proto::rr::rdata::A(ip)),
-        )
-    }
-
-    #[test]
-    fn cname_target_extracted_from_records() {
-        let records = [make_cname_record("www.example.com.", "alias.example.com.")];
-        let target = records
-            .iter()
-            .rev()
-            .find(|r| r.record_type() == RecordType::CNAME)
-            .and_then(|r| match r.data() {
-                RData::CNAME(cname) => Some(cname.0.clone()),
-                _ => None,
-            });
-        assert_eq!(
-            target.unwrap(),
-            Name::from_ascii("alias.example.com.").unwrap()
-        );
-    }
-
-    #[test]
-    fn cname_chain_last_target_used() {
-        let records = [
-            make_cname_record("www.example.com.", "alias1.example.com."),
-            make_cname_record("alias1.example.com.", "alias2.example.com."),
-        ];
-        // The logic picks the last CNAME record (rev iterator).
-        let target = records
-            .iter()
-            .rev()
-            .find(|r| r.record_type() == RecordType::CNAME)
-            .and_then(|r| match r.data() {
-                RData::CNAME(cname) => Some(cname.0.clone()),
-                _ => None,
-            });
-        assert_eq!(
-            target.unwrap(),
-            Name::from_ascii("alias2.example.com.").unwrap()
-        );
-    }
-
-    #[test]
-    fn no_cname_following_when_queried_type_present() {
-        let records = [
-            make_cname_record("www.example.com.", "alias.example.com."),
-            make_a_record("alias.example.com.", Ipv4Addr::new(93, 184, 216, 34)),
-        ];
-        // If the queried type (A) is already present, no following needed.
-        let has_a = records.iter().any(|r| r.record_type() == RecordType::A);
-        assert!(has_a, "should detect that A record is present");
-    }
-
-    #[test]
-    fn no_cname_target_when_no_cname_records() {
-        let records = [make_a_record(
-            "example.com.",
-            Ipv4Addr::new(93, 184, 216, 34),
-        )];
-        let target = records
-            .iter()
-            .rev()
-            .find(|r| r.record_type() == RecordType::CNAME)
-            .and_then(|r| match r.data() {
-                RData::CNAME(cname) => Some(cname.0.clone()),
-                _ => None,
-            });
-        assert!(target.is_none());
     }
 }

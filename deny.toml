@@ -15,15 +15,6 @@ all-features = true
 yanked = "deny"
 unmaintained = "workspace"
 ignore = [
-    # hickory-proto 0.25.2: NSEC3 closest-encloser proof unbounded loop (OOM/crash)
-    # Fix requires hickory 0.25 → 0.26 migration (major API breaking change)
-    { id = "RUSTSEC-2026-0118", reason = "tracked: requires hickory 0.25→0.26 migration" },
-    # hickory-proto 0.25.2: O(n²) name compression CPU exhaustion
-    # Fix requires hickory 0.25 → 0.26 migration (major API breaking change)
-    { id = "RUSTSEC-2026-0119", reason = "tracked: requires hickory 0.25→0.26 migration" },
-    # hickory-recursor 0.25.2: cache poisoning via cross-zone NS injection
-    # Fix requires hickory 0.25 → 0.26 migration (crate merged into hickory-resolver)
-    { id = "RUSTSEC-2026-0106", reason = "tracked: requires hickory 0.25→0.26 migration (crate deprecated)" },
     # protobuf 2.28.0 (via prometheus): stack overflow on crafted input
     # prometheus is an unused dependency — removing it fixes this CVE
     { id = "RUSTSEC-2024-0437", reason = "tracked: prometheus is unused, removal pending" },
