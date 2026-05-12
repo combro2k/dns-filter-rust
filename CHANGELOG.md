@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.2] - 2026-05-12
+
+### Changed
+- Removed `/dev/log` bind-mount from OpenRC init script, config example, and README; the syslog socket is opened before chroot so the file descriptor survives privilege drop
+
 ## [2.0.1] - 2026-05-12
 
 ### Security

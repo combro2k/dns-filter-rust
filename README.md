@@ -1110,13 +1110,6 @@ sudo useradd -r -s /bin/false dns-filter 2>/dev/null || true
 sudo mkdir -p /var/lib/dns-filter
 sudo chown -R dns-filter:dns-filter /var/lib/dns-filter
 sudo chmod 755 /var/lib/dns-filter
-
-# For local syslog in chroot, bind-mount /dev/log (OpenRC does this automatically)
-sudo mkdir -p /var/lib/dns-filter/dev
-sudo mount --bind /dev/log /var/lib/dns-filter/dev/log
-
-# Persist bind-mount in fstab (optional)
-echo "/dev/log /var/lib/dns-filter/dev/log none bind 0 0" | sudo tee -a /etc/fstab
 ```
 
 ### Configuration Example

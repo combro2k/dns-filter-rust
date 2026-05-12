@@ -183,10 +183,6 @@ logging:
 #
 # NOTE: After chroot, config files and blocklist caches must be accessible
 # from within the chroot directory (e.g. bind-mount or copy into it).
-# NOTE: If syslog transport is "unix" and server is /dev/log (default),
-#       make /var/lib/dns-filter/dev/log available inside chroot via bind-mount.
-#       Alternatively, use transport: "udp" with server: "127.0.0.1:514"
-#       (or a remote syslog endpoint) to avoid the /dev/log bind-mount.
 security:
   user: "nobody"
   group: "nogroup"
