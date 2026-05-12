@@ -1,6 +1,6 @@
 # dns-filter
 
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/) [![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#license) [![Version](https://img.shields.io/badge/version-2.0.3-green)](./CHANGELOG.md)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/) [![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#license) [![Version](https://img.shields.io/badge/version-2.0.4-green)](./CHANGELOG.md)
 
 **dns-filter** is a high-performance, security-first DNS filtering service written in Rust. It acts as a sophisticated intermediary DNS server that filters queries against blocklists and allowlists, routes requests to zone-specific resolvers, serves authoritative DNS for local zones, and provides recursive DNS resolution with DNSSEC validation.
 
@@ -2426,5 +2426,5 @@ This project is licensed under the MIT License and/or Apache License 2.0. See th
 ---
 
 **Last Updated:** May 12, 2026  
-**Current Version:** 2.0.3  
+**Current Version:** 2.0.4  
 **Status:** Stable with experimental zone authority and draft WASM plugin features

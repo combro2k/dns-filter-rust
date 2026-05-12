@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.0.4] - 2026-05-12
 
 ### Added
 - REST API for runtime administration (disabled by default, enable with `api.enabled: true` in config)
@@ -21,7 +21,7 @@ All notable changes to this project will be documented in this file.
   - New `api` section in config schema: `enabled`, `address`, `port`, `api_token`, `query_logging`
 - WASM plugin system scaffolding behind `plugins` cargo feature flag: `PluginVerdict`/`PluginQuery` entity types, `WasmPluginStage` pipeline handler stub, `WasmPluginRuntime` framework scaffold, `PluginConfig` config schema, and optional `wasmtime` dependency (not yet functional — draft/placeholder only)
 ### Changed
-- Updated README.md: version badge to 2.0.3, added WASM Plugins section, updated architecture pipeline diagram with Plugin Handler stage, updated Key Features, Layer Responsibilities, Key Files, and footer metadata
+- Updated README.md: version badge to 2.0.4, added WASM Plugins section, updated architecture pipeline diagram with Plugin Handler stage, updated Key Features, Layer Responsibilities, Key Files, and footer metadata
 ## [2.0.3] - 2026-05-12
 
 ### Fixed
