@@ -25,6 +25,7 @@ src/
     interface_adapters/
     frameworks/
         config/
+        plugin_runtime/   # cfg(feature = "plugins")
 ```
 
 ### Protocol Scope
@@ -112,7 +113,7 @@ All code changes must be designed, implemented, and reviewed with a security-fir
 - **Changelog is mandatory for every version update**: Each version update **MUST** be documented in `CHANGELOG.md` with a clear summary of what changed.
 - **Version is mandatory for every version update**: `Cargo.toml` **MUST** have the exact same version.
 - **Version update workflow is mandatory**: A version update **MUST** explicitly include all of the following steps:
-    - Update the version in all required files. If the exact target version is assumed rather than provided, explicitly ask the user to confirm the version before proceeding.
+    - Update the version in all required files (`Cargo.toml`, `README.md` version badge, `README.md` footer "Current Version" line). If the exact target version is assumed rather than provided, explicitly ask the user to confirm the version before proceeding.
     - If the user asks for a version update without specifying a target version, calculate and suggest:
         - Next minor version (`x.x.(y+1)`) as the default/recommended option.
         - Next major version (`(x+1).0.0`) as an alternative option.

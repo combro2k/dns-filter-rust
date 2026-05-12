@@ -152,6 +152,13 @@ resolvers:
           protocol: "dns"
           address: "192.168.1.1:53"
 
+# WASM plugins (requires 'plugins' cargo feature)
+# plugins:
+#   - name: "example-plugin"
+#     path: "/etc/dns-filter/plugins/example.wasm"
+#     enabled: true
+plugins: []
+
 logging:
   syslog:
     enabled: true

@@ -2,6 +2,8 @@ pub mod config;
 pub mod control_client;
 pub mod control_socket;
 pub mod logging;
+#[cfg(feature = "plugins")]
+pub mod plugin_runtime;
 pub mod privileges;
 pub mod signal_handler;
 pub mod upstream;

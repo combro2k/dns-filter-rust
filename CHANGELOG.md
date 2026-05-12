@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- REST API for runtime administration (disabled by default, enable with `api.enabled: true` in config)
+  - `GET /health` — unauthenticated health/liveness probe with uptime
+  - `POST /api/v1/reload` — trigger configuration reload (same as SIGHUP)
+  - `POST /api/v1/filtering/disable` / `POST /api/v1/filtering/enable` — global filtering toggle (in-memory, resets on restart)
+  - `GET /api/v1/filtering/status` — current global filtering state
+  - `GET /api/v1/lists` — list all configured blocklists/allowlists with status
+  - `POST /api/v1/lists/refresh` — refresh all lists
+  - `POST /api/v1/lists/{name}/refresh` — refresh a specific list
+  - `POST /api/v1/lists/{name}/disable` / `POST /api/v1/lists/{name}/enable` — temporarily disable/enable a specific list (in-memory, resets on restart)
+  - `GET /api/v1/stats` — query counters, uptime, per-list stats
+  - `GET /api/v1/query-log` — recent query log entries (when query logging enabled)
+  - Optional Bearer token authentication for all `/api/*` endpoints (constant-time comparison)
+  - Configurable query logging with bounded ring buffer (default 10,000 entries)
+  - New `api` section in config schema: `enabled`, `address`, `port`, `api_token`, `query_logging`
+- WASM plugin system scaffolding behind `plugins` cargo feature flag: `PluginVerdict`/`PluginQuery` entity types, `WasmPluginStage` pipeline handler stub, `WasmPluginRuntime` framework scaffold, `PluginConfig` config schema, and optional `wasmtime` dependency (not yet functional — draft/placeholder only)
+### Changed
+- Updated README.md: version badge to 2.0.3, added WASM Plugins section, updated architecture pipeline diagram with Plugin Handler stage, updated Key Features, Layer Responsibilities, Key Files, and footer metadata
 ## [2.0.3] - 2026-05-12
 
 ### Fixed

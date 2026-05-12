@@ -14,10 +14,20 @@ pub struct DnsFilterConfig {
     pub allowlists: Vec<NamedList>,
     pub filtering: Option<FilteringConfig>,
     pub resolvers: ResolversConfig,
+    #[serde(default)]
+    pub plugins: Vec<PluginConfig>,
     pub logging: LoggingConfig,
     pub security: Option<SecurityConfig>,
     pub api: Option<ApiConfig>,
     pub control: Option<ControlConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PluginConfig {
+    pub name: String,
+    pub path: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
 }
 
 impl DnsFilterConfig {

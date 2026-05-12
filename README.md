@@ -1,6 +1,6 @@
 # dns-filter
 
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/) [![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#license) [![Version](https://img.shields.io/badge/version-2.0.0-green)](./CHANGELOG.md)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/) [![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#license) [![Version](https://img.shields.io/badge/version-2.0.3-green)](./CHANGELOG.md)
 
 **dns-filter** is a high-performance, security-first DNS filtering service written in Rust. It acts as a sophisticated intermediary DNS server that filters queries against blocklists and allowlists, routes requests to zone-specific resolvers, serves authoritative DNS for local zones, and provides recursive DNS resolution with DNSSEC validation.
 
@@ -18,6 +18,7 @@
 - **Config Merging**: `dns-filter merge-config` deep-merges user config with built-in defaults, filling missing sections automatically
 - **Comprehensive Logging**: Syslog (local/remote), file, and stdout with configurable transports (unix, udp, tcp, tls)
 - **Security-First**: Privilege dropping, chroot sandboxing, Linux capabilities, hardened systemd unit
+- **WASM Plugin System** *(Draft)*: Extensible plugin architecture using sandboxed WebAssembly modules (behind `plugins` cargo feature flag)
 - **Observability**: Prometheus-compatible metrics endpoint
 - **Production-Ready**: Systemd and OpenRC init system support with hardening best practices
 
@@ -286,6 +287,11 @@ resolvers:       # Upstream resolvers and zone forwarding
   strategy: "..."
   servers: [...]
   zones: [...]
+
+plugins:         # WASM plugins (requires 'plugins' feature)
+  - name: "..."
+    path: "..."
+    enabled: true
 
 logging:         # Logging configuration
   syslog: {...}
@@ -833,6 +839,66 @@ resolvers:
       zone_source_check_interval: "15m"  # Check for updates every 15 minutes
       # Falls back to last good snapshot if URL fetch fails
 ```
+
+---
+
+## WASM Plugins *(Draft)*
+
+dns-filter supports an extensible plugin system using sandboxed WebAssembly (WASM) modules. Plugins can inspect DNS queries and return verdicts to block, allow, rewrite, or pass through requests.
+
+> **Status:** This feature is in draft/scaffolding phase. The plugin ABI and runtime are defined but not yet functional. The scaffolding is available behind the `plugins` cargo feature flag.
+
+### Building with Plugin Support
+
+```bash
+cargo build --release --features plugins
+```
+
+Without the `plugins` feature, the plugin runtime is excluded entirely — zero binary size impact.
+
+### Configuration Reference
+
+```yaml
+plugins:
+  - name: "parental-controls"
+    path: "/etc/dns-filter/plugins/parental.wasm"
+    enabled: true
+
+  - name: "geo-routing"
+    path: "/etc/dns-filter/plugins/geo.wasm"
+    enabled: false  # disabled without removing from config
+```
+
+**Fields:**
+- `name` (string, required): Human-readable identifier for the plugin
+- `path` (string, required): Filesystem path to the `.wasm` module
+- `enabled` (bool, optional): Enable/disable without deleting from config (default: true)
+
+### Plugin Verdicts
+
+Each plugin can return one of these verdicts for a DNS query:
+
+| Verdict | Effect |
+|---------|--------|
+| **Pass** | Continue to next pipeline stage (default) |
+| **Block** | Return sinkhole response |
+| **Allow** | Bypass remaining filters |
+| **Rewrite** | Rewrite the query target to a different domain |
+
+### Pipeline Position
+
+Plugins execute **after** the static blocklist/allowlist filter and **before** zone forwarding:
+
+```
+Filter → WASM Plugins → Zone Forwarding → Upstream
+```
+
+### Security Model
+
+- Plugins run inside a WASM sandbox (wasmtime) with strict resource limits
+- No filesystem, network, or system access from plugin code
+- Memory and execution time are bounded per plugin invocation
+- Plugin code cannot affect the host process outside the defined ABI
 
 ---
 
@@ -2060,13 +2126,13 @@ dns-filter follows a **Clean Architecture** design with **Domain-Driven Design**
 ### Layer Responsibilities
 
 **Entities** (`src/entities/`)
-- Pure domain models: `Filter`, `Resolution`
+- Pure domain models: `Filter`, `Resolution`, `PluginVerdict`, `PluginQuery`
 - Business rules: blocking logic, response synthesis
 - Zero I/O, zero framework dependencies
 
 **Use Cases** (`src/use_cases/`)
 - Application orchestration
-- Business logic: `filtering.rs`, `upstream_resolver.rs`, `zone_forwarding.rs`, `zone_authority.rs`
+- Business logic: `filtering.rs`, `upstream_resolver.rs`, `zone_forwarding.rs`, `zone_authority.rs`, `plugin_handler.rs`
 - Request pipeline with Chain of Responsibility pattern
 - Configuration bootstrap and reload
 
@@ -2078,6 +2144,7 @@ dns-filter follows a **Clean Architecture** design with **Domain-Driven Design**
 
 **Frameworks** (`src/frameworks/`)
 - External systems: config loading, logging, upstream client, privilege management
+- WASM plugin runtime (`plugin_runtime/`, behind `plugins` feature)
 - I/O and side effects
 - Isolated from core logic
 
@@ -2093,6 +2160,12 @@ DNS Query
 │  Filter Handler     │ ─→ Check blocklists/allowlists
 └─────────────────────┘    ├─ Hit → return sinkhole
                            └─ Miss → pass through
+    │
+    ▼
+┌─────────────────────┐
+│  Plugin Handler     │ ─→ Execute WASM plugins (if enabled)
+└─────────────────────┘    ├─ Block/Allow/Rewrite → short-circuit
+                           └─ Pass → continue chain
     │
     ▼
 ┌─────────────────────┐
@@ -2181,6 +2254,9 @@ cargo build
 
 # Build release binary (optimized, slower compilation)
 cargo build --release
+
+# Build with WASM plugin support (optional)
+cargo build --release --features plugins
 
 # Run tests
 cargo test
@@ -2307,10 +2383,11 @@ pub fn is_blocked(domain: &str) -> bool { }
 
 - `src/main.rs` — CLI entry point and privilege dropping
 - `src/lib.rs` — Public API and module organization
-- `src/entities/` — Domain models (`Filter`, `Resolution`)
-- `src/use_cases/` — Business logic (filtering, resolution, zones)
+- `src/entities/` — Domain models (`Filter`, `Resolution`, `PluginVerdict`, `PluginQuery`)
+- `src/use_cases/` — Business logic (filtering, resolution, zones, plugin handler)
 - `src/interface_adapters/listeners/` — Protocol implementations (DNS, DoT, DoH, DoQ)
 - `src/frameworks/config/schema.rs` — Configuration schema definition
+- `src/frameworks/plugin_runtime/` — WASM plugin runtime (behind `plugins` feature)
 - `AGENTS.md` — Architecture documentation and project governance
 - `CHANGELOG.md` — Version history and change log
 
@@ -2349,5 +2426,5 @@ This project is licensed under the MIT License and/or Apache License 2.0. See th
 ---
 
 **Last Updated:** May 12, 2026  
-**Current Version:** 1.0.0  
-**Status:** Stable with experimental zone authority features pending release
+**Current Version:** 2.0.3  
+**Status:** Stable with experimental zone authority and draft WASM plugin features

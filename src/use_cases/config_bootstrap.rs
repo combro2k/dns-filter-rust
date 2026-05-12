@@ -366,6 +366,7 @@ mod tests {
             security: None,
             api: None,
             control: None,
+            plugins: Vec::new(),
         }
     }
 
