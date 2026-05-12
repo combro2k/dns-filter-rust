@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.0.6] - 2026-05-13
+
 ### Breaking
 - **Zone configuration schema redesigned**: the per-zone `zone_source`, `zone_source_check_interval`, and `source_auth` fields have been removed. Zone authority mode is now expressed as `protocol: "json"` inside the same `servers[]` list used for forwarding.
 - Zone `servers[]` entries now use `ZoneServerConfig` (separate from the global `UpstreamServer` type). Existing zone configs using the old fields must be migrated.
