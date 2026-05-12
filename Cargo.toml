@@ -2,6 +2,7 @@
 name = "dns-filter"
 version = "2.0.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
@@ -12,7 +13,6 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-prometheus = "0.13"
 hyper = { version = "0.14", features = ["full"] }
 hickory-client = { version = "0.25.2", features = ["dnssec-ring", "tls-ring", "webpki-roots"] }
 hickory-proto = { version = "0.25.2", default-features = false, features = ["text-parsing", "dnssec-ring"] }

@@ -11,6 +11,10 @@ All notable changes to this project will be documented in this file.
 - Updated `tests/listener_batch_test.sh` to use `dns-filter start` subcommand
 
 ### Added
+- Added supply-chain security policy via `cargo-deny` — CVE/advisory scanning (RustSec), license compliance, dependency source verification, duplicate crate detection, and banned crate enforcement; enforced as a hard-fail gate in `tests/release-check.sh`
+- Committed `Cargo.lock` for reproducible builds and `cargo-deny` compatibility (binary crate)
+- Added `license = "MIT"` to `Cargo.toml`
+- Removed unused `prometheus` dependency (eliminates transitive `protobuf` v2.28.0 CVE RUSTSEC-2024-0437)
 - `make install` now auto-detects the init system (systemd or OpenRC) and installs the corresponding service file; override with `INIT_SYSTEM=systemd|openrc|none`
 - On upgrade installs (existing `config.yaml` detected), `make install` now prints a hint to run `dns-filter merge-config --overwrite --config /etc/dns-filter/config.yaml`
 - Added Unix domain control socket for daemon management: the running daemon listens on a JSON-over-Unix-socket control channel (default: `/run/dns-filter/dns-filter.sock`, configurable via `control.socket_path` in config)

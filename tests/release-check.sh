@@ -18,7 +18,13 @@ if ! command -v gitleaks >/dev/null 2>&1; then
 	exit 1
 fi
 
+if ! cargo deny --version >/dev/null 2>&1; then
+	echo "ERROR: cargo-deny is required but was not found (install: cargo install cargo-deny)" >&2
+	exit 1
+fi
+
 run_check "gitleaks" gitleaks detect --no-banner --redact
+run_check "cargo deny" cargo deny check
 run_check "cargo fmt check" cargo fmt --all -- --check
 run_check "cargo test --all-targets --all-features" cargo test --all-targets --all-features
 run_check "cargo clippy --all-targets --all-features -- -D warnings" cargo clippy --all-targets --all-features -- -D warnings

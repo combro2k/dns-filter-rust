@@ -1,0 +1,84 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+#
+# Run: cargo deny check
+# Enforced in: tests/release-check.sh
+
+[graph]
+targets = []
+all-features = true
+
+# ---------------------------------------------------------------------------
+# Advisory / CVE checking (RustSec advisory database)
+# ---------------------------------------------------------------------------
+[advisories]
+yanked = "deny"
+unmaintained = "workspace"
+ignore = [
+    # hickory-proto 0.25.2: NSEC3 closest-encloser proof unbounded loop (OOM/crash)
+    # Fix requires hickory 0.25 → 0.26 migration (major API breaking change)
+    { id = "RUSTSEC-2026-0118", reason = "tracked: requires hickory 0.25→0.26 migration" },
+    # hickory-proto 0.25.2: O(n²) name compression CPU exhaustion
+    # Fix requires hickory 0.25 → 0.26 migration (major API breaking change)
+    { id = "RUSTSEC-2026-0119", reason = "tracked: requires hickory 0.25→0.26 migration" },
+    # hickory-recursor 0.25.2: cache poisoning via cross-zone NS injection
+    # Fix requires hickory 0.25 → 0.26 migration (crate merged into hickory-resolver)
+    { id = "RUSTSEC-2026-0106", reason = "tracked: requires hickory 0.25→0.26 migration (crate deprecated)" },
+    # protobuf 2.28.0 (via prometheus): stack overflow on crafted input
+    # prometheus is an unused dependency — removing it fixes this CVE
+    { id = "RUSTSEC-2024-0437", reason = "tracked: prometheus is unused, removal pending" },
+    # rustls-pemfile: unmaintained, migrate to rustls-pki-types PemObject trait
+    { id = "RUSTSEC-2025-0134", reason = "tracked: migrate to rustls-pki-types PemObject" },
+]
+
+# ---------------------------------------------------------------------------
+# License policy – allow common permissive licenses only
+# Everything not in the allow list is denied automatically.
+# ---------------------------------------------------------------------------
+[licenses]
+confidence-threshold = 0.8
+unused-allowed-license = "allow"
+
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "OpenSSL",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+]
+
+exceptions = []
+
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# ---------------------------------------------------------------------------
+# Crate bans – duplicate detection & banned crates
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+# Source restrictions – crates.io only
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
