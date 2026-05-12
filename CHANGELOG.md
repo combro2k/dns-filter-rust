@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.0.0] - 2026-05-12
 
 ### Breaking
 - **CLI restructured to subcommand-based architecture**: `dns-filter` no longer starts the daemon directly; use `dns-filter start [--config <path>] [--debug]` instead. New subcommands: `start`, `stop`, `reload`, `merge-config`

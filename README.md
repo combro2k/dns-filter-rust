@@ -1,6 +1,6 @@
 # dns-filter
 
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/) [![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#license) [![Version](https://img.shields.io/badge/version-1.0.0-green)](./CHANGELOG.md)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/) [![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#license) [![Version](https://img.shields.io/badge/version-2.0.0-green)](./CHANGELOG.md)
 
 **dns-filter** is a high-performance, security-first DNS filtering service written in Rust. It acts as a sophisticated intermediary DNS server that filters queries against blocklists and allowlists, routes requests to zone-specific resolvers, serves authoritative DNS for local zones, and provides recursive DNS resolution with DNSSEC validation.
 
@@ -12,7 +12,10 @@
 - **Authoritative Zones** *(Experimental)*: Serve authoritative DNS answers from local JSON zone files with optional URL-based refresh
 - **Recursive Resolution**: Full DNS recursion with DNSSEC chain-of-trust validation from IANA root
 - **Load-Balancing**: Multiple upstream resolver strategies (round-robin, random, failover)
-- **Graceful Reload**: SIGHUP-triggered zero-downtime configuration reload
+- **Daemon Management**: Subcommand-based CLI (`start`, `stop`, `reload`, `merge-config`) with Unix domain control socket
+- **Graceful Shutdown**: Clean shutdown via `dns-filter stop`, `SIGTERM`/`SIGINT`, or REST API (`POST /api/v1/stop`)
+- **Graceful Reload**: SIGHUP, `dns-filter reload`, or REST API-triggered zero-downtime configuration reload
+- **Config Merging**: `dns-filter merge-config` deep-merges user config with built-in defaults, filling missing sections automatically
 - **Comprehensive Logging**: Syslog (local/remote), file, and stdout with configurable transports (unix, udp, tcp, tls)
 - **Security-First**: Privilege dropping, chroot sandboxing, Linux capabilities, hardened systemd unit
 - **Observability**: Prometheus-compatible metrics endpoint
@@ -91,7 +94,7 @@ EOF
 
 ```bash
 # As root (needed for privilege dropping and port 53 binding)
-sudo dns-filter --config /etc/dns-filter/config.yaml
+sudo dns-filter start --config /etc/dns-filter/config.yaml
 
 # In another terminal, test it
 dig @127.0.0.1 example.com
@@ -155,10 +158,30 @@ sudo cp package/config/config.example.yaml /etc/dns-filter/config.yaml
 sudo chmod 644 /etc/dns-filter/config.yaml
 ```
 
+### Using `make install`
+
+`make install` auto-detects the init system (systemd or OpenRC) and installs the binary, config, and service file:
+
+```bash
+# Build and install (auto-detects init system)
+sudo make install
+
+# Override init system detection
+sudo make install INIT_SYSTEM=systemd
+sudo make install INIT_SYSTEM=openrc
+sudo make install INIT_SYSTEM=none   # skip service file
+```
+
+On upgrade installs (when `config.yaml` already exists), the new example config is installed as `config.yaml.dist` and a hint is printed to merge new defaults:
+
+```bash
+dns-filter merge-config --overwrite --config /etc/dns-filter/config.yaml
+```
+
 ### Systemd Integration
 
 ```bash
-# Copy systemd unit
+# Copy systemd unit (or use `make install` which does this automatically)
 sudo cp package/systemd/dns-filter.service /etc/systemd/system/
 
 # Reload systemd daemon
@@ -174,14 +197,19 @@ sudo systemctl status dns-filter
 # View logs
 sudo journalctl -u dns-filter -f
 
-# Reload configuration (SIGHUP)
-sudo systemctl reload dns-filter
+# Reload configuration
+sudo systemctl reload dns-filter   # via SIGHUP
+dns-filter reload                  # via control socket
+
+# Stop the daemon
+sudo systemctl stop dns-filter     # via systemd
+dns-filter stop                    # via control socket
 ```
 
 ### OpenRC Integration
 
 ```bash
-# Copy init script
+# Copy init script (or use `make install` which does this automatically)
 sudo cp package/openrc/dns-filter.openrc /etc/init.d/dns-filter
 sudo chmod +x /etc/init.d/dns-filter
 
@@ -194,8 +222,13 @@ sudo rc-service dns-filter start
 # Check status
 sudo rc-service dns-filter status
 
-# Reload configuration (SIGHUP)
-sudo rc-service dns-filter reload
+# Reload configuration
+sudo rc-service dns-filter reload  # via SIGHUP
+dns-filter reload                  # via control socket
+
+# Stop the daemon
+sudo rc-service dns-filter stop    # via OpenRC
+dns-filter stop                    # via control socket
 ```
 
 ### Verify Installation
@@ -225,7 +258,7 @@ curl http://127.0.0.1:9100/metrics
 
 ## Configuration
 
-All configuration is provided via a single YAML file (default: `/etc/dns-filter/config.yaml`). The configuration is loaded at startup and can be reloaded at runtime via SIGHUP signal.
+All configuration is provided via a single YAML file (default: `/etc/dns-filter/config.yaml`). The configuration is loaded at startup and can be reloaded at runtime via SIGHUP signal, `dns-filter reload` command, or REST API.
 
 ### Configuration Structure
 
@@ -263,6 +296,9 @@ security:        # Privilege dropping and sandboxing
   user: "..."
   group: "..."
   chroot_dir: "..."
+
+control:         # Daemon control socket
+  socket_path: "/run/dns-filter/dns-filter.sock"
 ```
 
 ---
@@ -1534,7 +1570,7 @@ The most useful troubleshooting tool is debug logging. This shows detailed infor
 
 ```bash
 # Run with debug flag
-sudo dns-filter --config /etc/dns-filter/config.yaml --debug
+sudo dns-filter start --config /etc/dns-filter/config.yaml --debug
 
 # Or with systemd
 sudo systemctl stop dns-filter
@@ -1803,7 +1839,7 @@ systemctl reload dns-filter: job failed
 **Solutions:**
 1. Validate new config syntax:
    ```bash
-   dns-filter --config /etc/dns-filter/config.yaml
+   dns-filter start --config /etc/dns-filter/config.yaml
    # If this fails, the file is invalid
    ```
 
@@ -2102,10 +2138,10 @@ Initial Config Load at Startup
 Bind Sockets (as root)
          │
          ▼
-Drop Privileges → Start Serving
+Drop Privileges → Start Serving + Control Socket
          │
          ▼
-   SIGHUP Signal
+   Reload Trigger (SIGHUP / control socket / REST API)
          │
          ▼
 Validate New Config
@@ -2117,6 +2153,19 @@ Validate New Config
 ```
 
 This ensures zero-downtime reloads with no query drops.
+
+### Daemon Management
+
+The daemon is managed via subcommands that communicate over a Unix domain control socket:
+
+```bash
+dns-filter start --config /etc/dns-filter/config.yaml   # Start daemon
+dns-filter stop                                          # Graceful shutdown
+dns-filter reload                                        # Reload configuration
+dns-filter merge-config --config /etc/dns-filter/config.yaml  # Merge with defaults
+```
+
+The control socket defaults to `/run/dns-filter/dns-filter.sock` and is configurable via `control.socket_path`. Stale sockets from crashed runs are auto-detected and replaced on startup.
 
 ---
 
@@ -2233,21 +2282,21 @@ pub fn is_blocked(domain: &str) -> bool { }
 1. **Update Version**
    ```bash
    # Edit Cargo.toml
-   # Change version from "1.0.0" to "1.0.1" (or next version)
+   # Change version to next version
    ```
 
 2. **Update CHANGELOG.md**
    ```markdown
-   ## [1.0.1] - 2026-05-12
+   ## [x.y.z] - YYYY-MM-DD
    - Fixed issue X
    - Added feature Y
    ```
 
 3. **Commit and Tag**
    ```bash
-   git add Cargo.toml CHANGELOG.md
-   git commit -m "Release 1.0.1"
-   git tag -a v1.0.1 -m "Release 1.0.1"
+   git add -A
+   git commit -m "Release x.y.z"
+   git tag -a vx.y.z -m "Release x.y.z"
    ```
 
 4. **Run Release Check**
