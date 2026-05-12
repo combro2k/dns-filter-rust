@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.3] - 2026-05-12
+
+### Fixed
+- Suppressed verbose DNS response dumps from `hickory_net` and `hickory_recursor` crates that leaked into info-level logs; added missing `hickory_net=error` and `hickory_recursor=error` tracing filters in non-debug mode
+
 ## [2.0.2] - 2026-05-12
 
 ### Fixed

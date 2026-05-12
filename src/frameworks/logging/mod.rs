@@ -170,14 +170,14 @@ pub fn init_logging(config: &DnsFilterConfig, debug: bool) -> anyhow::Result<Log
 /// Build an `EnvFilter` for the given base level.
 ///
 /// In normal mode, suppresses noisy third-party crate modules (hickory DNSSEC
-/// validation warnings such as "response does not contain NSEC or NSEC3 records")
-/// to ERROR-only.  In debug mode all messages pass through unfiltered.
+/// validation warnings and verbose DNS response dumps) to ERROR-only.
+/// In debug mode all messages pass through unfiltered.
 fn build_env_filter(level: tracing::Level, debug: bool) -> EnvFilter {
     if debug {
         EnvFilter::new(format!("{level}"))
     } else {
         EnvFilter::new(format!(
-            "{level},hickory_proto=error,hickory_resolver=error"
+            "{level},hickory_proto=error,hickory_resolver=error,hickory_net=error,hickory_recursor=error"
         ))
     }
 }
