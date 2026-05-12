@@ -11,6 +11,8 @@ All notable changes to this project will be documented in this file.
 - Updated `tests/listener_batch_test.sh` to use `dns-filter start` subcommand
 
 ### Added
+- `make install` now auto-detects the init system (systemd or OpenRC) and installs the corresponding service file; override with `INIT_SYSTEM=systemd|openrc|none`
+- On upgrade installs (existing `config.yaml` detected), `make install` now prints a hint to run `dns-filter merge-config --overwrite --config /etc/dns-filter/config.yaml`
 - Added Unix domain control socket for daemon management: the running daemon listens on a JSON-over-Unix-socket control channel (default: `/run/dns-filter/dns-filter.sock`, configurable via `control.socket_path` in config)
 - Added `dns-filter stop` subcommand: sends a stop command to the running daemon via the control socket for graceful shutdown
 - Added `dns-filter reload` subcommand: sends a reload command to the running daemon via the control socket to reload configuration
