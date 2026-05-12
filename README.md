@@ -729,6 +729,21 @@ Queries for `*.example.com` are answered authoritative from a local JSON zone fi
 
 ⚠️ **Important:** You **must** use **either** `servers[]` **OR** `zone_source`, **never both** for the same zone. This is validated at startup and on reload.
 
+**Zone Source Authentication *(Experimental)*:**
+
+HTTP(S) zone sources support optional authentication via `source_auth`. Use **either** Bearer token **or** Basic (username + password), never both. Omit `source_auth` entirely for unauthenticated sources. Setting `source_auth` on a file-based `zone_source` is rejected at startup.
+
+```yaml
+# Bearer token authentication:
+source_auth:
+  token: "my-bearer-token"
+
+# Basic authentication:
+source_auth:
+  username: "user"
+  password: "secret"
+```
+
 ### Zone Authority JSON Format *(Experimental)*
 
 The zone JSON file defines authoritative DNS records for the zone:
@@ -838,6 +853,29 @@ resolvers:
       zone_source: "https://zones.example.net/managed.example.com.json"
       zone_source_check_interval: "15m"  # Check for updates every 15 minutes
       # Falls back to last good snapshot if URL fetch fails
+```
+
+**Zone Authority with Bearer Token Auth (Experimental):**
+```yaml
+resolvers:
+  zones:
+    - zone: "secure.example.com"
+      zone_source: "https://zones.example.net/secure.example.com.json"
+      zone_source_check_interval: "15m"
+      source_auth:
+        token: "my-secret-bearer-token"
+```
+
+**Zone Authority with Basic Auth (Experimental):**
+```yaml
+resolvers:
+  zones:
+    - zone: "private.example.com"
+      zone_source: "https://zones.example.net/private.example.com.json"
+      zone_source_check_interval: "30m"
+      source_auth:
+        username: "zone-reader"
+        password: "s3cret"
 ```
 
 ---

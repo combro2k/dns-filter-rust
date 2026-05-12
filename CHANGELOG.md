@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [2.0.4] - 2026-05-12
 
 ### Added
+- Optional `source_auth` for HTTP(S) zone sources: supports Bearer token or Basic (username + password) authentication, enforced as mutually exclusive (one or neither)
+- `LICENSE` file (MIT) — previously declared in Cargo.toml but file was missing
 - REST API for runtime administration (disabled by default, enable with `api.enabled: true` in config)
   - `GET /health` — unauthenticated health/liveness probe with uptime
   - `POST /api/v1/reload` — trigger configuration reload (same as SIGHUP)

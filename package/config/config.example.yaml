@@ -142,6 +142,14 @@ resolvers:
     #   fallback_to_default_resolvers: false
     #   zone_source: "https://zones.example.net/example.net.json"
     #   zone_source_check_interval: "15m"
+    #   # Optional authentication for HTTP(S) zone sources.
+    #   # Use either token (Bearer) OR username+password (Basic), not both.
+    #   # source_auth:
+    #   #   token: "my-bearer-token"
+    #   # Or for Basic authentication:
+    #   # source_auth:
+    #   #   username: "user"
+    #   #   password: "secret"
     - zone: "168.192.in-addr.arpa"
       enabled: false
       bypass_filter: true

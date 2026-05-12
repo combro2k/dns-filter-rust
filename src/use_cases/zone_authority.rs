@@ -27,6 +27,13 @@ enum ZoneSource {
     Url(String),
 }
 
+/// Authentication credentials for HTTP(S) zone sources.
+#[derive(Debug, Clone)]
+pub enum ZoneSourceAuth {
+    Bearer(String),
+    Basic { username: String, password: String },
+}
+
 #[derive(Debug, Clone)]
 struct ZoneSnapshot {
     zone: String,
@@ -40,9 +47,14 @@ pub struct ZoneAuthorityResolver {
 }
 
 impl ZoneAuthorityResolver {
-    pub fn from_source(zone: &str, source: &str, check_interval: Option<Duration>) -> Result<Self> {
+    pub fn from_source(
+        zone: &str,
+        source: &str,
+        check_interval: Option<Duration>,
+        auth: Option<ZoneSourceAuth>,
+    ) -> Result<Self> {
         let source = parse_zone_source(source)?;
-        let initial = load_snapshot(zone, &source)?;
+        let initial = load_snapshot(zone, &source, &auth)?;
         let snapshot = Arc::new(RwLock::new(initial));
 
         let resolver = Self {
@@ -52,7 +64,7 @@ impl ZoneAuthorityResolver {
         if let ZoneSource::Url(url) = source {
             let interval =
                 check_interval.unwrap_or(Duration::from_secs(DEFAULT_URL_CHECK_INTERVAL_SECS));
-            spawn_periodic_url_refresh(zone.to_string(), url, interval, snapshot);
+            spawn_periodic_url_refresh(zone.to_string(), url, interval, snapshot, auth);
         }
 
         Ok(resolver)
@@ -181,6 +193,7 @@ fn spawn_periodic_url_refresh(
     url: String,
     interval: Duration,
     snapshot: Arc<RwLock<ZoneSnapshot>>,
+    auth: Option<ZoneSourceAuth>,
 ) {
     if tokio::runtime::Handle::try_current().is_err() {
         tracing::warn!(zone = %zone, source = %url, "no active tokio runtime, URL zone_source refresh disabled");
@@ -196,7 +209,8 @@ fn spawn_periodic_url_refresh(
             let loaded = tokio::task::spawn_blocking({
                 let zone = zone.clone();
                 let source = source.clone();
-                move || load_snapshot(&zone, &source)
+                let auth = auth.clone();
+                move || load_snapshot(&zone, &source, &auth)
             })
             .await;
 
@@ -231,8 +245,12 @@ fn parse_zone_source(source: &str) -> Result<ZoneSource> {
     Ok(ZoneSource::File(source.to_string()))
 }
 
-fn load_snapshot(expected_zone: &str, source: &ZoneSource) -> Result<ZoneSnapshot> {
-    let content = load_source_content(source)?;
+fn load_snapshot(
+    expected_zone: &str,
+    source: &ZoneSource,
+    auth: &Option<ZoneSourceAuth>,
+) -> Result<ZoneSnapshot> {
+    let content = load_source_content(source, auth)?;
     let document: ZoneJsonDocument = serde_json::from_str(&content).with_context(|| {
         format!(
             "failed to parse JSON zone document from {}",
@@ -351,7 +369,7 @@ fn source_label(source: &ZoneSource) -> &str {
     }
 }
 
-fn load_source_content(source: &ZoneSource) -> Result<String> {
+fn load_source_content(source: &ZoneSource, auth: &Option<ZoneSourceAuth>) -> Result<String> {
     match source {
         ZoneSource::File(path) => fs::read_to_string(path)
             .with_context(|| format!("failed to read zone_source file {path}")),
@@ -361,8 +379,18 @@ fn load_source_content(source: &ZoneSource) -> Result<String> {
                 .build()
                 .context("failed to initialize HTTP client for zone_source")?;
 
-            let response = client
-                .get(url)
+            let mut request = client.get(url);
+
+            if let Some(zone_auth) = auth {
+                request = match zone_auth {
+                    ZoneSourceAuth::Bearer(token) => request.bearer_auth(token),
+                    ZoneSourceAuth::Basic { username, password } => {
+                        request.basic_auth(username, Some(password))
+                    }
+                };
+            }
+
+            let response = request
                 .send()
                 .with_context(|| format!("failed to download zone_source from {url}"))?
                 .error_for_status()
@@ -733,7 +761,7 @@ mod tests {
             }"#,
         );
 
-        let resolver = ZoneAuthorityResolver::from_source("example.com", &zone_file, None)
+        let resolver = ZoneAuthorityResolver::from_source("example.com", &zone_file, None, None)
             .expect("zone resolver should load from file");
         let query = make_query("example.com.", RecordType::NS);
 
@@ -771,7 +799,7 @@ mod tests {
             }"#,
         );
 
-        let resolver = ZoneAuthorityResolver::from_source("example.org", &zone_file, None)
+        let resolver = ZoneAuthorityResolver::from_source("example.org", &zone_file, None, None)
             .expect("zone resolver should load from file");
         let query = make_query("example.org.", RecordType::NS);
 
@@ -807,7 +835,7 @@ mod tests {
             }"#,
         );
 
-        let resolver = ZoneAuthorityResolver::from_source("example.net", &zone_file, None)
+        let resolver = ZoneAuthorityResolver::from_source("example.net", &zone_file, None, None)
             .expect("zone resolver should load from file");
         let query = make_query("missing.example.net.", RecordType::A);
 
@@ -840,7 +868,7 @@ mod tests {
             }"#,
         );
 
-        let resolver = ZoneAuthorityResolver::from_source("example.io", &zone_file, None)
+        let resolver = ZoneAuthorityResolver::from_source("example.io", &zone_file, None, None)
             .expect("zone resolver should load from file");
 
         let caa_query = make_query("example.io.", RecordType::CAA);

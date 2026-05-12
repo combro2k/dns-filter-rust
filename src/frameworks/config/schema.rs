@@ -281,8 +281,16 @@ pub struct ResolverZoneConfig {
     pub strategy: Option<String>,
     pub zone_source: Option<String>,
     pub zone_source_check_interval: Option<String>,
+    pub source_auth: Option<ZoneSourceAuthConfig>,
     #[serde(default)]
     pub servers: Vec<UpstreamServer>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ZoneSourceAuthConfig {
+    pub token: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

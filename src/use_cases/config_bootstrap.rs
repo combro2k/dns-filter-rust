@@ -5,7 +5,9 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Result};
 
 use crate::entities::resolution::UpstreamStrategy;
-use crate::frameworks::config::schema::{DnsFilterConfig, ResolverZoneConfig, UpstreamServer};
+use crate::frameworks::config::schema::{
+    DnsFilterConfig, ResolverZoneConfig, UpstreamServer, ZoneSourceAuthConfig,
+};
 use crate::frameworks::upstream::recursive_resolver::{
     load_root_hints, load_root_key, NameserverIpFamily, DEFAULT_MAX_HOPS,
 };
@@ -16,7 +18,7 @@ use crate::use_cases::request_pipeline::{
     DnsServfailFallbackStage, DnsUpstreamStage,
 };
 use crate::use_cases::upstream_resolver::{StrategyUpstreamResolver, UpstreamResolver};
-use crate::use_cases::zone_authority::ZoneAuthorityResolver;
+use crate::use_cases::zone_authority::{ZoneAuthorityResolver, ZoneSourceAuth};
 use crate::use_cases::zone_forwarding::{ZoneEntry, ZoneForwardingStage};
 
 use std::sync::atomic::AtomicBool;
@@ -182,6 +184,8 @@ fn build_zone_source_entry(zone: &ResolverZoneConfig) -> Result<ZoneEntry> {
         );
     }
 
+    let auth = validate_source_auth(&zone.zone, is_url, zone.source_auth.as_ref())?;
+
     let check_interval = match (is_url, zone.zone_source_check_interval.as_deref()) {
         (true, Some(value)) => Some(parse_interval(value).map_err(|error| {
             anyhow!(
@@ -193,7 +197,7 @@ fn build_zone_source_entry(zone: &ResolverZoneConfig) -> Result<ZoneEntry> {
         _ => None,
     };
 
-    let resolver = ZoneAuthorityResolver::from_source(&zone.zone, source, check_interval)
+    let resolver = ZoneAuthorityResolver::from_source(&zone.zone, source, check_interval, auth)
         .map_err(|error| anyhow!("invalid resolver zone '{}': {error}", zone.zone))?;
 
     ZoneEntry::new(
@@ -202,6 +206,66 @@ fn build_zone_source_entry(zone: &ResolverZoneConfig) -> Result<ZoneEntry> {
         zone.fallback_to_default_resolvers,
         Arc::new(resolver),
     )
+}
+
+fn validate_source_auth(
+    zone: &str,
+    is_url: bool,
+    auth_config: Option<&ZoneSourceAuthConfig>,
+) -> Result<Option<ZoneSourceAuth>> {
+    let config = match auth_config {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+
+    let has_token = config
+        .token
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_username = config
+        .username
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_password = config
+        .password
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty());
+
+    if has_token && (has_username || has_password) {
+        bail!(
+            "zone '{}' source_auth must use either 'token' (Bearer) or 'username'/'password' (Basic), not both",
+            zone
+        );
+    }
+
+    if has_username != has_password {
+        bail!(
+            "zone '{}' source_auth requires both 'username' and 'password' for Basic authentication",
+            zone
+        );
+    }
+
+    if !has_token && !has_username {
+        return Ok(None);
+    }
+
+    if !is_url {
+        bail!(
+            "zone '{}' sets source_auth but zone_source is not an HTTP(S) URL",
+            zone
+        );
+    }
+
+    if has_token {
+        Ok(Some(ZoneSourceAuth::Bearer(
+            config.token.as_ref().unwrap().trim().to_string(),
+        )))
+    } else {
+        Ok(Some(ZoneSourceAuth::Basic {
+            username: config.username.as_ref().unwrap().trim().to_string(),
+            password: config.password.as_ref().unwrap().trim().to_string(),
+        }))
+    }
 }
 
 fn build_upstream_resolver_group(
@@ -640,6 +704,7 @@ mod tests {
             strategy: None,
             zone_source: None,
             zone_source_check_interval: None,
+            source_auth: None,
             servers: vec![UpstreamServer {
                 enabled: true,
                 protocol: "dns".into(),
@@ -671,6 +736,7 @@ mod tests {
             strategy: Some("failover".into()),
             zone_source: None,
             zone_source_check_interval: None,
+            source_auth: None,
             servers: vec![UpstreamServer {
                 enabled: true,
                 protocol: "dns".into(),
@@ -701,6 +767,7 @@ mod tests {
             strategy: Some("failover".into()),
             zone_source: Some(zone_file.clone()),
             zone_source_check_interval: None,
+            source_auth: None,
             servers: vec![UpstreamServer {
                 enabled: true,
                 protocol: "dns".into(),
@@ -746,6 +813,7 @@ mod tests {
             strategy: None,
             zone_source: Some(zone_file.clone()),
             zone_source_check_interval: None,
+            source_auth: None,
             servers: vec![],
         }];
 
@@ -780,6 +848,7 @@ mod tests {
             strategy: None,
             zone_source: Some(zone_file.clone()),
             zone_source_check_interval: Some("15m".into()),
+            source_auth: None,
             servers: vec![],
         }];
 
@@ -792,5 +861,130 @@ mod tests {
         assert!(error.to_string().contains("zone_source_check_interval"));
 
         let _ = fs::remove_file(zone_file);
+    }
+
+    #[test]
+    fn validate_source_auth_rejects_both_token_and_basic() {
+        let result = validate_source_auth(
+            "test.zone",
+            true,
+            Some(&ZoneSourceAuthConfig {
+                token: Some("my-token".into()),
+                username: Some("user".into()),
+                password: Some("pass".into()),
+            }),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not both"));
+    }
+
+    #[test]
+    fn validate_source_auth_rejects_username_without_password() {
+        let result = validate_source_auth(
+            "test.zone",
+            true,
+            Some(&ZoneSourceAuthConfig {
+                token: None,
+                username: Some("user".into()),
+                password: None,
+            }),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("both 'username' and 'password'"));
+    }
+
+    #[test]
+    fn validate_source_auth_rejects_password_without_username() {
+        let result = validate_source_auth(
+            "test.zone",
+            true,
+            Some(&ZoneSourceAuthConfig {
+                token: None,
+                username: None,
+                password: Some("pass".into()),
+            }),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("both 'username' and 'password'"));
+    }
+
+    #[test]
+    fn validate_source_auth_rejects_auth_on_file_source() {
+        let result = validate_source_auth(
+            "test.zone",
+            false,
+            Some(&ZoneSourceAuthConfig {
+                token: Some("my-token".into()),
+                username: None,
+                password: None,
+            }),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not an HTTP(S) URL"));
+    }
+
+    #[test]
+    fn validate_source_auth_accepts_bearer_token() {
+        let result = validate_source_auth(
+            "test.zone",
+            true,
+            Some(&ZoneSourceAuthConfig {
+                token: Some("my-token".into()),
+                username: None,
+                password: None,
+            }),
+        );
+        assert!(result.is_ok());
+        let auth = result.unwrap();
+        assert!(matches!(auth, Some(ZoneSourceAuth::Bearer(ref t)) if t == "my-token"));
+    }
+
+    #[test]
+    fn validate_source_auth_accepts_basic_auth() {
+        let result = validate_source_auth(
+            "test.zone",
+            true,
+            Some(&ZoneSourceAuthConfig {
+                token: None,
+                username: Some("user".into()),
+                password: Some("pass".into()),
+            }),
+        );
+        assert!(result.is_ok());
+        let auth = result.unwrap();
+        assert!(
+            matches!(auth, Some(ZoneSourceAuth::Basic { ref username, ref password }) if username == "user" && password == "pass")
+        );
+    }
+
+    #[test]
+    fn validate_source_auth_accepts_no_auth() {
+        let result = validate_source_auth("test.zone", true, None);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn validate_source_auth_treats_empty_fields_as_absent() {
+        let result = validate_source_auth(
+            "test.zone",
+            true,
+            Some(&ZoneSourceAuthConfig {
+                token: Some("  ".into()),
+                username: Some("".into()),
+                password: None,
+            }),
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 }
