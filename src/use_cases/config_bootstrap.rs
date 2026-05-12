@@ -6,12 +6,15 @@ use anyhow::{anyhow, bail, Result};
 
 use crate::entities::resolution::UpstreamStrategy;
 use crate::frameworks::config::schema::{
-    DnsFilterConfig, ResolverZoneConfig, UpstreamServer, ZoneSourceAuthConfig,
+    DnsFilterConfig, ResolverZoneConfig, UpstreamServer, ZoneServerAuthenticationConfig,
+    ZoneServerConfig,
 };
 use crate::frameworks::upstream::recursive_resolver::{
     load_root_hints, load_root_key, NameserverIpFamily, DEFAULT_MAX_HOPS,
 };
-use crate::frameworks::upstream::{DnsTlsClient, DnsUdpTcpClient, RecursiveResolver};
+use crate::frameworks::upstream::{
+    DnsHttpsClient, DnsTlsClient, DnsUdpTcpClient, RecursiveResolver,
+};
 use crate::use_cases::filtering::{parse_interval, DomainFilter, ListFilterEngine};
 use crate::use_cases::request_pipeline::{
     AnyQueryPolicy, DnsAnyQueryPolicyStage, DnsFilterStage, DnsRequestPipeline,
@@ -128,68 +131,106 @@ fn build_zone_entry(
     zone: &ResolverZoneConfig,
     bootstrap_resolvers: &[String],
 ) -> Result<ZoneEntry> {
-    let has_source = zone
-        .zone_source
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty());
-    let has_servers = zone.servers.iter().any(|server| server.enabled);
+    let enabled_servers: Vec<&ZoneServerConfig> =
+        zone.servers.iter().filter(|s| s.enabled).collect();
 
-    match (has_source, has_servers) {
-        (true, true) => {
-            bail!(
-                "zone '{}' must define exactly one mode: either zone_source or at least one enabled servers entry",
-                zone.zone
-            );
-        }
-        (false, false) => {
-            bail!(
-                "zone '{}' must define exactly one mode: either zone_source or at least one enabled servers entry",
-                zone.zone
-            );
-        }
-        _ => {}
-    }
-
-    if has_source {
-        return build_zone_source_entry(zone);
-    }
-
-    let strategy = zone.strategy.as_deref().unwrap_or("failover");
-    let resolver = build_upstream_resolver_group(strategy, bootstrap_resolvers, &zone.servers)
-        .map_err(|error| anyhow!("invalid resolver zone '{}': {error}", zone.zone))?;
-
-    ZoneEntry::new(
-        zone.zone.clone(),
-        zone.bypass_filter,
-        zone.fallback_to_default_resolvers,
-        resolver,
-    )
-}
-
-fn build_zone_source_entry(zone: &ResolverZoneConfig) -> Result<ZoneEntry> {
-    let source = zone
-        .zone_source
-        .as_deref()
-        .ok_or_else(|| anyhow!("missing zone_source for zone '{}'", zone.zone))?
-        .trim();
-    if source.is_empty() {
-        bail!("zone '{}' has an empty zone_source", zone.zone);
-    }
-
-    let is_url = source.starts_with("http://") || source.starts_with("https://");
-    if !is_url && zone.zone_source_check_interval.is_some() {
+    if enabled_servers.is_empty() {
         bail!(
-            "zone '{}' sets zone_source_check_interval but zone_source is not an HTTP(S) URL",
+            "zone '{}' has no enabled servers; add at least one enabled servers entry",
             zone.zone
         );
     }
 
-    let auth = validate_source_auth(&zone.zone, is_url, zone.source_auth.as_ref())?;
+    let json_servers: Vec<&ZoneServerConfig> = enabled_servers
+        .iter()
+        .copied()
+        .filter(|s| s.protocol == "json")
+        .collect();
+    let upstream_servers: Vec<&ZoneServerConfig> = enabled_servers
+        .iter()
+        .copied()
+        .filter(|s| s.protocol != "json")
+        .collect();
 
-    let check_interval = match (is_url, zone.zone_source_check_interval.as_deref()) {
+    match (json_servers.is_empty(), upstream_servers.is_empty()) {
+        // Only json entries — build authority resolver(s).
+        (false, true) => {
+            // Multiple json entries are supported; first one wins (primary authority).
+            // For now we validate all and use the first enabled one.
+            if json_servers.len() > 1 {
+                bail!(
+                    "zone '{}' has {} enabled json servers; only one json authority entry is supported per zone",
+                    zone.zone,
+                    json_servers.len()
+                );
+            }
+            let resolver = build_zone_json_resolver(zone, json_servers[0])?;
+            ZoneEntry::new(
+                zone.zone.clone(),
+                zone.bypass_filter,
+                zone.fallback_to_default_resolvers,
+                Arc::new(resolver),
+            )
+        }
+        // Only upstream entries — build forwarding resolver.
+        (true, false) => {
+            let strategy = zone.strategy.as_deref().unwrap_or("failover");
+            let resolver = build_zone_upstream_resolver_group(
+                strategy,
+                bootstrap_resolvers,
+                &upstream_servers,
+            )
+            .map_err(|error| anyhow!("invalid resolver zone '{}': {error}", zone.zone))?;
+            ZoneEntry::new(
+                zone.zone.clone(),
+                zone.bypass_filter,
+                zone.fallback_to_default_resolvers,
+                resolver,
+            )
+        }
+        // Mixed json + upstream — not yet supported.
+        (false, false) => {
+            bail!(
+                "zone '{}' mixes 'json' and upstream server entries; mixed mode is not yet supported",
+                zone.zone
+            );
+        }
+        (true, true) => unreachable!("filtered non-empty list above"),
+    }
+}
+
+fn build_zone_json_resolver(
+    zone: &ResolverZoneConfig,
+    server: &ZoneServerConfig,
+) -> Result<ZoneAuthorityResolver> {
+    let address = server.address.trim();
+    if address.is_empty() {
+        bail!(
+            "zone '{}' json server has an empty address; expected file://, http://, or https:// URI",
+            zone.zone
+        );
+    }
+
+    let is_url = address.starts_with("http://") || address.starts_with("https://");
+
+    if !is_url && server.check_interval.is_some() {
+        bail!(
+            "zone '{}' json server sets check_interval but address is not an HTTP(S) URL",
+            zone.zone
+        );
+    }
+
+    let auth = validate_server_auth(
+        &zone.zone,
+        &server.protocol,
+        is_url,
+        server.authentication.as_ref(),
+    )?;
+
+    let check_interval = match (is_url, server.check_interval.as_deref()) {
         (true, Some(value)) => Some(parse_interval(value).map_err(|error| {
             anyhow!(
-                "invalid zone_source_check_interval for zone '{}': {} ({error})",
+                "invalid check_interval for zone '{}' json server: {} ({error})",
                 zone.zone,
                 value
             )
@@ -197,21 +238,15 @@ fn build_zone_source_entry(zone: &ResolverZoneConfig) -> Result<ZoneEntry> {
         _ => None,
     };
 
-    let resolver = ZoneAuthorityResolver::from_source(&zone.zone, source, check_interval, auth)
-        .map_err(|error| anyhow!("invalid resolver zone '{}': {error}", zone.zone))?;
-
-    ZoneEntry::new(
-        zone.zone.clone(),
-        zone.bypass_filter,
-        zone.fallback_to_default_resolvers,
-        Arc::new(resolver),
-    )
+    ZoneAuthorityResolver::from_source(&zone.zone, address, check_interval, auth)
+        .map_err(|error| anyhow!("invalid resolver zone '{}': {error}", zone.zone))
 }
 
-fn validate_source_auth(
+fn validate_server_auth(
     zone: &str,
+    protocol: &str,
     is_url: bool,
-    auth_config: Option<&ZoneSourceAuthConfig>,
+    auth_config: Option<&ZoneServerAuthenticationConfig>,
 ) -> Result<Option<ZoneSourceAuth>> {
     let config = match auth_config {
         Some(c) => c,
@@ -231,28 +266,41 @@ fn validate_source_auth(
         .as_ref()
         .is_some_and(|value| !value.trim().is_empty());
 
+    // If all fields are blank treat as no auth.
+    if !has_token && !has_username && !has_password {
+        return Ok(None);
+    }
+
+    // Only json and doh support authentication.
+    if protocol != "json" && protocol != "doh" {
+        bail!(
+            "zone '{}' server with protocol '{}' sets authentication; authentication is only supported for 'json' and 'doh' servers",
+            zone,
+            protocol
+        );
+    }
+
     if has_token && (has_username || has_password) {
         bail!(
-            "zone '{}' source_auth must use either 'token' (Bearer) or 'username'/'password' (Basic), not both",
-            zone
+            "zone '{}' {} server authentication must use either 'token' (Bearer) or 'username'/'password' (Basic), not both",
+            zone,
+            protocol
         );
     }
 
     if has_username != has_password {
         bail!(
-            "zone '{}' source_auth requires both 'username' and 'password' for Basic authentication",
-            zone
+            "zone '{}' {} server authentication requires both 'username' and 'password' for Basic authentication",
+            zone,
+            protocol
         );
-    }
-
-    if !has_token && !has_username {
-        return Ok(None);
     }
 
     if !is_url {
         bail!(
-            "zone '{}' sets source_auth but zone_source is not an HTTP(S) URL",
-            zone
+            "zone '{}' {} server sets authentication but address is not an HTTP(S) URL",
+            zone,
+            protocol
         );
     }
 
@@ -265,6 +313,86 @@ fn validate_source_auth(
             username: config.username.as_ref().unwrap().trim().to_string(),
             password: config.password.as_ref().unwrap().trim().to_string(),
         }))
+    }
+}
+
+fn build_zone_upstream_resolver_group(
+    strategy: &str,
+    bootstrap_resolvers: &[String],
+    servers: &[&ZoneServerConfig],
+) -> Result<Arc<dyn UpstreamResolver>> {
+    let strategy = UpstreamStrategy::from_str(strategy)
+        .map_err(|_| anyhow!("invalid upstream strategy: {strategy}"))?;
+
+    if servers.is_empty() {
+        bail!("at least one enabled upstream server is required");
+    }
+
+    let needs_bootstrap = servers.iter().any(|s| s.protocol == "dot");
+    let bootstrap_addrs = if needs_bootstrap {
+        parse_bootstrap_resolvers(bootstrap_resolvers)?
+    } else {
+        vec![]
+    };
+
+    let resolvers = servers
+        .iter()
+        .map(|server| build_single_zone_upstream_resolver(server, &bootstrap_addrs))
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(Arc::new(StrategyUpstreamResolver::new(resolvers, strategy)))
+}
+
+fn build_single_zone_upstream_resolver(
+    server: &ZoneServerConfig,
+    bootstrap_resolvers: &[SocketAddr],
+) -> Result<Arc<dyn UpstreamResolver>> {
+    match server.protocol.as_str() {
+        "dns" => {
+            let address = parse_dns_address(&server.address)?;
+            Ok(Arc::new(DnsUdpTcpClient::new(address)))
+        }
+        "dot" => {
+            let client = DnsTlsClient::parse_endpoint(&server.address)
+                .map_err(|e| anyhow!("invalid DoT upstream '{}': {e}", server.address))?;
+            Ok(Arc::new(
+                client.with_bootstrap_resolvers(bootstrap_resolvers.to_vec()),
+            ))
+        }
+        "doh" => {
+            let auth = validate_server_auth(
+                "zone",
+                "doh",
+                true,
+                server.authentication.as_ref(),
+            )?;
+            Ok(Arc::new(DnsHttpsClient::new(server.address.clone(), auth)))
+        }
+        "recursive" => {
+            let max_hops = server.max_hops.unwrap_or(DEFAULT_MAX_HOPS);
+            let nameserver_ip_family = match server.nameserver_ip_family.as_deref() {
+                Some("ipv4") => NameserverIpFamily::Ipv4Only,
+                Some("ipv6") => NameserverIpFamily::Ipv6Only,
+                _ => NameserverIpFamily::Both,
+            };
+            let dnssec = server.dnssec.unwrap_or(true);
+            let root_hints = load_root_hints(server.root_hints_path.as_deref());
+            let trust_anchor = if dnssec {
+                load_root_key(server.root_key_path.as_deref())
+            } else {
+                None
+            };
+            Ok(Arc::new(RecursiveResolver::new(
+                root_hints,
+                max_hops,
+                nameserver_ip_family,
+                dnssec,
+                trust_anchor,
+            )))
+        }
+        other => bail!(
+            "unsupported zone server protocol: '{other}'; supported values are: dns, dot, doh, recursive, json"
+        ),
     }
 }
 
@@ -381,6 +509,7 @@ mod tests {
     use crate::frameworks::config::schema::{
         DnsFilterConfig, FilteringConfig, ListenConfig, LoggingConfig, NamedList,
         ResolverZoneConfig, ResolversConfig, SocketConfig, StdoutLogConfig, UpstreamServer,
+        ZoneServerAuthenticationConfig, ZoneServerConfig,
     };
 
     use super::*;
@@ -433,6 +562,37 @@ mod tests {
             plugins: Vec::new(),
         }
     }
+
+    fn dns_zone_server(address: &str) -> ZoneServerConfig {
+        ZoneServerConfig {
+            enabled: true,
+            protocol: "dns".into(),
+            address: address.into(),
+            ..Default::default()
+        }
+    }
+
+    fn json_zone_server(address: &str) -> ZoneServerConfig {
+        ZoneServerConfig {
+            enabled: true,
+            protocol: "json".into(),
+            address: address.into(),
+            ..Default::default()
+        }
+    }
+
+    fn zone_config(zone: &str, servers: Vec<ZoneServerConfig>) -> ResolverZoneConfig {
+        ResolverZoneConfig {
+            zone: zone.into(),
+            enabled: true,
+            bypass_filter: false,
+            fallback_to_default_resolvers: false,
+            strategy: None,
+            servers,
+        }
+    }
+
+    // ── Global upstream resolver tests ────────────────────────────────────────
 
     #[test]
     fn build_upstream_resolver_accepts_dot_server() {
@@ -688,6 +848,8 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ── Zone entry builder tests ───────────────────────────────────────────────
+
     #[test]
     fn build_zone_entries_defaults_zone_strategy_to_failover() {
         let mut config = base_config(vec![UpstreamServer {
@@ -702,15 +864,7 @@ mod tests {
             bypass_filter: true,
             fallback_to_default_resolvers: false,
             strategy: None,
-            zone_source: None,
-            zone_source_check_interval: None,
-            source_auth: None,
-            servers: vec![UpstreamServer {
-                enabled: true,
-                protocol: "dns".into(),
-                address: "192.168.1.1:53".into(),
-                ..Default::default()
-            }],
+            servers: vec![dns_zone_server("192.168.1.1:53")],
         }];
 
         let zones = build_zone_entries(&config).expect("zone entries should build");
@@ -734,15 +888,7 @@ mod tests {
             bypass_filter: true,
             fallback_to_default_resolvers: false,
             strategy: Some("failover".into()),
-            zone_source: None,
-            zone_source_check_interval: None,
-            source_auth: None,
-            servers: vec![UpstreamServer {
-                enabled: true,
-                protocol: "dns".into(),
-                address: "192.168.1.1:53".into(),
-                ..Default::default()
-            }],
+            servers: vec![dns_zone_server("192.168.1.1:53")],
         }];
 
         let zones = build_zone_entries(&config).expect("zone entries should build");
@@ -750,45 +896,67 @@ mod tests {
     }
 
     #[test]
-    fn build_zone_entries_rejects_zone_with_source_and_servers() {
-        let zone_file =
-            create_temp_zone_json(r#"{"zone":"home.arpa","ttl_default":300,"records":[]}"#);
+    fn build_zone_entries_rejects_empty_servers() {
         let mut config = base_config(vec![UpstreamServer {
             enabled: true,
             protocol: "dns".into(),
             address: "8.8.8.8:53".into(),
             ..Default::default()
         }]);
-        config.resolvers.zones = vec![ResolverZoneConfig {
-            zone: "home.arpa".into(),
+        config.resolvers.zones = vec![zone_config("home.arpa", vec![])];
+
+        let result = build_zone_entries(&config);
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("no enabled servers"));
+    }
+
+    #[test]
+    fn build_zone_entries_rejects_all_disabled_zone_servers() {
+        let mut config = base_config(vec![UpstreamServer {
             enabled: true,
-            bypass_filter: false,
-            fallback_to_default_resolvers: false,
-            strategy: Some("failover".into()),
-            zone_source: Some(zone_file.clone()),
-            zone_source_check_interval: None,
-            source_auth: None,
-            servers: vec![UpstreamServer {
-                enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+            ..Default::default()
+        }]);
+        config.resolvers.zones = vec![zone_config(
+            "home.arpa",
+            vec![ZoneServerConfig {
+                enabled: false,
                 protocol: "dns".into(),
                 address: "192.168.1.1:53".into(),
                 ..Default::default()
             }],
-        }];
+        )];
 
         let result = build_zone_entries(&config);
         assert!(result.is_err());
-        let error = match result {
-            Ok(_) => panic!("expected XOR mode error"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("exactly one mode"));
-
-        let _ = fs::remove_file(zone_file);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("no enabled servers"));
     }
 
     #[test]
-    fn build_zone_entries_accepts_zone_source_mode() {
+    fn build_zone_entries_accepts_dns_forwarding() {
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+            ..Default::default()
+        }]);
+        config.resolvers.zones = vec![zone_config(
+            "home.arpa",
+            vec![dns_zone_server("192.168.1.1:53")],
+        )];
+
+        let zones = build_zone_entries(&config).expect("zone entries should build");
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].zone(), "home.arpa");
+    }
+
+    #[test]
+    fn build_zone_entries_accepts_json_file_source() {
         let zone_file = create_temp_zone_json(
             r#"{
                 "zone":"home.arpa",
@@ -805,17 +973,10 @@ mod tests {
             address: "8.8.8.8:53".into(),
             ..Default::default()
         }]);
-        config.resolvers.zones = vec![ResolverZoneConfig {
-            zone: "home.arpa".into(),
-            enabled: true,
-            bypass_filter: false,
-            fallback_to_default_resolvers: false,
-            strategy: None,
-            zone_source: Some(zone_file.clone()),
-            zone_source_check_interval: None,
-            source_auth: None,
-            servers: vec![],
-        }];
+        config.resolvers.zones = vec![zone_config(
+            "home.arpa",
+            vec![json_zone_server(&format!("file://{zone_file}"))],
+        )];
 
         let zones = build_zone_entries(&config).expect("zone entries should build");
         assert_eq!(zones.len(), 1);
@@ -825,14 +986,9 @@ mod tests {
     }
 
     #[test]
-    fn build_zone_entries_rejects_interval_for_file_zone_source() {
-        let zone_file = create_temp_zone_json(
-            r#"{
-                "zone":"home.arpa",
-                "ttl_default":300,
-                "records":[]
-            }"#,
-        );
+    fn build_zone_entries_accepts_json_plain_path() {
+        let zone_file =
+            create_temp_zone_json(r#"{"zone":"home.arpa","ttl_default":300,"records":[]}"#);
 
         let mut config = base_config(vec![UpstreamServer {
             enabled: true,
@@ -840,35 +996,139 @@ mod tests {
             address: "8.8.8.8:53".into(),
             ..Default::default()
         }]);
-        config.resolvers.zones = vec![ResolverZoneConfig {
-            zone: "home.arpa".into(),
-            enabled: true,
-            bypass_filter: false,
-            fallback_to_default_resolvers: false,
-            strategy: None,
-            zone_source: Some(zone_file.clone()),
-            zone_source_check_interval: Some("15m".into()),
-            source_auth: None,
-            servers: vec![],
-        }];
+        config.resolvers.zones = vec![zone_config("home.arpa", vec![json_zone_server(&zone_file)])];
 
-        let result = build_zone_entries(&config);
-        assert!(result.is_err());
-        let error = match result {
-            Ok(_) => panic!("expected file interval validation error"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("zone_source_check_interval"));
+        let zones = build_zone_entries(&config).expect("zone entries should build");
+        assert_eq!(zones.len(), 1);
 
         let _ = fs::remove_file(zone_file);
     }
 
     #[test]
-    fn validate_source_auth_rejects_both_token_and_basic() {
-        let result = validate_source_auth(
+    fn build_zone_entries_rejects_json_check_interval_on_file() {
+        let zone_file =
+            create_temp_zone_json(r#"{"zone":"home.arpa","ttl_default":300,"records":[]}"#);
+
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+            ..Default::default()
+        }]);
+        config.resolvers.zones = vec![zone_config(
+            "home.arpa",
+            vec![ZoneServerConfig {
+                enabled: true,
+                protocol: "json".into(),
+                address: format!("file://{zone_file}"),
+                check_interval: Some("15m".into()),
+                ..Default::default()
+            }],
+        )];
+
+        let result = build_zone_entries(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("check_interval"));
+
+        let _ = fs::remove_file(zone_file);
+    }
+
+    #[test]
+    fn build_zone_entries_rejects_multiple_json_servers() {
+        let zone_file1 =
+            create_temp_zone_json(r#"{"zone":"home.arpa","ttl_default":300,"records":[]}"#);
+        let zone_file2 =
+            create_temp_zone_json(r#"{"zone":"home.arpa","ttl_default":300,"records":[]}"#);
+
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+            ..Default::default()
+        }]);
+        config.resolvers.zones = vec![zone_config(
+            "home.arpa",
+            vec![
+                json_zone_server(&format!("file://{zone_file1}")),
+                json_zone_server(&format!("file://{zone_file2}")),
+            ],
+        )];
+
+        let result = build_zone_entries(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("only one json authority entry"));
+
+        let _ = fs::remove_file(&zone_file1);
+        let _ = fs::remove_file(&zone_file2);
+    }
+
+    #[test]
+    fn build_zone_entries_rejects_mixed_json_and_upstream() {
+        let zone_file =
+            create_temp_zone_json(r#"{"zone":"home.arpa","ttl_default":300,"records":[]}"#);
+
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+            ..Default::default()
+        }]);
+        config.resolvers.zones = vec![zone_config(
+            "home.arpa",
+            vec![
+                json_zone_server(&format!("file://{zone_file}")),
+                dns_zone_server("192.168.1.1:53"),
+            ],
+        )];
+
+        let result = build_zone_entries(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("mixed mode is not yet supported"));
+
+        let _ = fs::remove_file(zone_file);
+    }
+
+    #[test]
+    fn build_zone_entries_rejects_unsupported_zone_protocol() {
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+            ..Default::default()
+        }]);
+        config.resolvers.zones = vec![zone_config(
+            "home.arpa",
+            vec![ZoneServerConfig {
+                enabled: true,
+                protocol: "quic".into(),
+                address: "192.168.1.1:853".into(),
+                ..Default::default()
+            }],
+        )];
+
+        let result = build_zone_entries(&config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported zone server protocol"));
+    }
+
+    // ── Authentication tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn validate_server_auth_rejects_both_token_and_basic() {
+        let result = validate_server_auth(
             "test.zone",
+            "json",
             true,
-            Some(&ZoneSourceAuthConfig {
+            Some(&ZoneServerAuthenticationConfig {
                 token: Some("my-token".into()),
                 username: Some("user".into()),
                 password: Some("pass".into()),
@@ -879,11 +1139,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_source_auth_rejects_username_without_password() {
-        let result = validate_source_auth(
+    fn validate_server_auth_rejects_username_without_password() {
+        let result = validate_server_auth(
             "test.zone",
+            "json",
             true,
-            Some(&ZoneSourceAuthConfig {
+            Some(&ZoneServerAuthenticationConfig {
                 token: None,
                 username: Some("user".into()),
                 password: None,
@@ -897,11 +1158,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_source_auth_rejects_password_without_username() {
-        let result = validate_source_auth(
+    fn validate_server_auth_rejects_password_without_username() {
+        let result = validate_server_auth(
             "test.zone",
+            "json",
             true,
-            Some(&ZoneSourceAuthConfig {
+            Some(&ZoneServerAuthenticationConfig {
                 token: None,
                 username: None,
                 password: Some("pass".into()),
@@ -915,11 +1177,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_source_auth_rejects_auth_on_file_source() {
-        let result = validate_source_auth(
+    fn validate_server_auth_rejects_auth_on_file_source() {
+        let result = validate_server_auth(
             "test.zone",
+            "json",
             false,
-            Some(&ZoneSourceAuthConfig {
+            Some(&ZoneServerAuthenticationConfig {
                 token: Some("my-token".into()),
                 username: None,
                 password: None,
@@ -933,11 +1196,31 @@ mod tests {
     }
 
     #[test]
-    fn validate_source_auth_accepts_bearer_token() {
-        let result = validate_source_auth(
+    fn validate_server_auth_rejects_auth_on_non_http_protocol() {
+        let result = validate_server_auth(
             "test.zone",
+            "dns",
+            false,
+            Some(&ZoneServerAuthenticationConfig {
+                token: Some("my-token".into()),
+                username: None,
+                password: None,
+            }),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("only supported for 'json' and 'doh'"));
+    }
+
+    #[test]
+    fn validate_server_auth_accepts_bearer_token_for_json() {
+        let result = validate_server_auth(
+            "test.zone",
+            "json",
             true,
-            Some(&ZoneSourceAuthConfig {
+            Some(&ZoneServerAuthenticationConfig {
                 token: Some("my-token".into()),
                 username: None,
                 password: None,
@@ -949,11 +1232,28 @@ mod tests {
     }
 
     #[test]
-    fn validate_source_auth_accepts_basic_auth() {
-        let result = validate_source_auth(
+    fn validate_server_auth_accepts_bearer_token_for_doh() {
+        let result = validate_server_auth(
             "test.zone",
+            "doh",
             true,
-            Some(&ZoneSourceAuthConfig {
+            Some(&ZoneServerAuthenticationConfig {
+                token: Some("doh-token".into()),
+                username: None,
+                password: None,
+            }),
+        );
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), Some(ZoneSourceAuth::Bearer(_))));
+    }
+
+    #[test]
+    fn validate_server_auth_accepts_basic_auth() {
+        let result = validate_server_auth(
+            "test.zone",
+            "json",
+            true,
+            Some(&ZoneServerAuthenticationConfig {
                 token: None,
                 username: Some("user".into()),
                 password: Some("pass".into()),
@@ -967,18 +1267,19 @@ mod tests {
     }
 
     #[test]
-    fn validate_source_auth_accepts_no_auth() {
-        let result = validate_source_auth("test.zone", true, None);
+    fn validate_server_auth_accepts_no_auth() {
+        let result = validate_server_auth("test.zone", "json", true, None);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
 
     #[test]
-    fn validate_source_auth_treats_empty_fields_as_absent() {
-        let result = validate_source_auth(
+    fn validate_server_auth_treats_empty_fields_as_absent() {
+        let result = validate_server_auth(
             "test.zone",
+            "json",
             true,
-            Some(&ZoneSourceAuthConfig {
+            Some(&ZoneServerAuthenticationConfig {
                 token: Some("  ".into()),
                 username: Some("".into()),
                 password: None,

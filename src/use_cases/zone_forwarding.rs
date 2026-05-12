@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use hickory_proto::op::Message;
+use std::fmt;
 
 use crate::use_cases::request_pipeline::{
     AsyncRequestStage, DnsPipelineError, DnsPipelineRequest, DnsPipelineResponse,
@@ -15,6 +16,19 @@ pub struct ZoneEntry {
     bypass_filter: bool,
     fallback_to_default_resolvers: bool,
     resolver: Arc<dyn UpstreamResolver>,
+}
+
+impl fmt::Debug for ZoneEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ZoneEntry")
+            .field("zone", &self.zone)
+            .field("bypass_filter", &self.bypass_filter)
+            .field(
+                "fallback_to_default_resolvers",
+                &self.fallback_to_default_resolvers,
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl ZoneEntry {

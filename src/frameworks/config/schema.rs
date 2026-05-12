@@ -279,18 +279,46 @@ pub struct ResolverZoneConfig {
     #[serde(default)]
     pub fallback_to_default_resolvers: bool,
     pub strategy: Option<String>,
-    pub zone_source: Option<String>,
-    pub zone_source_check_interval: Option<String>,
-    pub source_auth: Option<ZoneSourceAuthConfig>,
     #[serde(default)]
-    pub servers: Vec<UpstreamServer>,
+    pub servers: Vec<ZoneServerConfig>,
 }
 
+/// Per-server authentication credentials for HTTP(S)-based zone server protocols.
+/// Use either `token` (Bearer) OR `username`+`password` (Basic), not both.
 #[derive(Debug, Deserialize)]
-pub struct ZoneSourceAuthConfig {
+pub struct ZoneServerAuthenticationConfig {
     pub token: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+}
+
+/// A single zone server entry. The `protocol` field controls interpretation:
+/// - `"dns"` — plain DNS over UDP/TCP; `address` is `<ip>:<port>`.
+/// - `"dot"` — DNS-over-TLS; `address` is `tls://<host>[:<port>]` or `<ip>[:<port>]`.
+/// - `"doh"` — DNS-over-HTTPS upstream; `address` is an `https://…` URL.
+///   Supports `authentication` (Bearer or Basic).
+/// - `"recursive"` — iterative resolver.
+/// - `"json"` — authoritative JSON zone source; `address` is `file:///…`, `http://…`,
+///   or `https://…`. Supports `check_interval` (URL sources only) and `authentication`.
+#[derive(Debug, Default, Deserialize)]
+pub struct ZoneServerConfig {
+    pub enabled: bool,
+    pub protocol: String,
+    #[serde(default)]
+    pub address: String,
+    pub authentication: Option<ZoneServerAuthenticationConfig>,
+    /// Refresh interval for `protocol: "json"` URL sources (e.g. `"15m"`).
+    /// Rejected for `file://` sources.
+    pub check_interval: Option<String>,
+    pub max_hops: Option<u8>,
+    /// IP family restriction for iterative resolution: `"ipv4"`, `"ipv6"`, or omit for both.
+    pub nameserver_ip_family: Option<String>,
+    /// Path to a `root.hints` file for iterative resolution.
+    pub root_hints_path: Option<String>,
+    /// Path to a DNSSEC `root.key` file for iterative resolution.
+    pub root_key_path: Option<String>,
+    /// Enable DNSSEC validation for the recursive resolver. Defaults to `true`.
+    pub dnssec: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]

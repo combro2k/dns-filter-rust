@@ -693,24 +693,33 @@ Zone forwarding routes queries matching a domain suffix to dedicated zone-specif
 resolvers:
   zones:
     - zone: "home.arpa"             # Domain suffix to match
-      enabled: true                 # Optional: enable/disable without deletion
+      enabled: false                # Optional: enable/disable without deletion (default: true)
       bypass_filter: false          # Optional: skip blocklist filtering for this zone
       fallback_to_default_resolvers: false  # Optional: retry default resolvers if zone servers fail
       strategy: "round_robin"       # Optional: override global strategy for this zone
-      
-      # Zone Forwarding Mode: use upstream servers for this zone
       servers:
         - enabled: true
-          protocol: "dns"
+          protocol: "dns"           # dns | dot | doh | recursive | json
           address: "192.168.1.1:53"
 ```
 
-### Zone Modes
+### Zone Server Protocols
 
-**Zone Forwarding Mode (Forward to upstream servers):**
+Each zone entry has a `servers[]` list. Every server requires `enabled`, `protocol`, and `address`.
+
+| Protocol | `address` format | Auth supported |
+|---|---|---|
+| `dns` | `<ip>:<port>` | No |
+| `dot` | `tls://<host>[:<port>]` or `<ip>[:<port>]` | No |
+| `doh` | `https://…` | Yes (Bearer or Basic) |
+| `recursive` | *(no address needed)* | No |
+| `json` | `file:///…`, `http://…`, or `https://…` | Yes for HTTP(S) |
+
+**Zone Forwarding (dns/dot/doh/recursive):**
 ```yaml
 zones:
   - zone: "home.arpa"
+    enabled: false
     servers:
       - enabled: true
         protocol: "dns"
@@ -718,30 +727,51 @@ zones:
 ```
 Queries for `*.home.arpa` are forwarded to the specified upstream server(s).
 
-**Zone Authority Mode (Serve from local JSON) — *Experimental/Unreleased***
+**Zone Authority (json):**
 ```yaml
 zones:
   - zone: "example.com"
-    zone_source: "file:///etc/dns-filter/zones/example.com.json"
-    zone_source_check_interval: "0"  # no refresh for local files
+    enabled: false
+    servers:
+      - enabled: true
+        protocol: "json"
+        address: "file:///etc/dns-filter/zones/example.com.json"
 ```
-Queries for `*.example.com` are answered authoritative from a local JSON zone file.
+Queries for `*.example.com` are answered authoritatively from a local JSON zone file.
 
-⚠️ **Important:** You **must** use **either** `servers[]` **OR** `zone_source`, **never both** for the same zone. This is validated at startup and on reload.
+**Zone Source Authentication:**
 
-**Zone Source Authentication *(Experimental)*:**
-
-HTTP(S) zone sources support optional authentication via `source_auth`. Use **either** Bearer token **or** Basic (username + password), never both. Omit `source_auth` entirely for unauthenticated sources. Setting `source_auth` on a file-based `zone_source` is rejected at startup.
+Use `authentication` nested under a `json` or `doh` server entry. Use **either** `token` (Bearer) **or** `username`+`password` (Basic), never both. Authentication on file-based `json` sources is rejected at startup.
 
 ```yaml
 # Bearer token authentication:
-source_auth:
-  token: "my-bearer-token"
+servers:
+  - enabled: true
+    protocol: "json"
+    address: "https://zones.example.net/zone.json"
+    authentication:
+      token: "my-bearer-token"
 
 # Basic authentication:
-source_auth:
-  username: "user"
-  password: "secret"
+servers:
+  - enabled: true
+    protocol: "doh"
+    address: "https://dns.example.net/dns-query"
+    authentication:
+      username: "user"
+      password: "secret"
+```
+
+**`check_interval` for JSON URL sources:**
+
+Add `check_interval` under a `protocol: json` server entry to enable periodic background refresh. Rejected for `file://` sources.
+
+```yaml
+servers:
+  - enabled: true
+    protocol: "json"
+    address: "https://zones.example.net/zone.json"
+    check_interval: "15m"
 ```
 
 ### Zone Authority JSON Format *(Experimental)*
@@ -800,6 +830,7 @@ The zone JSON file defines authoritative DNS records for the zone:
 resolvers:
   zones:
     - zone: "home.arpa"
+      enabled: false
       bypass_filter: true          # Skip blocklist for internal domains
       servers:
         - enabled: true
@@ -812,6 +843,7 @@ resolvers:
 resolvers:
   zones:
     - zone: "internal.corp"
+      enabled: false
       strategy: "failover"         # Try primary, fall back to secondary
       servers:
         - enabled: true
@@ -828,54 +860,82 @@ resolvers:
 resolvers:
   zones:
     - zone: "example.com"
+      enabled: false
       servers:
         - enabled: true
           protocol: "dot"
           address: "ns1.example.com:853"
-          tls:
-            cert_path: "/etc/ssl/certs/ca-bundle.crt"
 ```
 
-**Zone Authority with Local JSON (Experimental):**
+**Zone Authority with Local JSON:**
 ```yaml
 resolvers:
   zones:
     - zone: "lab.local"
-      zone_source: "file:///etc/dns-filter/zones/lab.local.json"
-      # No servers[] needed; records come from JSON
+      enabled: false
+      servers:
+        - enabled: true
+          protocol: "json"
+          address: "file:///etc/dns-filter/zones/lab.local.json"
 ```
 
-**Zone Authority with URL Refresh (Experimental):**
+**Zone Authority with URL Refresh:**
 ```yaml
 resolvers:
   zones:
     - zone: "managed.example.com"
-      zone_source: "https://zones.example.net/managed.example.com.json"
-      zone_source_check_interval: "15m"  # Check for updates every 15 minutes
-      # Falls back to last good snapshot if URL fetch fails
+      enabled: false
+      servers:
+        - enabled: true
+          protocol: "json"
+          address: "https://zones.example.net/managed.example.com.json"
+          check_interval: "15m"  # Check for updates every 15 minutes
+          # Falls back to last good snapshot if URL fetch fails
 ```
 
-**Zone Authority with Bearer Token Auth (Experimental):**
+**Zone Authority with Bearer Token Auth:**
 ```yaml
 resolvers:
   zones:
     - zone: "secure.example.com"
-      zone_source: "https://zones.example.net/secure.example.com.json"
-      zone_source_check_interval: "15m"
-      source_auth:
-        token: "my-secret-bearer-token"
+      enabled: false
+      servers:
+        - enabled: true
+          protocol: "json"
+          address: "https://zones.example.net/secure.example.com.json"
+          check_interval: "15m"
+          authentication:
+            token: "my-secret-bearer-token"
 ```
 
-**Zone Authority with Basic Auth (Experimental):**
+**Zone Authority with Basic Auth:**
 ```yaml
 resolvers:
   zones:
     - zone: "private.example.com"
-      zone_source: "https://zones.example.net/private.example.com.json"
-      zone_source_check_interval: "30m"
-      source_auth:
-        username: "zone-reader"
-        password: "s3cret"
+      enabled: false
+      servers:
+        - enabled: true
+          protocol: "json"
+          address: "https://zones.example.net/private.example.com.json"
+          check_interval: "30m"
+          authentication:
+            username: "zone-reader"
+            password: "s3cret"
+```
+
+**Zone Forwarding with DoH and Bearer Auth:**
+```yaml
+resolvers:
+  zones:
+    - zone: "corp.example"
+      enabled: false
+      servers:
+        - enabled: true
+          protocol: "doh"
+          address: "https://dns.corp.example/dns-query"
+          authentication:
+            token: "my-doh-token"
 ```
 
 ---

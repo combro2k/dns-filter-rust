@@ -124,41 +124,51 @@ resolvers:
       bypass_filter: true
       fallback_to_default_resolvers: false
       strategy: "failover"
-      servers:
-        - enabled: true
-          protocol: "dns"
-          address: "192.168.1.1:53"
-    # Example authoritative JSON zone from local file (static: startup + SIGHUP reload only).
+      servers: []
+    # Zone forwarding with DoH upstream and optional Bearer auth.
+    # - zone: "corp.example"
+    #   enabled: false
+    #   bypass_filter: false
+    #   fallback_to_default_resolvers: false
+    #   strategy: "failover"
+    #   servers:
+    #     - enabled: true
+    #       protocol: "doh"
+    #       address: "https://dns.corp.example/dns-query"
+    #       # authentication:
+    #       #   token: "my-bearer-token"
+    # Zone authority from a local JSON file.
     # - zone: "example.com"
     #   enabled: false
     #   bypass_filter: false
     #   fallback_to_default_resolvers: false
-    #   zone_source: "/etc/dns-filter/zones/example.com.json"
-    #
-    # Example authoritative JSON zone from URL (periodically checked).
+    #   servers:
+    #     - enabled: true
+    #       protocol: "json"
+    #       address: "file:///etc/dns-filter/zones/example.com.json"
+    # Zone authority from an HTTP(S) URL with periodic refresh.
     # - zone: "example.net"
     #   enabled: false
     #   bypass_filter: false
     #   fallback_to_default_resolvers: false
-    #   zone_source: "https://zones.example.net/example.net.json"
-    #   zone_source_check_interval: "15m"
-    #   # Optional authentication for HTTP(S) zone sources.
-    #   # Use either token (Bearer) OR username+password (Basic), not both.
-    #   # source_auth:
-    #   #   token: "my-bearer-token"
-    #   # Or for Basic authentication:
-    #   # source_auth:
-    #   #   username: "user"
-    #   #   password: "secret"
+    #   servers:
+    #     - enabled: true
+    #       protocol: "json"
+    #       address: "https://zones.example.net/example.net.json"
+    #       check_interval: "15m"
+    #       # Use either token (Bearer) OR username+password (Basic), not both.
+    #       # authentication:
+    #       #   token: "my-bearer-token"
+    #       # Or for Basic authentication:
+    #       # authentication:
+    #       #   username: "user"
+    #       #   password: "secret"
     - zone: "168.192.in-addr.arpa"
       enabled: false
       bypass_filter: true
       fallback_to_default_resolvers: false
       strategy: "failover"
-      servers:
-        - enabled: true
-          protocol: "dns"
-          address: "192.168.1.1:53"
+      servers: []
 
 # WASM plugins (requires 'plugins' cargo feature)
 # plugins:

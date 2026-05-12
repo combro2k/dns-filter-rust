@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Breaking
+- **Zone configuration schema redesigned**: the per-zone `zone_source`, `zone_source_check_interval`, and `source_auth` fields have been removed. Zone authority mode is now expressed as `protocol: "json"` inside the same `servers[]` list used for forwarding.
+- Zone `servers[]` entries now use `ZoneServerConfig` (separate from the global `UpstreamServer` type). Existing zone configs using the old fields must be migrated.
+
+### Added
+- `protocol: "json"` zone server: authoritative JSON zone source as a `servers[]` entry. `address` accepts `file:///…`, `http://…`, and `https://…` URIs.
+- `check_interval` on `protocol: "json"` server entries (URL sources only): enables periodic background refresh of the zone snapshot.
+- `authentication` on `protocol: "json"` and `protocol: "doh"` zone server entries: supports Bearer token (`token`) or HTTP Basic (`username` + `password`), mutually exclusive (same XOR semantics as removed `source_auth`).
+- `protocol: "doh"` zone server: DNS-over-HTTPS upstream for zone forwarding (RFC 8484 POST). Supports `authentication`.
+- New `DnsHttpsClient` upstream resolver (`src/frameworks/upstream/doh_client.rs`).
+- `file://` URI prefix now accepted in `protocol: "json"` `address` values.
+
+### Changed
+- All zone examples in `config.example.yaml` and `README.md` now use `enabled: false` by default.
+- Error hint for `resolvers.zones` config parse failures updated.
+- `parse_zone_source` now accepts `file://` URIs explicitly.
+
 ## [2.0.5] - 2026-05-12
 
 ### Added

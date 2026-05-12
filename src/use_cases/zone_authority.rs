@@ -238,8 +238,12 @@ fn parse_zone_source(source: &str) -> Result<ZoneSource> {
         return Ok(ZoneSource::Url(source.to_string()));
     }
 
+    if let Some(path) = source.strip_prefix("file://") {
+        return Ok(ZoneSource::File(path.to_string()));
+    }
+
     if source.contains("://") {
-        bail!("unsupported zone_source scheme in '{source}'");
+        bail!("unsupported zone source scheme in '{source}'; use file://, http://, or https://");
     }
 
     Ok(ZoneSource::File(source.to_string()))
