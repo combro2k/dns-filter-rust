@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -41,6 +42,7 @@ struct ListRuntime {
     url: String,
     interval: Duration,
     kind: ListKind,
+    runtime_disabled: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +84,22 @@ pub trait DomainFilter: Send + Sync {
     fn sinkhole_ipv4(&self) -> Ipv4Addr;
     fn sinkhole_ipv6(&self) -> Ipv6Addr;
     fn start_background_refresh(self: Arc<Self>);
+    fn list_names(&self) -> Vec<ListInfo>;
+    fn disable_list(&self, name: &str) -> bool;
+    fn enable_list(&self, name: &str) -> bool;
+    fn refresh_list(&self, name: &str) -> bool;
+    fn refresh_all_lists(&self) -> Vec<String>;
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ListInfo {
+    pub name: String,
+    pub url: String,
+    pub kind: &'static str,
+    pub enabled: bool,
+    pub interval_secs: u64,
+    pub domain_count: usize,
+    pub exception_count: usize,
 }
 
 pub struct ListFilterEngine {
@@ -114,6 +132,17 @@ impl ListFilterEngine {
         engine.try_restore_document_cache();
 
         Ok(engine)
+    }
+
+    fn clone_refresh_handle(&self) -> Self {
+        Self {
+            sinkhole_v4: self.sinkhole_v4,
+            sinkhole_v6: self.sinkhole_v6,
+            runtimes: self.runtimes.clone(),
+            document_cache: self.document_cache.clone(),
+            lists: Arc::clone(&self.lists),
+            snapshot: Arc::clone(&self.snapshot),
+        }
     }
 
     async fn refresh_single_list(&self, runtime: &ListRuntime) {
@@ -176,10 +205,20 @@ impl ListFilterEngine {
             .read()
             .expect("list cache lock poisoned while rebuilding snapshot");
 
+        let disabled_keys: HashSet<String> = self
+            .runtimes
+            .iter()
+            .filter(|rt| rt.runtime_disabled.load(Ordering::Relaxed))
+            .map(|rt| rt.key.clone())
+            .collect();
+
         let mut blocked = HashSet::new();
         let mut allowed = HashSet::new();
 
-        for list in lists.values() {
+        for (key, list) in lists.iter() {
+            if disabled_keys.contains(key) {
+                continue;
+            }
             match list.kind {
                 ListKind::Block => blocked.extend(list.domains.iter().cloned()),
                 ListKind::Allow => allowed.extend(list.domains.iter().cloned()),
@@ -339,6 +378,84 @@ impl DomainFilter for ListFilterEngine {
             });
         }
     }
+
+    fn list_names(&self) -> Vec<ListInfo> {
+        let lists = self
+            .lists
+            .read()
+            .expect("list cache lock poisoned while reading list names");
+
+        self.runtimes
+            .iter()
+            .map(|rt| {
+                let (domain_count, exception_count) = lists
+                    .get(&rt.key)
+                    .map(|ld| (ld.domains.len(), ld.exceptions.len()))
+                    .unwrap_or((0, 0));
+                ListInfo {
+                    name: rt.name.clone(),
+                    url: rt.url.clone(),
+                    kind: match rt.kind {
+                        ListKind::Block => "blocklist",
+                        ListKind::Allow => "allowlist",
+                    },
+                    enabled: !rt.runtime_disabled.load(Ordering::Relaxed),
+                    interval_secs: rt.interval.as_secs(),
+                    domain_count,
+                    exception_count,
+                }
+            })
+            .collect()
+    }
+
+    fn disable_list(&self, name: &str) -> bool {
+        if let Some(rt) = self.runtimes.iter().find(|rt| rt.name == name) {
+            rt.runtime_disabled.store(true, Ordering::Relaxed);
+            self.rebuild_snapshot();
+            tracing::info!(list = %name, "list disabled at runtime via API");
+            true
+        } else {
+            false
+        }
+    }
+
+    fn enable_list(&self, name: &str) -> bool {
+        if let Some(rt) = self.runtimes.iter().find(|rt| rt.name == name) {
+            rt.runtime_disabled.store(false, Ordering::Relaxed);
+            self.rebuild_snapshot();
+            tracing::info!(list = %name, "list enabled at runtime via API");
+            true
+        } else {
+            false
+        }
+    }
+
+    fn refresh_list(&self, name: &str) -> bool {
+        let runtime = self.runtimes.iter().find(|rt| rt.name == name);
+        match runtime {
+            Some(rt) => {
+                let engine = Arc::new(self.clone_refresh_handle());
+                let rt = rt.clone();
+                tokio::spawn(async move {
+                    engine.refresh_single_list(&rt).await;
+                });
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn refresh_all_lists(&self) -> Vec<String> {
+        let names: Vec<String> = self.runtimes.iter().map(|rt| rt.name.clone()).collect();
+        let engine = Arc::new(self.clone_refresh_handle());
+        for runtime in self.runtimes.clone() {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine.refresh_single_list(&runtime).await;
+            });
+        }
+        names
+    }
 }
 
 impl From<ListKind> for CachedListKind {
@@ -455,6 +572,7 @@ fn build_runtimes(lists: &[NamedList], kind: ListKind) -> Result<Vec<ListRuntime
                 url: list.url.clone(),
                 interval,
                 kind,
+                runtime_disabled: Arc::new(AtomicBool::new(false)),
             })
         })
         .collect()

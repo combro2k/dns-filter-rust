@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Breaking
+- **CLI restructured to subcommand-based architecture**: `dns-filter` no longer starts the daemon directly; use `dns-filter start [--config <path>] [--debug]` instead. New subcommands: `start`, `stop`, `reload`, `merge-config`
+- Updated systemd `ExecStart`, `ExecReload`, `ExecStop` directives to use the new subcommand syntax
+- Updated OpenRC `command_args` and `reload()` to use the new subcommand syntax
+- Updated `tests/listener_batch_test.sh` to use `dns-filter start` subcommand
+
+### Added
+- Added Unix domain control socket for daemon management: the running daemon listens on a JSON-over-Unix-socket control channel (default: `/run/dns-filter/dns-filter.sock`, configurable via `control.socket_path` in config)
+- Added `dns-filter stop` subcommand: sends a stop command to the running daemon via the control socket for graceful shutdown
+- Added `dns-filter reload` subcommand: sends a reload command to the running daemon via the control socket to reload configuration
+- Added `dns-filter merge-config` subcommand: deep-merges the user's config file with the built-in example defaults; missing sections are filled from the example config, user values always win; supports `--overwrite` to write back in-place or stdout (default) for piping
+- Added `POST /api/v1/stop` REST API endpoint (Bearer-token guarded) for triggering graceful shutdown via HTTP
+- Added graceful shutdown on SIGTERM and SIGINT signals via `CancellationToken`, replacing the previous abrupt termination behavior; all tasks wind down cleanly and the control socket is removed
+- Added stale control socket detection on startup: if a socket file exists from a previous crashed run, it is detected and replaced; if a live daemon is already listening, startup fails with a clear error
+- Added `control` config section with `socket_path` option (default: `/run/dns-filter/dns-filter.sock`)
+- Added `RuntimeDirectory=dns-filter` to systemd service for `/run/dns-filter/` creation
+- Added `tokio-util` dependency (v0.7, `rt` feature) for `CancellationToken`
+- Added control socket permission restriction (`0o660`) so only root or the daemon's user/group can issue commands
+- SIGHUP reload preserved alongside new control socket and API reload paths (defense in depth)
+
 ## [1.0.2] - 2026-05-12
 
 ### Fixed

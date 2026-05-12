@@ -328,9 +328,27 @@ mod tests {
         }
 
         fn start_background_refresh(self: Arc<Self>) {}
-    }
 
-    // ── Wire-format helpers ──────────────────────────────────────────────────
+        fn list_names(&self) -> Vec<crate::use_cases::filtering::ListInfo> {
+            Vec::new()
+        }
+
+        fn disable_list(&self, _name: &str) -> bool {
+            false
+        }
+
+        fn enable_list(&self, _name: &str) -> bool {
+            false
+        }
+
+        fn refresh_list(&self, _name: &str) -> bool {
+            false
+        }
+
+        fn refresh_all_lists(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
 
     fn make_query(domain: &str) -> Vec<u8> {
         let mut msg = Message::new();

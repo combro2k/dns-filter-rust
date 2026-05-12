@@ -2,7 +2,7 @@
 
 description="dns-filter DNS filtering service"
 command="/usr/bin/dns-filter"
-command_args="--config /etc/dns-filter/config.yaml"
+command_args="start --config /etc/dns-filter/config.yaml"
 command_background="yes"
 pidfile="/run/${RC_SVCNAME}.pid"
 
@@ -16,6 +16,7 @@ depend() {
 start_pre() {
 	checkpath -d /var/lib/dns-filter
 	checkpath -d /var/lib/dns-filter/dev
+	checkpath -d /run/dns-filter
 	# Ensure the chroot directory is owned by the target user so the
 	# process can write state files (e.g. filter cache) after priv-drop.
 	checkpath -d -o nobody:nogroup /var/lib/dns-filter
@@ -36,6 +37,6 @@ stop_post() {
 
 reload() {
 	ebegin "Reloading ${RC_SVCNAME}"
-	kill -HUP $(cat ${pidfile})
+	/usr/bin/dns-filter reload --config /etc/dns-filter/config.yaml
 	eend $?
 }

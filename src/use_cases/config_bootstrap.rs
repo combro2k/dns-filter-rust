@@ -19,6 +19,8 @@ use crate::use_cases::upstream_resolver::{StrategyUpstreamResolver, UpstreamReso
 use crate::use_cases::zone_authority::ZoneAuthorityResolver;
 use crate::use_cases::zone_forwarding::{ZoneEntry, ZoneForwardingStage};
 
+use std::sync::atomic::AtomicBool;
+
 pub fn validate_config(config: DnsFilterConfig) -> DnsFilterConfig {
     // Keep validation simple for the first migration step.
     config
@@ -92,12 +94,28 @@ pub fn build_dns_request_pipeline_with_zone_entries(
     any_query_policy: AnyQueryPolicy,
     zone_entries: Vec<ZoneEntry>,
 ) -> DnsRequestPipeline {
+    build_dns_request_pipeline_full(resolver, filter, any_query_policy, zone_entries, None)
+}
+
+pub fn build_dns_request_pipeline_full(
+    resolver: Arc<dyn UpstreamResolver>,
+    filter: Arc<dyn DomainFilter>,
+    any_query_policy: AnyQueryPolicy,
+    zone_entries: Vec<ZoneEntry>,
+    filtering_enabled: Option<Arc<AtomicBool>>,
+) -> DnsRequestPipeline {
     let bypass_stage = ZoneForwardingStage::bypass_only(zone_entries.clone());
     let filtered_stage = ZoneForwardingStage::non_bypass(zone_entries);
 
+    let filter_stage = DnsFilterStage::new(filter);
+    let filter_stage = match filtering_enabled {
+        Some(flag) => filter_stage.with_filtering_enabled(flag),
+        None => filter_stage,
+    };
+
     DnsRequestPipeline::default()
         .add_stage(bypass_stage)
-        .add_stage(DnsFilterStage::new(filter))
+        .add_stage(filter_stage)
         .add_stage(DnsAnyQueryPolicyStage::new(any_query_policy))
         .add_stage(filtered_stage)
         .add_stage(DnsUpstreamStage::new(resolver))
@@ -346,6 +364,8 @@ mod tests {
                 }),
             },
             security: None,
+            api: None,
+            control: None,
         }
     }
 

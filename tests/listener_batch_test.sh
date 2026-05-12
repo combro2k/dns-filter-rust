@@ -226,10 +226,13 @@ logging:
   stdout:
     enabled: true
     level: "info"
+
+control:
+  socket_path: "$TEMP_DIR/dns-filter.sock"
 EOF
 
 note "Starting dns-filter with temporary config: $CONFIG_FILE"
-"$BINARY" --config "$CONFIG_FILE" >"$LOG_FILE" 2>&1 &
+"$BINARY" start --config "$CONFIG_FILE" >"$LOG_FILE" 2>&1 &
 PID=$!
 
 wait_for_dns() {
@@ -405,6 +408,9 @@ logging:
   stdout:
     enabled: true
     level: "info"
+
+control:
+  socket_path: "$TEMP_DIR/zone-test.sock"
 EOF
 }
 
@@ -449,10 +455,13 @@ logging:
   stdout:
     enabled: true
     level: "info"
+
+control:
+  socket_path: "$TEMP_DIR/zone-upstream.sock"
 EOF
 
   note "Starting auxiliary zone upstream on ${DNS_HOST}:${ZONE_UPSTREAM_PORT}"
-  "$BINARY" --config "$upstream_config_file" >"$upstream_log_file" 2>&1 &
+  "$BINARY" start --config "$upstream_config_file" >"$upstream_log_file" 2>&1 &
   ZONE_UPSTREAM_PID=$!
 
   if ! wait_for_tcp_port "$ZONE_UPSTREAM_PORT"; then
@@ -464,7 +473,7 @@ EOF
 
   write_zone_test_config "$zone_enabled_config_file" true
   note "Starting zone forwarding test instance with zone enabled on ${DNS_HOST}:${ZONE_TEST_PORT}"
-  "$BINARY" --config "$zone_enabled_config_file" >"$zone_enabled_log_file" 2>&1 &
+  "$BINARY" start --config "$zone_enabled_config_file" >"$zone_enabled_log_file" 2>&1 &
   ZONE_TEST_PID=$!
 
   if ! wait_for_tcp_port "$ZONE_TEST_PORT"; then
@@ -492,7 +501,7 @@ EOF
 
   write_zone_test_config "$zone_disabled_config_file" false
   note "Starting zone forwarding test instance with zone disabled on ${DNS_HOST}:${ZONE_TEST_PORT}"
-  "$BINARY" --config "$zone_disabled_config_file" >"$zone_disabled_log_file" 2>&1 &
+  "$BINARY" start --config "$zone_disabled_config_file" >"$zone_disabled_log_file" 2>&1 &
   ZONE_TEST_PID=$!
 
   if ! wait_for_tcp_port "$ZONE_TEST_PORT"; then
@@ -677,10 +686,13 @@ logging:
   stdout:
     enabled: true
     level: "info"
+
+control:
+  socket_path: "$TEMP_DIR/recursive.sock"
 RECEOF
 
   note "Starting dns-filter with recursive resolver on port 25353"
-  "$BINARY" --config "$RECURSIVE_CONFIG_FILE" >"$TEMP_DIR/recursive.log" 2>&1 &
+  "$BINARY" start --config "$RECURSIVE_CONFIG_FILE" >"$TEMP_DIR/recursive.log" 2>&1 &
   RECURSIVE_PID=$!
 
   # Give it time to start

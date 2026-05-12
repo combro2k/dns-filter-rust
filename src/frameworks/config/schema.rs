@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use serde::de;
 use serde::Deserialize;
 
+pub const DEFAULT_CONTROL_SOCKET_PATH: &str = "/run/dns-filter/dns-filter.sock";
+
 #[derive(Debug, Deserialize)]
 pub struct DnsFilterConfig {
     pub listen: ListenConfig,
@@ -14,6 +16,64 @@ pub struct DnsFilterConfig {
     pub resolvers: ResolversConfig,
     pub logging: LoggingConfig,
     pub security: Option<SecurityConfig>,
+    pub api: Option<ApiConfig>,
+    pub control: Option<ControlConfig>,
+}
+
+impl DnsFilterConfig {
+    /// Returns the configured control socket path, or the default.
+    pub fn socket_path(&self) -> &str {
+        self.control
+            .as_ref()
+            .and_then(|c| c.socket_path.as_deref())
+            .unwrap_or(DEFAULT_CONTROL_SOCKET_PATH)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ControlConfig {
+    #[serde(default = "default_control_socket_path")]
+    pub socket_path: Option<String>,
+}
+
+fn default_control_socket_path() -> Option<String> {
+    Some(DEFAULT_CONTROL_SOCKET_PATH.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApiConfig {
+    pub enabled: bool,
+    #[serde(default = "default_api_address")]
+    pub address: String,
+    #[serde(default = "default_api_port")]
+    pub port: u16,
+    pub api_token: Option<String>,
+    #[serde(default)]
+    pub query_logging: Option<QueryLoggingConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueryLoggingConfig {
+    #[serde(default = "default_query_logging_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_max_log_entries")]
+    pub max_entries: usize,
+}
+
+fn default_api_address() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_api_port() -> u16 {
+    8000
+}
+
+fn default_query_logging_enabled() -> bool {
+    false
+}
+
+fn default_max_log_entries() -> usize {
+    10_000
 }
 
 #[derive(Debug, Deserialize)]

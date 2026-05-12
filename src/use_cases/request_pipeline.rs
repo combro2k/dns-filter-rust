@@ -1,4 +1,5 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -147,11 +148,24 @@ pub type DnsRequestPipeline =
 
 pub struct DnsFilterStage {
     domain_filter: Arc<dyn DomainFilter>,
+    filtering_enabled: Arc<AtomicBool>,
 }
 
 impl DnsFilterStage {
     pub fn new(domain_filter: Arc<dyn DomainFilter>) -> Self {
-        Self { domain_filter }
+        Self {
+            domain_filter,
+            filtering_enabled: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    pub fn with_filtering_enabled(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.filtering_enabled = flag;
+        self
+    }
+
+    pub fn filtering_enabled_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.filtering_enabled)
     }
 }
 
@@ -163,6 +177,10 @@ impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError
         &self,
         request: &DnsPipelineRequest,
     ) -> Result<Option<DnsPipelineResponse>, DnsPipelineError> {
+        if !self.filtering_enabled.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+
         let Ok(message) = Message::from_vec(&request.query) else {
             return Ok(None);
         };
@@ -603,6 +621,26 @@ mod tests {
         }
 
         fn start_background_refresh(self: Arc<Self>) {}
+
+        fn list_names(&self) -> Vec<crate::use_cases::filtering::ListInfo> {
+            Vec::new()
+        }
+
+        fn disable_list(&self, _name: &str) -> bool {
+            false
+        }
+
+        fn enable_list(&self, _name: &str) -> bool {
+            false
+        }
+
+        fn refresh_list(&self, _name: &str) -> bool {
+            false
+        }
+
+        fn refresh_all_lists(&self) -> Vec<String> {
+            Vec::new()
+        }
     }
 
     fn make_query_with_type(domain: &str, record_type: RecordType) -> Vec<u8> {

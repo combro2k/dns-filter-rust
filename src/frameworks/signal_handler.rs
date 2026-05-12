@@ -2,6 +2,8 @@
 
 use std::io;
 
+use tokio_util::sync::CancellationToken;
+
 /// Set up a listener for SIGHUP signal that triggers configuration reload.
 ///
 /// Returns a receiver that emits `()` each time SIGHUP is received.
@@ -25,4 +27,30 @@ pub fn setup_sighup_handler() -> io::Result<tokio::sync::mpsc::Receiver<()>> {
     });
 
     Ok(rx)
+}
+
+/// Set up listeners for SIGTERM and SIGINT that trigger graceful shutdown.
+///
+/// When either signal is received, the provided `CancellationToken` is cancelled,
+/// allowing all tasks to wind down cleanly.
+///
+/// # Errors
+/// Returns an error if the signal handlers cannot be installed.
+pub fn setup_shutdown_signals(shutdown: CancellationToken) -> io::Result<()> {
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = sigterm.recv() => {
+                tracing::info!("SIGTERM received, initiating graceful shutdown");
+            }
+            _ = sigint.recv() => {
+                tracing::info!("SIGINT received, initiating graceful shutdown");
+            }
+        }
+        shutdown.cancel();
+    });
+
+    Ok(())
 }

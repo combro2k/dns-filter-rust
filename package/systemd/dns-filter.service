@@ -5,11 +5,13 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/dns-filter --config /etc/dns-filter/config.yaml
-ExecReload=/bin/kill -HUP $MAINPID
+ExecStart=/usr/bin/dns-filter start --config /etc/dns-filter/config.yaml
+ExecReload=/usr/bin/dns-filter reload --config /etc/dns-filter/config.yaml
+ExecStop=/usr/bin/dns-filter stop --config /etc/dns-filter/config.yaml
 Restart=on-failure
 RestartSec=2s
 StateDirectory=dns-filter
+RuntimeDirectory=dns-filter
 WorkingDirectory=/var/lib/dns-filter
 NoNewPrivileges=true
 

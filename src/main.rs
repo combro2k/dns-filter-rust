@@ -1,17 +1,27 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
+use dns_filter::entities::query_log::QueryLog;
 use dns_filter::frameworks::config::loader::load_config;
+use dns_filter::frameworks::config::merger::merge_with_example;
+use dns_filter::frameworks::config::schema::{ApiConfig, DEFAULT_CONTROL_SOCKET_PATH};
+use dns_filter::frameworks::control_client;
+use dns_filter::frameworks::control_socket::ControlServer;
 use dns_filter::frameworks::logging;
 use dns_filter::frameworks::privileges::{
     drop_privileges, PrivilegeDropConfig, DEFAULT_CHROOT_DIR, DEFAULT_GROUP, DEFAULT_USER,
 };
-use dns_filter::frameworks::signal_handler::setup_sighup_handler;
+use dns_filter::frameworks::signal_handler::{setup_shutdown_signals, setup_sighup_handler};
 use dns_filter::interface_adapters::listeners::dns::DnsServer;
+use dns_filter::interface_adapters::listeners::http::{start_api_server, ApiState, ApiStats};
 use dns_filter::use_cases::config_bootstrap::{
-    build_any_query_policy, build_dns_request_pipeline_with_zone_entries, build_domain_filter,
+    build_any_query_policy, build_dns_request_pipeline_full, build_domain_filter,
     build_upstream_resolver, build_zone_entries, validate_config,
 };
 use dns_filter::use_cases::reload::reload_config;
@@ -20,31 +30,78 @@ const DEFAULT_CONFIG_PATH: &str = "/etc/dns-filter/config.yaml";
 
 #[derive(Debug, PartialEq, Eq)]
 enum CliAction {
-    Run(CliOptions),
+    Start {
+        config_path: String,
+        debug: bool,
+    },
+    Stop {
+        config_path: String,
+    },
+    Reload {
+        config_path: String,
+    },
+    MergeConfig {
+        config_path: String,
+        overwrite: bool,
+    },
     Version,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct CliOptions {
-    config_path: String,
-    debug: bool,
 }
 
 #[derive(Debug, Parser, PartialEq, Eq)]
 #[command(name = "dns-filter", disable_version_flag = true)]
 struct CliArgs {
-    #[arg(
-        long = "config",
-        value_name = "path",
-        default_value = DEFAULT_CONFIG_PATH
-    )]
-    config_path: String,
-
-    #[arg(long = "debug")]
-    debug: bool,
-
     #[arg(long = "version", short = 'V')]
     version: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+enum Commands {
+    /// Start the DNS filter daemon (foreground)
+    Start {
+        #[arg(
+            long = "config",
+            value_name = "path",
+            default_value = DEFAULT_CONFIG_PATH
+        )]
+        config_path: String,
+
+        #[arg(long = "debug")]
+        debug: bool,
+    },
+    /// Stop the running daemon via control socket
+    Stop {
+        #[arg(
+            long = "config",
+            value_name = "path",
+            default_value = DEFAULT_CONFIG_PATH
+        )]
+        config_path: String,
+    },
+    /// Reload the running daemon's configuration via control socket
+    Reload {
+        #[arg(
+            long = "config",
+            value_name = "path",
+            default_value = DEFAULT_CONFIG_PATH
+        )]
+        config_path: String,
+    },
+    /// Merge config with built-in defaults (missing sections filled from example)
+    MergeConfig {
+        #[arg(
+            long = "config",
+            value_name = "path",
+            default_value = DEFAULT_CONFIG_PATH
+        )]
+        config_path: String,
+
+        /// Overwrite the config file in-place with the merged result
+        #[arg(long = "overwrite")]
+        overwrite: bool,
+    },
 }
 
 fn parse_cli_args<I, S>(args: I) -> Result<CliAction, String>
@@ -58,10 +115,22 @@ where
         return Ok(CliAction::Version);
     }
 
-    Ok(CliAction::Run(CliOptions {
-        config_path: parsed.config_path,
-        debug: parsed.debug,
-    }))
+    match parsed.command {
+        Some(Commands::Start { config_path, debug }) => Ok(CliAction::Start { config_path, debug }),
+        Some(Commands::Stop { config_path }) => Ok(CliAction::Stop { config_path }),
+        Some(Commands::Reload { config_path }) => Ok(CliAction::Reload { config_path }),
+        Some(Commands::MergeConfig {
+            config_path,
+            overwrite,
+        }) => Ok(CliAction::MergeConfig {
+            config_path,
+            overwrite,
+        }),
+        None => Err(
+            "no subcommand provided. Usage: dns-filter <start|stop|reload|merge-config> [OPTIONS]"
+                .to_string(),
+        ),
+    }
 }
 
 #[tokio::main]
@@ -74,17 +143,93 @@ async fn main() {
         }
     };
 
-    if cli_action == CliAction::Version {
-        println!("dns-filter {}", env!("CARGO_PKG_VERSION"));
-        return;
+    match cli_action {
+        CliAction::Version => {
+            println!("dns-filter {}", env!("CARGO_PKG_VERSION"));
+        }
+        CliAction::Start { config_path, debug } => {
+            run_daemon(config_path, debug).await;
+        }
+        CliAction::Stop { config_path } => {
+            run_control_command(&config_path, "stop");
+        }
+        CliAction::Reload { config_path } => {
+            run_control_command(&config_path, "reload");
+        }
+        CliAction::MergeConfig {
+            config_path,
+            overwrite,
+        } => {
+            run_merge_config(&config_path, overwrite);
+        }
     }
+}
 
-    let CliAction::Run(cli_options) = cli_action else {
-        unreachable!("version action is handled above");
+/// Send a control command (stop/reload) to the running daemon.
+fn run_control_command(config_path: &str, command: &str) {
+    let socket_path = match load_config(config_path) {
+        Ok(cfg) => cfg.socket_path().to_string(),
+        Err(e) => {
+            eprintln!("failed to load config: {e}");
+            eprintln!("using default control socket path");
+            DEFAULT_CONTROL_SOCKET_PATH.to_string()
+        }
     };
 
-    let config_path = cli_options.config_path;
+    match control_client::send_command(&socket_path, command) {
+        Ok(resp) => {
+            if resp.status == "ok" {
+                if let Some(msg) = resp.message {
+                    println!("{msg}");
+                } else {
+                    println!("{command} command sent successfully");
+                }
+            } else {
+                eprintln!(
+                    "daemon returned error: {}",
+                    resp.message.unwrap_or_default()
+                );
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
 
+/// Merge the user's config file with the built-in example defaults.
+fn run_merge_config(config_path: &str, overwrite: bool) {
+    let user_config = match std::fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("failed to read config file {config_path}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let merged = match merge_with_example(&user_config) {
+        Ok(yaml) => yaml,
+        Err(e) => {
+            eprintln!("failed to merge config: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    if overwrite {
+        if let Err(e) = std::fs::write(config_path, &merged) {
+            eprintln!("failed to write merged config to {config_path}: {e}");
+            std::process::exit(1);
+        }
+        eprintln!("merged config written to {config_path}");
+    } else {
+        print!("{merged}");
+    }
+}
+
+/// Main daemon entry point.
+async fn run_daemon(config_path: String, debug: bool) {
     let config = match load_config(&config_path) {
         Ok(cfg) => validate_config(cfg),
         Err(e) => {
@@ -95,7 +240,7 @@ async fn main() {
 
     // Initialize logging from configuration.
     // Must be done BEFORE drop_privileges() so syslog can access /dev/log.
-    let _logging_guard = match logging::init_logging(&config, cli_options.debug) {
+    let _logging_guard = match logging::init_logging(&config, debug) {
         Ok(guard) => guard,
         Err(e) => {
             eprintln!("failed to initialize logging: {e:#}");
@@ -136,11 +281,15 @@ async fn main() {
         }
     };
 
-    let request_pipeline = build_dns_request_pipeline_with_zone_entries(
+    // Global filtering toggle shared with the API and filter pipeline stage.
+    let filtering_enabled = Arc::new(AtomicBool::new(true));
+
+    let request_pipeline = build_dns_request_pipeline_full(
         Arc::clone(&upstream_resolver),
         Arc::clone(&domain_filter),
         any_query_policy,
         zone_entries,
+        Some(Arc::clone(&filtering_enabled)),
     );
 
     let Some(dns_config) = config.listen.dns.as_ref().filter(|cfg| cfg.enabled) else {
@@ -170,6 +319,17 @@ async fn main() {
         }
     };
 
+    // Bind control socket while still running as root (before chroot).
+    // The fd survives chroot so the accept loop continues to work.
+    let control_socket_path = config.socket_path().to_string();
+    let control_server = match ControlServer::bind(&control_socket_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("failed to bind control socket: {e:#}");
+            std::process::exit(1);
+        }
+    };
+
     // Drop privileges: chroot + setgid + setuid + retain CAP_NET_BIND_SERVICE.
     let security = config.security.as_ref();
     let priv_user = security
@@ -191,6 +351,16 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Shared cancellation token for graceful shutdown from any source
+    // (SIGTERM, SIGINT, control socket stop, API stop).
+    let shutdown = CancellationToken::new();
+
+    // Set up SIGTERM/SIGINT handlers for graceful shutdown.
+    if let Err(e) = setup_shutdown_signals(shutdown.clone()) {
+        eprintln!("failed to set up shutdown signal handlers: {e}");
+        std::process::exit(1);
+    }
+
     // Set up SIGHUP signal handler for graceful reload
     let mut sighup_rx = match setup_sighup_handler() {
         Ok(rx) => rx,
@@ -203,17 +373,30 @@ async fn main() {
     let server_task = tokio::spawn(bound_server.serve());
     let config_path_for_reload = config_path.clone();
     let pipeline_slot_for_reload = Arc::clone(&request_pipeline_slot);
+    let filtering_enabled_for_reload = Arc::clone(&filtering_enabled);
+
+    // Create a channel so SIGHUP, the API, and the control socket can trigger reloads.
+    let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(4);
+
+    // Forward SIGHUP signals into the reload channel.
+    let sighup_reload_tx = reload_tx.clone();
+    tokio::spawn(async move {
+        while sighup_rx.recv().await.is_some() {
+            let _ = sighup_reload_tx.send(()).await;
+        }
+    });
 
     let reload_task = tokio::spawn(async move {
-        while sighup_rx.recv().await.is_some() {
+        while reload_rx.recv().await.is_some() {
             match reload_config(&config_path_for_reload) {
                 Ok((new_resolver, new_filter, new_any_query_policy, new_zone_entries)) => {
                     new_filter.clone().start_background_refresh();
-                    let new_pipeline = Arc::new(build_dns_request_pipeline_with_zone_entries(
+                    let new_pipeline = Arc::new(build_dns_request_pipeline_full(
                         new_resolver,
                         new_filter,
                         new_any_query_policy,
                         new_zone_entries,
+                        Some(Arc::clone(&filtering_enabled_for_reload)),
                     ));
                     let mut pipeline_lock = pipeline_slot_for_reload.lock().await;
                     *pipeline_lock = new_pipeline;
@@ -226,8 +409,29 @@ async fn main() {
         }
     });
 
-    // Wait for either the server or reload task to exit (server should run forever)
+    // Start the control socket server.
+    let control_reload_tx = reload_tx.clone();
+    let control_shutdown = shutdown.clone();
+    let control_task = tokio::spawn(async move {
+        control_server
+            .serve(control_reload_tx, control_shutdown)
+            .await;
+    });
+
+    // Start the HTTP API server if configured.
+    let api_task = spawn_api_server(
+        &config.api,
+        domain_filter,
+        filtering_enabled,
+        reload_tx,
+        shutdown.clone(),
+    );
+
+    // Wait for shutdown or unexpected task exit.
     tokio::select! {
+        _ = shutdown.cancelled() => {
+            tracing::info!("shutdown signal received, exiting");
+        }
         result = server_task => {
             if let Err(e) = result {
                 eprintln!("DNS server task panicked: {e}");
@@ -242,12 +446,72 @@ async fn main() {
             eprintln!("Reload task exited unexpectedly");
             std::process::exit(1);
         }
+        _ = control_task => {
+            // Control task exits on stop command — this is normal.
+            tracing::info!("control socket task exited");
+        }
+        _ = async {
+            if let Some(task) = api_task {
+                if let Err(e) = task.await {
+                    tracing::error!("HTTP API server task panicked: {e}");
+                }
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {
+            tracing::warn!("HTTP API server exited unexpectedly");
+        }
     }
+}
+
+fn spawn_api_server(
+    api_config: &Option<ApiConfig>,
+    domain_filter: Arc<dyn dns_filter::use_cases::filtering::DomainFilter>,
+    filtering_enabled: Arc<AtomicBool>,
+    reload_tx: tokio::sync::mpsc::Sender<()>,
+    shutdown: CancellationToken,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let api_config = api_config.as_ref().filter(|c| c.enabled)?;
+
+    let addr: SocketAddr = format!("{}:{}", api_config.address, api_config.port)
+        .parse()
+        .unwrap_or_else(|e| {
+            eprintln!("invalid API bind address: {e}");
+            std::process::exit(1);
+        });
+
+    let query_log = api_config
+        .query_logging
+        .as_ref()
+        .filter(|ql| ql.enabled)
+        .map(|ql| Arc::new(StdMutex::new(QueryLog::new(ql.max_entries))));
+
+    let start_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let state = Arc::new(ApiState {
+        domain_filter,
+        filtering_enabled,
+        query_log,
+        reload_tx,
+        api_token: api_config.api_token.clone(),
+        start_time,
+        stats: Arc::new(ApiStats::new()),
+        shutdown,
+    });
+
+    Some(tokio::spawn(async move {
+        if let Err(e) = start_api_server(addr, state).await {
+            tracing::error!(error = %e, "HTTP API server failed");
+        }
+    }))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_cli_args, CliAction, CliOptions, DEFAULT_CONFIG_PATH};
+    use super::{parse_cli_args, CliAction, DEFAULT_CONFIG_PATH};
 
     #[test]
     fn parses_version_flag() {
@@ -256,46 +520,113 @@ mod tests {
     }
 
     #[test]
-    fn parses_debug_and_config_flags() {
-        let parsed = parse_cli_args(["dns-filter", "--debug", "--config", "/tmp/test.yaml"])
-            .expect("parse should succeed");
+    fn parses_version_short_flag() {
+        let parsed = parse_cli_args(["dns-filter", "-V"]).expect("parse should succeed");
+        assert_eq!(parsed, CliAction::Version);
+    }
+
+    #[test]
+    fn parses_start_with_debug_and_config() {
+        let parsed = parse_cli_args([
+            "dns-filter",
+            "start",
+            "--debug",
+            "--config",
+            "/tmp/test.yaml",
+        ])
+        .expect("parse should succeed");
         assert_eq!(
             parsed,
-            CliAction::Run(CliOptions {
+            CliAction::Start {
                 config_path: "/tmp/test.yaml".to_string(),
                 debug: true,
-            })
+            }
         );
     }
 
     #[test]
-    fn uses_default_config_when_omitted() {
-        let parsed = parse_cli_args(["dns-filter"]).expect("parse should succeed");
+    fn parses_start_with_defaults() {
+        let parsed = parse_cli_args(["dns-filter", "start"]).expect("parse should succeed");
         assert_eq!(
             parsed,
-            CliAction::Run(CliOptions {
+            CliAction::Start {
                 config_path: DEFAULT_CONFIG_PATH.to_string(),
                 debug: false,
-            })
+            }
         );
+    }
+
+    #[test]
+    fn parses_stop_subcommand() {
+        let parsed = parse_cli_args(["dns-filter", "stop", "--config", "/tmp/test.yaml"])
+            .expect("parse should succeed");
+        assert_eq!(
+            parsed,
+            CliAction::Stop {
+                config_path: "/tmp/test.yaml".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_reload_subcommand() {
+        let parsed = parse_cli_args(["dns-filter", "reload"]).expect("parse should succeed");
+        assert_eq!(
+            parsed,
+            CliAction::Reload {
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_merge_config_subcommand() {
+        let parsed = parse_cli_args(["dns-filter", "merge-config", "--config", "/tmp/test.yaml"])
+            .expect("parse should succeed");
+        assert_eq!(
+            parsed,
+            CliAction::MergeConfig {
+                config_path: "/tmp/test.yaml".to_string(),
+                overwrite: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_merge_config_with_overwrite() {
+        let parsed = parse_cli_args([
+            "dns-filter",
+            "merge-config",
+            "--config",
+            "/tmp/test.yaml",
+            "--overwrite",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed,
+            CliAction::MergeConfig {
+                config_path: "/tmp/test.yaml".to_string(),
+                overwrite: true,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_no_subcommand() {
+        let err = parse_cli_args(["dns-filter"]).expect_err("parse should fail");
+        assert!(err.contains("no subcommand"));
+    }
+
+    #[test]
+    fn rejects_unknown_subcommand() {
+        let err = parse_cli_args(["dns-filter", "explode"]).expect_err("parse should fail");
+        assert!(!err.is_empty());
     }
 
     #[test]
     fn rejects_missing_config_value() {
-        let err = parse_cli_args(["dns-filter", "--config"]).expect_err("parse should fail");
+        let err =
+            parse_cli_args(["dns-filter", "start", "--config"]).expect_err("parse should fail");
         assert!(err.contains("--config"));
-    }
-
-    #[test]
-    fn rejects_unknown_flag() {
-        let err = parse_cli_args(["dns-filter", "--wat"]).expect_err("parse should fail");
-        assert!(err.contains("unexpected argument '--wat'"));
-    }
-
-    #[test]
-    fn rejects_positional_argument() {
-        let err = parse_cli_args(["dns-filter", "/etc/dns-filter/config.yaml"])
-            .expect_err("parse should fail");
-        assert!(err.contains("unexpected argument '/etc/dns-filter/config.yaml'"));
     }
 }
