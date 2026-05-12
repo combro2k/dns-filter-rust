@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.0.2] - 2026-05-12
 
 ### Fixed
 - Fixed false-positive DNS blocks caused by missing AdGuard cosmetic rule markers (`#?#`, `#@?#`, `#$?#`, `#@$?#`, `#@$#`, `#@%#`, `$@$`) in the filter parser — rules using these markers (e.g. `imdb.com#$?#...`) were incorrectly treated as domain blocks
