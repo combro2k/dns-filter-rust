@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [2.0.8] - 2026-05-13
 
+### Fixed
+- **Zone authority JSON format documentation**: corrected the README example and reference table to match the actual parser format — `records` is a flat array of objects with `type` and structured `data` fields, not a map grouped by record type with plain `value` strings.
+
 ### Changed
 - **Shared TLS certificate utilities**: extracted `autogenerate_tls_cert_if_missing()` and `build_tls_server_config()` from the DoH listener into a shared `interface_adapters::listeners::tls` module, ready for reuse by DoT and DoQ listeners.
 - **Enhanced auto-generated certificate SANs**: self-signed certificates now include the system hostname, all non-loopback network interface IP addresses, and any configured bind addresses as Subject Alternative Names (in addition to `localhost`, `127.0.0.1`, `::1`). Wildcard/unspecified addresses (`0.0.0.0`, `::`) are filtered out.

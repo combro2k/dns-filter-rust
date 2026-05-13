@@ -776,48 +776,62 @@ servers:
 
 ### Zone Authority JSON Format *(Experimental)*
 
-The zone JSON file defines authoritative DNS records for the zone:
+The zone JSON file defines authoritative DNS records for the zone. Records are a flat array; each entry carries its own `type` field and a structured `data` object whose shape depends on the record type:
 
 ```json
 {
   "zone": "example.com",
-  "records": {
-    "A": [
-      {"name": "@", "ttl": 300, "value": "192.0.2.1"},
-      {"name": "www", "ttl": 300, "value": "192.0.2.2"},
-      {"name": "api", "ttl": 300, "value": "192.0.2.3"}
-    ],
-    "AAAA": [
-      {"name": "@", "ttl": 300, "value": "2001:db8::1"}
-    ],
-    "MX": [
-      {"name": "@", "ttl": 3600, "value": "10 mail.example.com."}
-    ],
-    "TXT": [
-      {"name": "@", "ttl": 3600, "value": "v=spf1 include:spf.google.com ~all"}
-    ],
-    "NS": [
-      {"name": "@", "ttl": 3600, "value": "ns1.example.com."}
-    ],
-    "SOA": [
-      {"name": "@", "ttl": 3600, "value": "ns1.example.com. hostmaster.example.com. 2024050101 10800 3600 604800 3600"}
-    ]
-  }
+  "ttl_default": 3600,
+  "serial": "2024050101",
+  "records": [
+    {"name": "@",   "type": "A",    "ttl": 300,  "data": {"address": "192.0.2.1"}},
+    {"name": "www", "type": "A",    "ttl": 300,  "data": {"address": "192.0.2.2"}},
+    {"name": "api", "type": "A",    "ttl": 300,  "data": {"address": "192.0.2.3"}},
+    {"name": "@",   "type": "AAAA", "ttl": 300,  "data": {"address": "2001:db8::1"}},
+    {"name": "@",   "type": "MX",   "ttl": 3600, "data": {"priority": 10, "exchange": "mail.example.com"}},
+    {"name": "@",   "type": "TXT",  "ttl": 3600, "data": {"values": ["v=spf1 include:spf.google.com ~all"]}},
+    {"name": "@",   "type": "NS",   "ttl": 3600, "data": {"target": "ns1.example.com"}},
+    {"name": "@",   "type": "SOA",  "ttl": 3600, "data": {
+      "mname": "ns1.example.com",
+      "rname": "hostmaster.example.com",
+      "serial": 2024050101,
+      "refresh": 10800,
+      "retry": 3600,
+      "expire": 604800,
+      "minimum": 3600
+    }}
+  ]
 }
 ```
 
-**Supported Record Types:**
-- `A`, `AAAA` - Address records
-- `CNAME` - Canonical names
-- `MX` - Mail exchange
-- `NS` - Nameserver
-- `SOA` - Start of authority
-- `TXT` - Text records
-- `SRV` - Service records
-- `PTR` - Pointer records
-- `CAA` - Certification Authority Authorization
-- `TLSA` - TLSA certificate records
-- `NAPTR` - NAPTR records
+**Top-Level Fields:**
+- `zone` (string, required): The zone name this file is authoritative for.
+- `ttl_default` (u32, optional): Default TTL applied when a record omits `ttl`.
+- `serial` (string, optional): Human-readable serial (informational only; the SOA serial in `records` is authoritative).
+- `records` (array, required): Flat list of DNS record objects.
+
+**Record Object Fields:**
+- `name` (string): `"@"` for the zone apex, or a relative label (e.g., `"www"`).
+- `type` (string): One of the supported record types below.
+- `ttl` (u32, optional): Per-record TTL; falls back to `ttl_default`.
+- `data` (object): Structured data whose fields depend on `type`.
+
+**Supported Record Types and `data` Fields:**
+
+| Type | `data` fields | Example |
+|------|--------------|---------|
+| `A` | `address` (IPv4 string) | `{"address": "192.0.2.1"}` |
+| `AAAA` | `address` (IPv6 string) | `{"address": "2001:db8::1"}` |
+| `CNAME` | `target` (FQDN) | `{"target": "www.example.com"}` |
+| `NS` | `target` (FQDN) | `{"target": "ns1.example.com"}` |
+| `PTR` | `target` (FQDN) | `{"target": "host.example.com"}` |
+| `MX` | `priority` (u16), `exchange` (FQDN) | `{"priority": 10, "exchange": "mail.example.com"}` |
+| `TXT` | `values` (array of strings) | `{"values": ["v=spf1 ..."]}` |
+| `SOA` | `mname`, `rname` (strings), `serial` (u32), `refresh`, `retry`, `expire` (i32), `minimum` (u32) | See example above |
+| `SRV` | `priority`, `weight`, `port` (u16), `target` (FQDN) | `{"priority": 10, "weight": 60, "port": 5060, "target": "sip.example.com"}` |
+| `CAA` | `flags` (u8), `tag` (string), `value` (string) | `{"flags": 0, "tag": "issue", "value": "letsencrypt.org"}` |
+| `TLSA` | `usage`, `selector`, `matching_type` (u8), `certificate` (hex string) | `{"usage": 3, "selector": 1, "matching_type": 1, "certificate": "a1b2c3d4"}` |
+| `NAPTR` | `order`, `preference` (u16), `flags`, `service`, `regexp`, `replacement` (strings) | `{"order": 100, "preference": 10, "flags": "S", "service": "SIP+D2U", "regexp": "", "replacement": "_sip._udp.example.com"}` |
 
 **Special Behavior:**
 - **NS Glue:** When a zone contains `NS` records pointing to in-zone nameservers (e.g., `ns1.example.com`), the corresponding `A`/`AAAA` records are automatically included in the DNS additional section.
