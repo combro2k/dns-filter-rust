@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [2.0.7] - 2026-05-13
+## [2.0.8] - 2026-05-13
 
 ### Changed
 - **Shared TLS certificate utilities**: extracted `autogenerate_tls_cert_if_missing()` and `build_tls_server_config()` from the DoH listener into a shared `interface_adapters::listeners::tls` module, ready for reuse by DoT and DoQ listeners.
@@ -12,6 +12,8 @@ All notable changes to this project will be documented in this file.
 ### Dependencies
 - Added `hostname` crate for system hostname discovery in TLS SAN generation.
 - Added `"net"` feature to existing `nix` dependency for network interface enumeration via `getifaddrs()`.
+
+## [2.0.7] - 2026-05-13
 
 ### Fixed
 - **Dual-stack socket binding conflict**: on Linux, binding `["0.0.0.0", "::"]` would fail with `EADDRINUSE` because the IPv6 socket defaulted to dual-stack mode (`IPV6_V6ONLY=0`), capturing both IPv4 and IPv6 traffic. All listener sockets (DNS, DoH, HTTP API) now explicitly set `IPV6_V6ONLY=1` on IPv6 sockets via `socket2`, so IPv4 and IPv6 bind independently.
