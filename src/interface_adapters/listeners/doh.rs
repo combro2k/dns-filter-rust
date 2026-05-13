@@ -7,12 +7,12 @@ use base64::Engine;
 use hyper::server::conn::Http;
 use hyper::service::service_fn;
 use hyper::{Body, Method, Request, Response, StatusCode};
-use rustls::ServerConfig;
-use rustls_pemfile::{certs, private_key};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio_rustls::TlsAcceptor;
+
+use super::tls::{autogenerate_tls_cert_if_missing, build_tls_server_config};
 
 use hickory_proto::op::Message;
 
@@ -112,9 +112,11 @@ impl DohServer {
         let tls = &config.tls;
         let autogenerate = tls.autogenerate.unwrap_or(false);
         if autogenerate {
-            autogenerate_tls_cert_if_missing(&tls.cert_path, &tls.key_path)?;
+            autogenerate_tls_cert_if_missing(&tls.cert_path, &tls.key_path, &config.addresses)
+                .map_err(|e| DohListenerError::Tls(e.to_string()))?;
         }
-        let tls_config = build_tls_server_config(&tls.cert_path, &tls.key_path)?;
+        let tls_config = build_tls_server_config(&tls.cert_path, &tls.key_path)
+            .map_err(|e| DohListenerError::Tls(e.to_string()))?;
         let tls_acceptor = Arc::new(TlsAcceptor::from(Arc::new(tls_config)));
 
         Ok(Self {
@@ -397,98 +399,6 @@ fn error_response(status: StatusCode, message: &str) -> Response<Body> {
         .status(status)
         .body(Body::from(message.to_string()))
         .expect("error response must be valid")
-}
-
-/// Loads the TLS certificate chain and private key from PEM files and builds
-/// a [`rustls::ServerConfig`] suitable for serving HTTPS.
-fn build_tls_server_config(
-    cert_path: &str,
-    key_path: &str,
-) -> Result<ServerConfig, DohListenerError> {
-    let cert_file = std::fs::File::open(cert_path).map_err(|e| {
-        DohListenerError::Tls(format!(
-            "failed to open certificate file '{cert_path}': {e}"
-        ))
-    })?;
-    let key_file = std::fs::File::open(key_path)
-        .map_err(|e| DohListenerError::Tls(format!("failed to open key file '{key_path}': {e}")))?;
-
-    let cert_chain: Vec<_> = certs(&mut io::BufReader::new(cert_file))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| DohListenerError::Tls(format!("failed to parse certificate PEM: {e}")))?;
-
-    if cert_chain.is_empty() {
-        return Err(DohListenerError::Tls(
-            "certificate file contains no certificates".into(),
-        ));
-    }
-
-    let key = private_key(&mut io::BufReader::new(key_file))
-        .map_err(|e| DohListenerError::Tls(format!("failed to parse key PEM: {e}")))?
-        .ok_or_else(|| DohListenerError::Tls("key file contains no private key".into()))?;
-
-    let config =
-        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .map_err(|e| DohListenerError::Tls(format!("TLS protocol version error: {e}")))?
-            .with_no_client_auth()
-            .with_single_cert(cert_chain, key)
-            .map_err(|e| DohListenerError::Tls(format!("TLS configuration error: {e}")))?;
-
-    Ok(config)
-}
-
-/// Generates a self-signed TLS certificate and private key at the given paths
-/// if neither file exists. This is intended for testing and development only.
-///
-/// If either file already exists, this function does nothing (no overwrite).
-fn autogenerate_tls_cert_if_missing(
-    cert_path: &str,
-    key_path: &str,
-) -> Result<(), DohListenerError> {
-    use std::path::Path;
-
-    if Path::new(cert_path).exists() && Path::new(key_path).exists() {
-        tracing::debug!(
-            cert_path,
-            key_path,
-            "TLS cert and key already exist, skipping auto-generation"
-        );
-        return Ok(());
-    }
-
-    tracing::info!(
-        cert_path,
-        key_path,
-        "auto-generating self-signed TLS certificate (testing/development only)"
-    );
-
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).map_err(|e| {
-        DohListenerError::Tls(format!("failed to generate self-signed certificate: {e}"))
-    })?;
-
-    let cert_pem = cert.cert.pem();
-    let key_pem = cert.signing_key.serialize_pem();
-
-    // Ensure parent directories exist.
-    if let Some(parent) = Path::new(cert_path).parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            DohListenerError::Tls(format!("failed to create directory for cert: {e}"))
-        })?;
-    }
-    if let Some(parent) = Path::new(key_path).parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            DohListenerError::Tls(format!("failed to create directory for key: {e}"))
-        })?;
-    }
-
-    std::fs::write(cert_path, cert_pem).map_err(|e| {
-        DohListenerError::Tls(format!("failed to write certificate to '{cert_path}': {e}"))
-    })?;
-    std::fs::write(key_path, key_pem)
-        .map_err(|e| DohListenerError::Tls(format!("failed to write key to '{key_path}': {e}")))?;
-
-    Ok(())
 }
 
 #[cfg(test)]

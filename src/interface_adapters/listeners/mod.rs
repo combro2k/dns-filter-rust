@@ -3,6 +3,7 @@ pub mod doh;
 pub mod doq;
 pub mod dot;
 pub mod http;
+pub mod tls;
 
 use std::io;
 use std::net::SocketAddr;
