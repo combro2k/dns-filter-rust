@@ -126,6 +126,9 @@ pub struct TlsSocketConfig {
     pub addresses: Vec<String>,
     pub port: u16,
     pub tls: TlsConfig,
+    /// Optional Bearer token required for inbound requests (DoH only).
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -327,6 +330,9 @@ pub struct UpstreamServer {
     pub protocol: String,
     #[serde(default)]
     pub address: String,
+    /// HTTP authentication for `protocol: "doh"` upstream servers.
+    /// Supports Bearer token (`token`) or Basic (`username` + `password`).
+    pub authentication: Option<ZoneServerAuthenticationConfig>,
     pub max_hops: Option<u8>,
     /// IP family restriction for iterative resolution: `"ipv4"` (IPv4 only),
     /// `"ipv6"` (IPv6 only), or omit for both families (default).

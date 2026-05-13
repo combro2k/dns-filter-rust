@@ -1,6 +1,6 @@
 # dns-filter
 
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/) [![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#license) [![Version](https://img.shields.io/badge/version-2.0.6-green)](./CHANGELOG.md)
+[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/) [![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#license) [![Version](https://img.shields.io/badge/version-2.0.7-green)](./CHANGELOG.md)
 
 **dns-filter** is a high-performance, security-first DNS filtering service written in Rust. It acts as a sophisticated intermediary DNS server that filters queries against blocklists and allowlists, routes requests to zone-specific resolvers, serves authoritative DNS for local zones, and provides recursive DNS resolution with DNSSEC validation.
 
@@ -248,8 +248,8 @@ dig @127.0.0.1 ads.example.com  # if "ads.example.com" is in a blocklist
 # DoT with dig (if support compiled in):
 dig +tls @dns-filter.example.com example.com
 
-# DoH with curl:
-curl "https://dns-filter.example.com/dns-query?name=example.com&type=A"
+# DoH with kdig:
+kdig +https @dns-filter.example.com -p 443 example.com A
 
 # Check metrics
 curl http://127.0.0.1:9100/metrics
@@ -1029,6 +1029,9 @@ listen:
     tls:
       cert_path: "/etc/ssl/certs/dns-filter.crt"
       key_path: "/etc/ssl/private/dns-filter.key"
+      autogenerate: false  # auto-generate self-signed certs if missing
+    # Optional: require Bearer token for inbound DoH queries
+    # auth_token: "my-secret-token"
   
   doq:
     enabled: false
@@ -1083,6 +1086,7 @@ listen:
     tls:
       cert_path: "/etc/ssl/certs/dns-filter.crt"
       key_path: "/etc/ssl/private/dns-filter.key"
+    # auth_token: "my-secret-token"  # Optional: require Bearer token
 ```
 
 **Restricted to Loopback (Local Development):**
@@ -2025,8 +2029,13 @@ dig @127.0.0.1 +dnssec example.com
 # Requires special tools (dig +tls, or kdig, etc.)
 # Most client tools don't support DoT directly
 
-# Test DoH with curl
-curl "http://127.0.0.1:8080/dns-query?name=example.com&type=A"
+# Test DoH with curl (POST with wire-format body)
+curl -sk --http2 -H 'Content-Type: application/dns-message' \
+  --data-binary @<(printf '\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x01\x00\x01') \
+  'https://127.0.0.1:443/dns-query' | xxd
+
+# Test DoH with kdig
+kdig +https @127.0.0.1 -p 443 example.com A
 
 # Check metrics
 curl http://127.0.0.1:9100/metrics | grep dns
@@ -2523,6 +2532,6 @@ This project is licensed under the MIT License and/or Apache License 2.0. See th
 
 ---
 
-**Last Updated:** May 12, 2026  
-**Current Version:** 2.0.6  
+**Last Updated:** May 13, 2026  
+**Current Version:** 2.0.7  
 **Status:** Stable with experimental zone authority and draft WASM plugin features

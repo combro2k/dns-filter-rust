@@ -22,6 +22,9 @@ listen:
       cert_path: "/etc/dns-filter/cert.pem"
       key_path: "/etc/dns-filter/key.pem"
       autogenerate: true
+    # Optional Bearer token required for inbound DoH queries.
+    # When set, clients must include "Authorization: Bearer <token>" in requests.
+    # auth_token: "my-secret-token"
   doq:
     enabled: false
     addresses:

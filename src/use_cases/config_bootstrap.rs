@@ -328,7 +328,9 @@ fn build_zone_upstream_resolver_group(
         bail!("at least one enabled upstream server is required");
     }
 
-    let needs_bootstrap = servers.iter().any(|s| s.protocol == "dot");
+    let needs_bootstrap = servers
+        .iter()
+        .any(|s| s.protocol == "dot" || s.protocol == "doh");
     let bootstrap_addrs = if needs_bootstrap {
         parse_bootstrap_resolvers(bootstrap_resolvers)?
     } else {
@@ -366,7 +368,12 @@ fn build_single_zone_upstream_resolver(
                 true,
                 server.authentication.as_ref(),
             )?;
-            Ok(Arc::new(DnsHttpsClient::new(server.address.clone(), auth)))
+            let client =
+                DnsHttpsClient::new(server.address.clone(), auth)
+                    .map_err(|e| anyhow!("invalid DoH zone server '{}': {e}", server.address))?;
+            Ok(Arc::new(
+                client.with_bootstrap_resolvers(bootstrap_resolvers.to_vec()),
+            ))
         }
         "recursive" => {
             let max_hops = server.max_hops.unwrap_or(DEFAULT_MAX_HOPS);
@@ -413,7 +420,9 @@ fn build_upstream_resolver_group(
         bail!("at least one enabled upstream server is required");
     }
 
-    let needs_bootstrap = enabled_servers.iter().any(|s| s.protocol == "dot");
+    let needs_bootstrap = enabled_servers
+        .iter()
+        .any(|s| s.protocol == "dot" || s.protocol == "doh");
     let bootstrap_resolvers = if needs_bootstrap {
         parse_bootstrap_resolvers(bootstrap_resolvers)?
     } else {
@@ -444,6 +453,15 @@ fn build_single_upstream_resolver(
                 client.with_bootstrap_resolvers(bootstrap_resolvers.to_vec()),
             ))
         }
+        "doh" => {
+            let auth =
+                validate_server_auth("upstream", "doh", true, server.authentication.as_ref())?;
+            let client = DnsHttpsClient::new(server.address.clone(), auth)
+                .map_err(|e| anyhow!("invalid DoH upstream '{}': {e}", server.address))?;
+            Ok(Arc::new(
+                client.with_bootstrap_resolvers(bootstrap_resolvers.to_vec()),
+            ))
+        }
         "recursive" => {
             let max_hops = server.max_hops.unwrap_or(DEFAULT_MAX_HOPS);
             let nameserver_ip_family = match server.nameserver_ip_family.as_deref() {
@@ -467,7 +485,7 @@ fn build_single_upstream_resolver(
             )))
         }
         other => bail!(
-            "unsupported upstream protocol: {other}; supported values are: dns, dot, recursive"
+            "unsupported upstream protocol: {other}; supported values are: dns, dot, doh, recursive"
         ),
     }
 }
@@ -611,8 +629,8 @@ mod tests {
     fn build_upstream_resolver_rejects_unknown_protocol() {
         let config = base_config(vec![UpstreamServer {
             enabled: true,
-            protocol: "doh".into(),
-            address: "https://dns.example.com/dns-query".into(),
+            protocol: "quic".into(),
+            address: "quic://dns.example.com".into(),
             ..Default::default()
         }]);
 
@@ -620,6 +638,52 @@ mod tests {
         assert!(result.is_err());
         let error = result.err().expect("expected error");
         assert!(error.to_string().contains("unsupported upstream protocol"));
+    }
+
+    #[test]
+    fn build_upstream_resolver_accepts_doh_server() {
+        let config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "doh".into(),
+            address: "https://dns.example.com/dns-query".into(),
+            ..Default::default()
+        }]);
+
+        let result = build_upstream_resolver(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn build_upstream_resolver_accepts_doh_server_with_bearer_auth() {
+        let config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "doh".into(),
+            address: "https://dns.example.com/dns-query".into(),
+            authentication: Some(ZoneServerAuthenticationConfig {
+                token: Some("secret-token".into()),
+                username: None,
+                password: None,
+            }),
+            ..Default::default()
+        }]);
+
+        let result = build_upstream_resolver(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn build_upstream_resolver_rejects_doh_with_bad_url() {
+        let config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "doh".into(),
+            address: "http://not-https.example.com/dns-query".into(),
+            ..Default::default()
+        }]);
+
+        let result = build_upstream_resolver(&config);
+        assert!(result.is_err());
+        let error = result.err().expect("expected error");
+        assert!(error.to_string().contains("invalid DoH upstream"));
     }
 
     #[test]

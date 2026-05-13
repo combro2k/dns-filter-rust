@@ -2,7 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.0.7] - 2026-05-13
+
+### Added
+- **DoH inbound listener**: DNS-over-HTTPS server (RFC 8484) accepting queries on `/dns-query` over HTTPS. Supports POST (`application/dns-message` body) and GET (`?dns=<base64url>`) methods. Accepts both HTTP/1.1 and HTTP/2. Enabled via `listen.doh` with TLS certificate/key configuration.
+- Optional `auth_token` on `listen.doh` (and `TlsSocketConfig` generally): when set, inbound DoH requests must include a `Authorization: Bearer <token>` header. Constant-time token comparison prevents timing side-channel attacks.
+- `protocol: "doh"` support in the generic upstream resolver path (`resolvers.upstream.servers[]`), including bootstrap-aware hostname resolution behavior consistent with DoT.
+- Optional `authentication` on global upstream `protocol: "doh"` servers (Bearer token or HTTP Basic).
+
+### Changed
+- Migrated DoH upstream transport from `reqwest` flow to hickory-native HTTP/2 transport using `hickory_net::h2::HttpsClientStream`.
+- DoH upstream now uses connection caching/reuse for the H2 stream and reconnect-on-failure behavior.
+- Enabled Hickory HTTPS feature flags required for native DoH transport (`https-ring`).
+
+### Dependencies
+- Added direct `http` dependency for typed HTTP header construction used by DoH auth injection.
+- Added direct `base64` dependency for Basic authentication header encoding.
 
 ## [2.0.6] - 2026-05-13
 
