@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [2.0.7] - 2026-05-13
 
+### Fixed
+- **Dual-stack socket binding conflict**: on Linux, binding `["0.0.0.0", "::"]` would fail with `EADDRINUSE` because the IPv6 socket defaulted to dual-stack mode (`IPV6_V6ONLY=0`), capturing both IPv4 and IPv6 traffic. All listener sockets (DNS, DoH, HTTP API) now explicitly set `IPV6_V6ONLY=1` on IPv6 sockets via `socket2`, so IPv4 and IPv6 bind independently.
+
 ### Added
 - **DoH inbound listener**: DNS-over-HTTPS server (RFC 8484) accepting queries on `/dns-query` over HTTPS. Supports POST (`application/dns-message` body) and GET (`?dns=<base64url>`) methods. Accepts both HTTP/1.1 and HTTP/2. Enabled via `listen.doh` with TLS certificate/key configuration.
 - Optional `auth_token` on `listen.doh` (and `TlsSocketConfig` generally): when set, inbound DoH requests must include a `Authorization: Bearer <token>` header. Constant-time token comparison prevents timing side-channel attacks.

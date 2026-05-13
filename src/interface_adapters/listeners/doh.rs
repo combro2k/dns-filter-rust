@@ -16,6 +16,7 @@ use tokio_rustls::TlsAcceptor;
 
 use hickory_proto::op::Message;
 
+use super::bind_tcp_tokio;
 use crate::frameworks::config::schema::TlsSocketConfig;
 use crate::use_cases::request_pipeline::{
     build_servfail_response, DnsPipelineRequest, DnsRequestPipeline,
@@ -133,13 +134,10 @@ impl DohServer {
         let mut listeners = Vec::with_capacity(self.bind_addrs.len());
 
         for bind_addr in &self.bind_addrs {
-            let tcp =
-                TcpListener::bind(bind_addr)
-                    .await
-                    .map_err(|e| DohListenerError::BindFailed {
-                        addr: *bind_addr,
-                        source: e,
-                    })?;
+            let tcp = bind_tcp_tokio(*bind_addr).map_err(|e| DohListenerError::BindFailed {
+                addr: *bind_addr,
+                source: e,
+            })?;
 
             tracing::info!(addr = %bind_addr, "DoH listener bound (HTTPS)");
             listeners.push(tcp);

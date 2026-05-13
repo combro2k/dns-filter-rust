@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 
 use hickory_proto::op::Message;
 
+use super::{bind_tcp_tokio, bind_udp_tokio};
 use crate::frameworks::config::schema::SocketConfig;
 use crate::use_cases::request_pipeline::{
     build_servfail_response, DnsPipelineRequest, DnsRequestPipeline,
@@ -104,21 +105,18 @@ impl DnsServer {
 
         for bind_addr in &self.bind_addrs {
             let udp =
-                UdpSocket::bind(bind_addr)
+                bind_udp_tokio(*bind_addr)
                     .await
                     .map_err(|e| DnsListenerError::BindFailed {
                         proto: "UDP",
                         addr: *bind_addr,
                         source: e,
                     })?;
-            let tcp =
-                TcpListener::bind(bind_addr)
-                    .await
-                    .map_err(|e| DnsListenerError::BindFailed {
-                        proto: "TCP",
-                        addr: *bind_addr,
-                        source: e,
-                    })?;
+            let tcp = bind_tcp_tokio(*bind_addr).map_err(|e| DnsListenerError::BindFailed {
+                proto: "TCP",
+                addr: *bind_addr,
+                source: e,
+            })?;
 
             tracing::info!(addr = %bind_addr, "DNS listener bound (UDP + TCP)");
             sockets.push((udp, tcp));

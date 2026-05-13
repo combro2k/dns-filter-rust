@@ -14,6 +14,8 @@ use tokio_util::sync::CancellationToken;
 use crate::entities::query_log::{QueryLog, QueryLogEntry};
 use crate::use_cases::filtering::DomainFilter;
 
+use super::bind_tcp;
+
 /// Shared runtime state accessible by all API handlers.
 pub struct ApiState {
     pub domain_filter: Arc<dyn DomainFilter>,
@@ -114,7 +116,21 @@ pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> Result<
         }
     });
 
-    let server = Server::bind(&addr).serve(make_svc);
+    let std_listener = bind_tcp(addr).unwrap_or_else(|e| {
+        eprintln!("failed to bind HTTP API on {addr}: {e}");
+        std::process::exit(1);
+    });
+    std_listener.set_nonblocking(true).unwrap_or_else(|e| {
+        eprintln!("failed to set non-blocking on HTTP socket: {e}");
+        std::process::exit(1);
+    });
+
+    let server = Server::from_tcp(std_listener)
+        .unwrap_or_else(|e| {
+            eprintln!("failed to create HTTP server from socket: {e}");
+            std::process::exit(1);
+        })
+        .serve(make_svc);
     tracing::info!(address = %addr, "HTTP API server started");
     server.await
 }
