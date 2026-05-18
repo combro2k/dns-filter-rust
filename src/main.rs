@@ -20,6 +20,7 @@ use dns_filter::frameworks::privileges::{
 use dns_filter::frameworks::signal_handler::{setup_shutdown_signals, setup_sighup_handler};
 use dns_filter::interface_adapters::listeners::dns::DnsServer;
 use dns_filter::interface_adapters::listeners::doh::DohServer;
+use dns_filter::interface_adapters::listeners::dot::DotServer;
 use dns_filter::interface_adapters::listeners::http::{start_api_server, ApiState, ApiStats};
 use dns_filter::use_cases::config_bootstrap::{
     build_any_query_policy, build_dns_request_pipeline_full, build_domain_filter,
@@ -343,6 +344,27 @@ async fn run_daemon(config_path: String, debug: bool) {
             None
         };
 
+    // Optionally bind DoT listener while still running as root.
+    let bound_dot_server =
+        if let Some(dot_config) = config.listen.dot.as_ref().filter(|cfg| cfg.enabled) {
+            let dot_server = match DotServer::new(dot_config, Arc::clone(&request_pipeline_slot)) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("failed to initialise DoT server: {e}");
+                    std::process::exit(1);
+                }
+            };
+            match dot_server.bind().await {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!("failed to bind DoT sockets: {e}");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            None
+        };
+
     // Bind control socket while still running as root (before chroot).
     // The fd survives chroot so the accept loop continues to work.
     let control_socket_path = config.socket_path().to_string();
@@ -398,6 +420,9 @@ async fn run_daemon(config_path: String, debug: bool) {
 
     // Spawn DoH serve task if listener was bound.
     let doh_task = bound_doh_server.map(|s| tokio::spawn(s.serve()));
+
+    // Spawn DoT serve task if listener was bound.
+    let dot_task = bound_dot_server.map(|s| tokio::spawn(s.serve()));
 
     let config_path_for_reload = config_path.clone();
     let pipeline_slot_for_reload = Arc::clone(&request_pipeline_slot);
@@ -503,6 +528,25 @@ async fn run_daemon(config_path: String, debug: bool) {
                 }
                 Ok(Err(e)) => {
                     eprintln!("DoH server exited with error: {e}");
+                    std::process::exit(1);
+                }
+                Ok(Ok(())) => {}
+            }
+        }
+        result = async {
+            if let Some(task) = dot_task {
+                task.await
+            } else {
+                std::future::pending().await
+            }
+        } => {
+            match result {
+                Err(e) => {
+                    eprintln!("DoT server task panicked: {e}");
+                    std::process::exit(1);
+                }
+                Ok(Err(e)) => {
+                    eprintln!("DoT server exited with error: {e}");
                     std::process::exit(1);
                 }
                 Ok(Ok(())) => {}

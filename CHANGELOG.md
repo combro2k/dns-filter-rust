@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [2.1.0] - 2026-05-18
 
 ### Added
+- **DNS-over-TLS (DoT) inbound listener**: DNS-over-TLS server (RFC 7858) accepting queries on TCP port 853 (configurable) with mandatory TLS. Uses RFC 7766 length-prefix framing over TLS — no HTTP layer. Enabled via `listen.dot` with TLS certificate/key configuration and optional auto-generation. Supports multiple bind addresses, privilege separation (bind as root, serve as unprivileged), and the shared request pipeline.
 - **Zone discovery**: new `resolvers.zone_discovery` config section that fetches a JSON index endpoint returning `{"zones": [...]}`, filters zones by allowed types (`reverse`, `forward`, `reverse-aggregate`), resolves each zone's `href` relative to the index URL, and loads zone records as authoritative JSON zones. Supports periodic refresh of both index and zone data, Bearer/Basic authentication (reused for all href fetches), and manual zone priority (zones defined in `resolvers.zones` override discovered ones with the same name).
 
 ## [2.0.8] - 2026-05-13
