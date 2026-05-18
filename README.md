@@ -10,6 +10,7 @@
 - **Advanced Filtering**: Blocklists and allowlists with automatic refresh, configurable sinkhole responses, persistent caching
 - **Intelligent Routing**: Zone-based forwarding to route queries by domain suffix to dedicated resolvers
 - **Authoritative Zones** *(Experimental)*: Serve authoritative DNS answers from local JSON zone files with optional URL-based refresh
+- **Zone Discovery**: Automatically import zones from a JSON index endpoint, filtered by type (forward, reverse, reverse-aggregate)
 - **Recursive Resolution**: Full DNS recursion with DNSSEC chain-of-trust validation from IANA root
 - **Load-Balancing**: Multiple upstream resolver strategies (round-robin, random, failover)
 - **Daemon Management**: Subcommand-based CLI (`start`, `stop`, `reload`, `merge-config`) with Unix domain control socket
@@ -287,6 +288,7 @@ resolvers:       # Upstream resolvers and zone forwarding
   strategy: "..."
   servers: [...]
   zones: [...]
+  zone_discovery: [...]  # Auto-import zones from JSON index endpoints
 
 plugins:         # WASM plugins (requires 'plugins' feature)
   - name: "..."
@@ -950,6 +952,100 @@ resolvers:
           address: "https://dns.corp.example/dns-query"
           authentication:
             token: "my-doh-token"
+```
+
+### Zone Discovery
+
+Zone discovery automatically imports authoritative zones from a JSON index endpoint. Instead of manually defining each zone, you point dns-filter at a URL that returns a list of available zones — each zone's data is then fetched via its `href`.
+
+**How it works:**
+1. Fetches the index URL, which returns `{"zones": [{"href": "...", "name": "...", "type": "..."}, ...]}`
+2. Filters zones by `allowed_types` (if configured)
+3. Resolves each zone's `href` relative to the index URL
+4. Loads zone records from the resolved URL as a standard zone JSON document
+5. Registers each zone as an authoritative zone entry
+
+**Key behaviors:**
+- Zones explicitly defined in `resolvers.zones` always take priority over discovered zones with the same name
+- Authentication configured on the discovery entry is reused for all href fetches
+- Both the index and zone data are periodically refreshed using `check_interval`
+- If the index endpoint is unreachable at startup, the source is skipped with a warning (non-fatal)
+
+**Configuration Reference:**
+
+```yaml
+resolvers:
+  zone_discovery:
+    - enabled: true
+      address: "https://router.home.arpa/zones"   # Index endpoint URL (must be http:// or https://)
+      check_interval: "15m"                        # Refresh interval for index and zone data
+      allowed_types:                               # Only import zones matching these types
+        - "reverse"
+        - "forward"
+        - "reverse-aggregate"
+      bypass_filter: true                          # Skip blocklist filtering for all discovered zones
+      fallback_to_default_resolvers: false         # Fall back to global resolvers on failure
+      authentication:                              # Optional: reused for index and all href fetches
+        token: "my-bearer-token"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable/disable this discovery source |
+| `address` | string | *(required)* | URL of the zone index endpoint |
+| `check_interval` | string | — | Refresh interval (e.g. `"15m"`, `"1h"`) |
+| `allowed_types` | list | `[]` (all) | Zone types to import; empty means accept all |
+| `bypass_filter` | bool | `false` | Skip filtering for discovered zones |
+| `fallback_to_default_resolvers` | bool | `false` | Use global resolvers as fallback |
+| `authentication` | object | — | Bearer (`token`) or Basic (`username`+`password`) |
+
+**Zone Index JSON Format:**
+
+The index endpoint must return a JSON object with a `zones` array:
+
+```json
+{
+  "zones": [
+    {
+      "href": "/zone/home.arpa",
+      "name": "home.arpa",
+      "type": "forward"
+    },
+    {
+      "href": "/zone/168.192.in-addr.arpa",
+      "name": "168.192.in-addr.arpa",
+      "type": "reverse"
+    },
+    {
+      "href": "/zone/in-addr.arpa",
+      "name": "in-addr.arpa",
+      "type": "reverse-aggregate"
+    }
+  ]
+}
+```
+
+Each zone's `href` is resolved relative to the index URL. For example, with index URL `https://router.home.arpa/zones` and href `/zone/home.arpa`, the zone data is fetched from `https://router.home.arpa/zone/home.arpa`. Absolute URLs in `href` are also supported.
+
+The zone data at each href must be in the standard [Zone Authority JSON Format](#zone-authority-json-format-experimental).
+
+**Supported zone types:** `forward`, `reverse`, `reverse-aggregate`
+
+**Example with Basic Auth:**
+```yaml
+resolvers:
+  zone_discovery:
+    - enabled: true
+      address: "https://internal-dns.corp/api/zones"
+      check_interval: "30m"
+      allowed_types:
+        - "forward"
+        - "reverse"
+      bypass_filter: true
+      fallback_to_default_resolvers: false
+      authentication:
+        username: "dns-filter"
+        password: "s3cret-token"
 ```
 
 ---

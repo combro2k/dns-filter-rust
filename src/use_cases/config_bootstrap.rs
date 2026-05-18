@@ -22,6 +22,7 @@ use crate::use_cases::request_pipeline::{
 };
 use crate::use_cases::upstream_resolver::{StrategyUpstreamResolver, UpstreamResolver};
 use crate::use_cases::zone_authority::{ZoneAuthorityResolver, ZoneSourceAuth};
+use crate::use_cases::zone_discovery::build_zone_discovery_entries;
 use crate::use_cases::zone_forwarding::{ZoneEntry, ZoneForwardingStage};
 
 use std::sync::atomic::AtomicBool;
@@ -40,13 +41,56 @@ pub fn build_upstream_resolver(config: &DnsFilterConfig) -> Result<Arc<dyn Upstr
 }
 
 pub fn build_zone_entries(config: &DnsFilterConfig) -> Result<Vec<ZoneEntry>> {
-    config
+    let mut entries: Vec<ZoneEntry> = config
         .resolvers
         .zones
         .iter()
         .filter(|zone| zone.enabled)
         .map(|zone| build_zone_entry(zone, &config.resolvers.bootstrap_resolvers))
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+
+    // Collect zone names from manual config (used to skip conflicts in discovery)
+    let manual_zone_names: Vec<String> = config
+        .resolvers
+        .zones
+        .iter()
+        .filter(|zone| zone.enabled)
+        .map(|zone| zone.zone.clone())
+        .collect();
+
+    // Process zone_discovery entries
+    for discovery in &config.resolvers.zone_discovery {
+        if !discovery.enabled {
+            continue;
+        }
+
+        let check_interval = discovery
+            .check_interval
+            .as_deref()
+            .map(|v| {
+                parse_interval(v).map_err(|error| {
+                    anyhow!(
+                        "invalid check_interval for zone_discovery '{}': {} ({error})",
+                        discovery.address,
+                        v
+                    )
+                })
+            })
+            .transpose()?;
+
+        match build_zone_discovery_entries(discovery, &manual_zone_names, check_interval) {
+            Ok(discovered) => entries.extend(discovered),
+            Err(error) => {
+                tracing::warn!(
+                    source = %discovery.address,
+                    error = %error,
+                    "zone_discovery: failed to load zones, skipping source"
+                );
+            }
+        }
+    }
+
+    Ok(entries)
 }
 
 pub fn build_domain_filter(config: &DnsFilterConfig) -> Result<Arc<dyn DomainFilter>> {
@@ -564,6 +608,7 @@ mod tests {
                 strategy: "round_robin".into(),
                 bootstrap_resolvers: vec!["1.1.1.1".into()],
                 zones: Vec::new(),
+                zone_discovery: Vec::new(),
                 servers,
             },
             logging: LoggingConfig {

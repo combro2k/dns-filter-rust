@@ -178,6 +178,23 @@ resolvers:
       fallback_to_default_resolvers: false
       strategy: "failover"
       servers: []
+  # Automatic zone discovery from a JSON index endpoint.
+  # Fetches a URL that returns {"zones": [{"href":..., "name":..., "type":...}, ...]},
+  # filters zones by allowed_types, and follows each href to load zone records.
+  # Zones defined explicitly in 'zones' above take priority over discovered ones.
+  zone_discovery: []
+  # - enabled: false
+  #   address: "https://router.home.arpa/zones"
+  #   check_interval: "15m"
+  #   # Only import zones matching these types: "reverse", "forward", "reverse-aggregate"
+  #   allowed_types:
+  #     - "reverse"
+  #     - "forward"
+  #     - "reverse-aggregate"
+  #   bypass_filter: true
+  #   fallback_to_default_resolvers: false
+  #   # authentication:
+  #   #   token: "my-bearer-token"
 
 # WASM plugins (requires 'plugins' cargo feature)
 # plugins:

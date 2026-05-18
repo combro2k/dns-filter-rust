@@ -261,7 +261,37 @@ pub struct ResolversConfig {
     pub bootstrap_resolvers: Vec<String>,
     #[serde(default)]
     pub zones: Vec<ResolverZoneConfig>,
+    #[serde(default)]
+    pub zone_discovery: Vec<ZoneDiscoveryConfig>,
     pub servers: Vec<UpstreamServer>,
+}
+
+/// Configuration for automatic zone discovery from a JSON index endpoint.
+///
+/// The endpoint must return a JSON object with a `zones` array, where each
+/// entry has `href`, `name`, and `type` fields.  Each discovered zone's `href`
+/// is resolved relative to the index URL and fetched as a standard zone JSON
+/// document.
+#[derive(Debug, Deserialize)]
+pub struct ZoneDiscoveryConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    /// URL of the zone index endpoint (must be `https://` or `http://`).
+    pub address: String,
+    /// How often to re-fetch the index and zone data (e.g. `"15m"`).
+    pub check_interval: Option<String>,
+    /// Only zones with a `type` field matching one of these values will be
+    /// imported.  Supported values: `"reverse"`, `"forward"`, `"reverse-aggregate"`.
+    #[serde(default)]
+    pub allowed_types: Vec<String>,
+    /// Whether discovered zones bypass the blocklist/allowlist filter stage.
+    #[serde(default)]
+    pub bypass_filter: bool,
+    /// If the zone's resolver fails, fall back to the global upstream resolvers.
+    #[serde(default)]
+    pub fallback_to_default_resolvers: bool,
+    /// Optional authentication for the index URL and all zone href fetches.
+    pub authentication: Option<ZoneServerAuthenticationConfig>,
 }
 
 fn default_bootstrap_resolvers() -> Vec<String> {

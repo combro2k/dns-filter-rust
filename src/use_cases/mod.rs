@@ -5,4 +5,5 @@ pub mod reload;
 pub mod request_pipeline;
 pub mod upstream_resolver;
 pub mod zone_authority;
+pub mod zone_discovery;
 pub mod zone_forwarding;

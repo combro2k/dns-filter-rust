@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Zone discovery**: new `resolvers.zone_discovery` config section that fetches a JSON index endpoint returning `{"zones": [...]}`, filters zones by allowed types (`reverse`, `forward`, `reverse-aggregate`), resolves each zone's `href` relative to the index URL, and loads zone records as authoritative JSON zones. Supports periodic refresh of both index and zone data, Bearer/Basic authentication (reused for all href fetches), and manual zone priority (zones defined in `resolvers.zones` override discovered ones with the same name).
+
 ## [2.0.8] - 2026-05-13
 
 ### Fixed
