@@ -623,6 +623,7 @@ mod tests {
             api: None,
             control: None,
             plugins: Vec::new(),
+            mcp: None,
         }
     }
 

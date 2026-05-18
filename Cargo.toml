@@ -13,7 +13,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-hyper = { version = "0.14", features = ["full"] }
+axum = "0.8"
 hickory-proto = { version = "0.26.1", default-features = false, features = ["dnssec-ring"] }
 hickory-net = { version = "0.26.1", features = ["dnssec-ring", "tls-ring", "https-ring", "tokio"] }
 hickory-resolver = { version = "0.26.1", features = ["recursor", "dnssec-ring", "https-ring"] }
@@ -43,6 +43,8 @@ syslog = "6"
 url = "2"
 wasmtime = { version = "44", optional = true }
 rcgen = "0.14.8"
+rmcp = { version = "1.7", features = ["server", "transport-streamable-http-server"] }
+schemars = "1"
 
 [features]
 default = []

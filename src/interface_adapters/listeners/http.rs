@@ -1,12 +1,14 @@
 use std::collections::VecDeque;
-use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Method, Request, Response, Server, StatusCode};
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{middleware, Json, Router};
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -14,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::entities::query_log::{QueryLog, QueryLogEntry};
 use crate::use_cases::filtering::DomainFilter;
 
+use super::auth::bearer_auth_middleware;
 use super::bind_tcp;
 
 /// Shared runtime state accessible by all API handlers.
@@ -70,51 +73,55 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
-fn json_ok<T: Serialize>(data: T) -> Response<Body> {
+fn json_ok<T: Serialize>(data: T) -> Response {
     let body = ApiResponse {
         success: true,
         data: Some(data),
         error: None,
         timestamp: now_unix(),
     };
-    json_response(StatusCode::OK, &body)
+    (StatusCode::OK, Json(body)).into_response()
 }
 
-fn json_error(status: StatusCode, message: &str) -> Response<Body> {
+fn json_error(status: StatusCode, message: &str) -> Response {
     let body = ApiResponse::<()> {
         success: false,
         data: None,
         error: Some(message.to_string()),
         timestamp: now_unix(),
     };
-    json_response(status, &body)
+    (status, Json(body)).into_response()
 }
 
-fn json_response<T: Serialize>(status: StatusCode, body: &T) -> Response<Body> {
-    let json = serde_json::to_string(body).unwrap_or_else(|_| r#"{"success":false}"#.to_string());
-    Response::builder()
-        .status(status)
-        .header("Content-Type", "application/json")
-        .body(Body::from(json))
-        .unwrap_or_else(|_| {
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::empty())
-                .expect("fallback response must be valid")
-        })
-}
+/// Starts the HTTP API server. Returns when the server shuts down.
+pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> anyhow::Result<()> {
+    let token = Arc::new(state.api_token.clone());
+    let shutdown = state.shutdown.clone();
 
-/// Starts the HTTP API server. Returns a handle that resolves when the server shuts down.
-pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> Result<(), hyper::Error> {
-    let make_svc = make_service_fn(move |_conn| {
-        let state = Arc::clone(&state);
-        async move {
-            Ok::<_, Infallible>(service_fn(move |req| {
-                let state = Arc::clone(&state);
-                async move { Ok::<_, Infallible>(handle_request(req, &state).await) }
-            }))
-        }
-    });
+    // Authenticated routes
+    let api_routes = Router::new()
+        .route("/api/v1/reload", post(handle_reload))
+        .route("/api/v1/stop", post(handle_stop))
+        .route("/api/v1/filtering/disable", post(handle_filtering_disable))
+        .route("/api/v1/filtering/enable", post(handle_filtering_enable))
+        .route("/api/v1/filtering/status", get(handle_filtering_status))
+        .route("/api/v1/lists", get(handle_list_all))
+        .route("/api/v1/lists/refresh", post(handle_refresh_all))
+        .route("/api/v1/lists/{name}/refresh", post(handle_refresh_single))
+        .route("/api/v1/lists/{name}/disable", post(handle_disable_list))
+        .route("/api/v1/lists/{name}/enable", post(handle_enable_list))
+        .route("/api/v1/stats", get(handle_stats))
+        .route("/api/v1/query-log", get(handle_query_log))
+        .layer(middleware::from_fn(move |req, next| {
+            let token = Arc::clone(&token);
+            bearer_auth_middleware(req, next, token)
+        }));
+
+    // Unauthenticated routes + merge with authenticated routes
+    let app = Router::new()
+        .route("/health", get(handle_health))
+        .merge(api_routes)
+        .with_state(state);
 
     let std_listener = bind_tcp(addr).unwrap_or_else(|e| {
         eprintln!("failed to bind HTTP API on {addr}: {e}");
@@ -125,113 +132,24 @@ pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> Result<
         std::process::exit(1);
     });
 
-    let server = Server::from_tcp(std_listener)
-        .unwrap_or_else(|e| {
-            eprintln!("failed to create HTTP server from socket: {e}");
-            std::process::exit(1);
-        })
-        .serve(make_svc);
+    let listener = tokio::net::TcpListener::from_std(std_listener).unwrap_or_else(|e| {
+        eprintln!("failed to create tokio listener from socket: {e}");
+        std::process::exit(1);
+    });
+
     tracing::info!(address = %addr, "HTTP API server started");
-    server.await
-}
 
-async fn handle_request(req: Request<Body>, state: &ApiState) -> Response<Body> {
-    let path = req.uri().path().to_string();
-    let method = req.method().clone();
-
-    // Health endpoint — no auth required
-    if path == "/health" && method == Method::GET {
-        return handle_health(state);
-    }
-
-    // All /api/* routes require auth if configured
-    if path.starts_with("/api/") {
-        if let Some(ref token) = state.api_token {
-            match req.headers().get("authorization") {
-                Some(value) => {
-                    let value = value.to_str().unwrap_or("");
-                    let expected = format!("Bearer {token}");
-                    if !constant_time_eq(value.as_bytes(), expected.as_bytes()) {
-                        return json_error(StatusCode::UNAUTHORIZED, "invalid authorization token");
-                    }
-                }
-                None => {
-                    return json_error(StatusCode::UNAUTHORIZED, "authorization header required");
-                }
-            }
-        }
-    }
-
-    route(method, &path, state).await
-}
-
-/// Constant-time comparison to prevent timing side-channel attacks on token
-/// validation. Returns `true` when both slices are equal.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
-}
-
-async fn route(method: Method, path: &str, state: &ApiState) -> Response<Body> {
-    match (method.clone(), path) {
-        // Reload / Stop
-        (Method::POST, "/api/v1/reload") => handle_reload(state).await,
-        (Method::POST, "/api/v1/stop") => handle_stop(state),
-
-        // Global filtering
-        (Method::POST, "/api/v1/filtering/disable") => handle_filtering_disable(state),
-        (Method::POST, "/api/v1/filtering/enable") => handle_filtering_enable(state),
-        (Method::GET, "/api/v1/filtering/status") => handle_filtering_status(state),
-
-        // Lists
-        (Method::GET, "/api/v1/lists") => handle_list_all(state),
-        (Method::POST, "/api/v1/lists/refresh") => handle_refresh_all(state),
-
-        // Stats
-        (Method::GET, "/api/v1/stats") => handle_stats(state),
-
-        // Query log
-        (Method::GET, "/api/v1/query-log") => handle_query_log(state),
-
-        _ => {
-            // Dynamic list routes: /api/v1/lists/{name}/{action}
-            if let Some(rest) = path.strip_prefix("/api/v1/lists/") {
-                return route_list_action(method, rest, state);
-            }
-            json_error(StatusCode::NOT_FOUND, "not found")
-        }
-    }
-}
-
-fn route_list_action(method: Method, rest: &str, state: &ApiState) -> Response<Body> {
-    let parts: Vec<&str> = rest.splitn(2, '/').collect();
-    let name = parts[0];
-
-    if name.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "list name required");
-    }
-
-    let action = parts.get(1).copied().unwrap_or("");
-
-    match (method, action) {
-        (Method::POST, "refresh") => handle_refresh_single(state, name),
-        (Method::POST, "disable") => handle_disable_list(state, name),
-        (Method::POST, "enable") => handle_enable_list(state, name),
-        _ => json_error(
-            StatusCode::NOT_FOUND,
-            "unknown list action; supported: refresh, disable, enable",
-        ),
-    }
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown.cancelled().await;
+        })
+        .await?;
+    Ok(())
 }
 
 // --- Handler implementations ---
 
-fn handle_health(state: &ApiState) -> Response<Body> {
+async fn handle_health(State(state): State<Arc<ApiState>>) -> Response {
     #[derive(Serialize)]
     struct HealthResponse {
         status: &'static str,
@@ -245,7 +163,7 @@ fn handle_health(state: &ApiState) -> Response<Body> {
     })
 }
 
-async fn handle_reload(state: &ApiState) -> Response<Body> {
+async fn handle_reload(State(state): State<Arc<ApiState>>) -> Response {
     #[derive(Serialize)]
     struct ReloadResponse {
         reload_status: &'static str,
@@ -265,7 +183,7 @@ async fn handle_reload(state: &ApiState) -> Response<Body> {
     }
 }
 
-fn handle_stop(state: &ApiState) -> Response<Body> {
+async fn handle_stop(State(state): State<Arc<ApiState>>) -> Response {
     tracing::info!(source = "api", "shutdown requested via API");
     state.shutdown.cancel();
 
@@ -280,7 +198,7 @@ fn handle_stop(state: &ApiState) -> Response<Body> {
     })
 }
 
-fn handle_filtering_disable(state: &ApiState) -> Response<Body> {
+async fn handle_filtering_disable(State(state): State<Arc<ApiState>>) -> Response {
     state.filtering_enabled.store(false, Ordering::Relaxed);
     tracing::info!(source = "api", "global filtering disabled via API");
 
@@ -291,7 +209,7 @@ fn handle_filtering_disable(state: &ApiState) -> Response<Body> {
     json_ok(FilteringState { enabled: false })
 }
 
-fn handle_filtering_enable(state: &ApiState) -> Response<Body> {
+async fn handle_filtering_enable(State(state): State<Arc<ApiState>>) -> Response {
     state.filtering_enabled.store(true, Ordering::Relaxed);
     tracing::info!(source = "api", "global filtering enabled via API");
 
@@ -302,7 +220,7 @@ fn handle_filtering_enable(state: &ApiState) -> Response<Body> {
     json_ok(FilteringState { enabled: true })
 }
 
-fn handle_filtering_status(state: &ApiState) -> Response<Body> {
+async fn handle_filtering_status(State(state): State<Arc<ApiState>>) -> Response {
     #[derive(Serialize)]
     struct FilteringState {
         enabled: bool,
@@ -312,12 +230,12 @@ fn handle_filtering_status(state: &ApiState) -> Response<Body> {
     })
 }
 
-fn handle_list_all(state: &ApiState) -> Response<Body> {
+async fn handle_list_all(State(state): State<Arc<ApiState>>) -> Response {
     let lists = state.domain_filter.list_names();
     json_ok(lists)
 }
 
-fn handle_refresh_all(state: &ApiState) -> Response<Body> {
+async fn handle_refresh_all(State(state): State<Arc<ApiState>>) -> Response {
     let refreshed = state.domain_filter.refresh_all_lists();
     tracing::info!(
         source = "api",
@@ -334,8 +252,11 @@ fn handle_refresh_all(state: &ApiState) -> Response<Body> {
     })
 }
 
-fn handle_refresh_single(state: &ApiState, name: &str) -> Response<Body> {
-    if state.domain_filter.refresh_list(name) {
+async fn handle_refresh_single(
+    State(state): State<Arc<ApiState>>,
+    Path(name): Path<String>,
+) -> Response {
+    if state.domain_filter.refresh_list(&name) {
         tracing::info!(
             source = "api",
             list = %name,
@@ -348,7 +269,7 @@ fn handle_refresh_single(state: &ApiState, name: &str) -> Response<Body> {
             status: &'static str,
         }
         json_ok(RefreshResponse {
-            list: name.to_string(),
+            list: name,
             status: "refreshing",
         })
     } else {
@@ -356,15 +277,18 @@ fn handle_refresh_single(state: &ApiState, name: &str) -> Response<Body> {
     }
 }
 
-fn handle_disable_list(state: &ApiState, name: &str) -> Response<Body> {
-    if state.domain_filter.disable_list(name) {
+async fn handle_disable_list(
+    State(state): State<Arc<ApiState>>,
+    Path(name): Path<String>,
+) -> Response {
+    if state.domain_filter.disable_list(&name) {
         #[derive(Serialize)]
         struct ListState {
             list: String,
             enabled: bool,
         }
         json_ok(ListState {
-            list: name.to_string(),
+            list: name,
             enabled: false,
         })
     } else {
@@ -372,15 +296,18 @@ fn handle_disable_list(state: &ApiState, name: &str) -> Response<Body> {
     }
 }
 
-fn handle_enable_list(state: &ApiState, name: &str) -> Response<Body> {
-    if state.domain_filter.enable_list(name) {
+async fn handle_enable_list(
+    State(state): State<Arc<ApiState>>,
+    Path(name): Path<String>,
+) -> Response {
+    if state.domain_filter.enable_list(&name) {
         #[derive(Serialize)]
         struct ListState {
             list: String,
             enabled: bool,
         }
         json_ok(ListState {
-            list: name.to_string(),
+            list: name,
             enabled: true,
         })
     } else {
@@ -388,7 +315,7 @@ fn handle_enable_list(state: &ApiState, name: &str) -> Response<Body> {
     }
 }
 
-fn handle_stats(state: &ApiState) -> Response<Body> {
+async fn handle_stats(State(state): State<Arc<ApiState>>) -> Response {
     #[derive(Serialize)]
     struct StatsResponse {
         uptime_seconds: u64,
@@ -414,7 +341,7 @@ fn handle_stats(state: &ApiState) -> Response<Body> {
     })
 }
 
-fn handle_query_log(state: &ApiState) -> Response<Body> {
+async fn handle_query_log(State(state): State<Arc<ApiState>>) -> Response {
     let Some(ref query_log) = state.query_log else {
         return json_error(
             StatusCode::NOT_FOUND,
@@ -449,7 +376,7 @@ mod tests {
         let resp = json_ok("hello");
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
-            resp.headers().get("Content-Type").unwrap(),
+            resp.headers().get("content-type").unwrap(),
             "application/json"
         );
     }
@@ -465,20 +392,5 @@ mod tests {
         let stats = ApiStats::new();
         assert_eq!(stats.queries_total.load(Ordering::Relaxed), 0);
         assert_eq!(stats.queries_blocked.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn constant_time_eq_matches_equal_slices() {
-        assert!(constant_time_eq(b"secret", b"secret"));
-    }
-
-    #[test]
-    fn constant_time_eq_rejects_unequal_slices() {
-        assert!(!constant_time_eq(b"secret", b"wrong!"));
-    }
-
-    #[test]
-    fn constant_time_eq_rejects_different_lengths() {
-        assert!(!constant_time_eq(b"short", b"longer"));
     }
 }

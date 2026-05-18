@@ -20,6 +20,7 @@ pub struct DnsFilterConfig {
     pub security: Option<SecurityConfig>,
     pub api: Option<ApiConfig>,
     pub control: Option<ControlConfig>,
+    pub mcp: Option<McpConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -84,6 +85,36 @@ fn default_query_logging_enabled() -> bool {
 
 fn default_max_log_entries() -> usize {
     10_000
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpConfig {
+    pub enabled: bool,
+    #[serde(
+        alias = "address",
+        deserialize_with = "deserialize_addresses",
+        default = "default_public_addresses"
+    )]
+    pub addresses: Vec<String>,
+    #[serde(default = "default_mcp_port")]
+    pub port: u16,
+    pub api_token: Option<String>,
+    pub sse_keep_alive: Option<u64>,
+    #[serde(default = "default_mcp_stateful_mode")]
+    pub stateful_mode: bool,
+    #[serde(default)]
+    pub json_response: bool,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+    pub allowed_hosts: Option<Vec<String>>,
+}
+
+fn default_mcp_port() -> u16 {
+    8953
+}
+
+fn default_mcp_stateful_mode() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]

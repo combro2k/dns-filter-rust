@@ -19,6 +19,7 @@
 - **Config Merging**: `dns-filter merge-config` deep-merges user config with built-in defaults, filling missing sections automatically
 - **Comprehensive Logging**: Syslog (local/remote), file, and stdout with configurable transports (unix, udp, tcp, tls)
 - **Security-First**: Privilege dropping, chroot sandboxing, Linux capabilities, hardened systemd unit
+- **MCP Server**: Model Context Protocol server via Streamable HTTP for AI agent integration
 - **WASM Plugin System** *(Draft)*: Extensible plugin architecture using sandboxed WebAssembly modules (behind `plugins` cargo feature flag)
 - **Observability**: Prometheus-compatible metrics endpoint
 - **Production-Ready**: Systemd and OpenRC init system support with hardening best practices
@@ -32,6 +33,7 @@
 | **DoH** | 443 | ✅ Production | DNS over HTTPS with certificate validation |
 | **DoQ** | 8853 | ✅ Production | DNS over QUIC with certificate validation |
 | **HTTP** | 8080 | ✅ Production | Admin API and metrics |
+| **MCP** | 8953 | ✅ Production | Model Context Protocol via Streamable HTTP |
 
 ## Quick Start
 
@@ -289,6 +291,10 @@ resolvers:       # Upstream resolvers and zone forwarding
   servers: [...]
   zones: [...]
   zone_discovery: [...]  # Auto-import zones from JSON index endpoints
+
+mcp:             # MCP server
+  enabled: false
+  port: 8953
 
 plugins:         # WASM plugins (requires 'plugins' feature)
   - name: "..."
@@ -1110,6 +1116,79 @@ Filter → WASM Plugins → Zone Forwarding → Upstream
 
 ---
 
+## MCP Server *(Model Context Protocol)*
+
+dns-filter includes a built-in [MCP](https://modelcontextprotocol.io/) server that exposes DNS-filter management tools to AI agents and LLM-based workflows. The server uses Streamable HTTP transport.
+
+### Configuration Reference
+
+```yaml
+mcp:
+  enabled: true
+  addresses: ["0.0.0.0", "::"]      # Bind addresses (default: all interfaces)
+  port: 8953                         # Listen port (default: 8953)
+  api_token: "my-secret-token"       # Optional: require Bearer token auth
+  stateful_mode: true                # Enable stateful SSE sessions (default: true)
+  json_response: false               # Use JSON responses instead of SSE (default: false)
+  sse_keep_alive: 30                 # SSE keep-alive interval in seconds (optional)
+  allowed_origins: []                # CORS allowed origins (default: none)
+  allowed_hosts: ["localhost:8953"]  # Allowed Host header values (auto-derived if omitted)
+```
+
+**Fields:**
+- `enabled` (bool, required): Enable/disable the MCP server
+- `addresses` (string or list, optional): Bind addresses (default: `["0.0.0.0", "::"]`)
+- `port` (u16, optional): Listen port (default: `8953`)
+- `api_token` (string, optional): Bearer token for authentication; when set, all requests must include `Authorization: Bearer <token>`
+- `stateful_mode` (bool, optional): Enable stateful SSE sessions for long-lived connections (default: `true`)
+- `json_response` (bool, optional): Return JSON instead of SSE streams (default: `false`)
+- `sse_keep_alive` (u64, optional): SSE keep-alive interval in seconds
+- `allowed_origins` (list, optional): CORS allowed origins (default: empty)
+- `allowed_hosts` (list, optional): Accepted `Host` header values; auto-derived from bind addresses if omitted
+
+### Available Tools
+
+The MCP server exposes the following tools to connected AI agents:
+
+| Tool | Description |
+|------|-------------|
+| `dns_lookup` | Look up a domain and return whether it is allowed, blocked, or neutral |
+| `filter_status` | Get the current global filtering status |
+| `filter_toggle` | Enable or disable global DNS filtering |
+| `list_filters` | List all configured blocklists and allowlists with their status |
+| `refresh_lists` | Trigger a reload of all filter lists from their sources |
+| `get_stats` | Get server statistics (queries, blocked, uptime, cache) |
+| `get_query_log` | Get the recent DNS query log (requires query logging enabled) |
+| `reload_config` | Trigger a configuration reload from disk |
+| `server_health` | Get server health status including version and uptime |
+| `enable_list` | Enable a specific filter list by name |
+| `disable_list` | Disable a specific filter list by name |
+
+### Authentication
+
+When `api_token` is configured, the MCP server shares the same bearer-token authentication middleware used by the HTTP API. All requests must include:
+
+```
+Authorization: Bearer <api_token>
+```
+
+Token comparison uses constant-time equality to prevent timing side-channel attacks.
+
+### Example: Connecting with an MCP Client
+
+```bash
+# Start dns-filter with MCP enabled
+sudo dns-filter start --config /etc/dns-filter/config.yaml
+
+# The MCP endpoint is available at:
+# http://<address>:<port>/mcp
+# e.g., http://localhost:8953/mcp
+```
+
+Any MCP-compatible client (e.g., Claude Desktop, Cursor, or a custom agent) can connect to the Streamable HTTP endpoint and invoke the tools listed above.
+
+---
+
 ## Listening Ports and Protocols
 
 Configure which DNS protocols and ports are exposed.
@@ -1160,6 +1239,11 @@ listen:
     enabled: true
     addresses: ["127.0.0.1", "::1"]  # Loopback-only by default
     port: 9100
+
+# MCP server is configured separately:
+# mcp:
+#   enabled: true
+#   port: 8953
 ```
 
 ### Examples

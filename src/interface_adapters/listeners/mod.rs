@@ -1,9 +1,11 @@
+pub mod auth;
 pub mod dns;
 pub mod doh;
 pub mod doq;
 pub mod dot;
 pub mod handler;
 pub mod http;
+pub mod mcp;
 pub mod tls;
 
 use std::io;

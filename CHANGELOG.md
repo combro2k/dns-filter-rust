@@ -5,12 +5,15 @@ All notable changes to this project will be documented in this file.
 ## [2.2.0] - 2026-05-18
 
 ### Added
+- **MCP (Model Context Protocol) server**: built-in MCP server listener using the `rmcp` crate with Streamable HTTP transport. Exposes DNS filter management tools to AI/LLM clients: `dns_lookup`, `filter_status`, `filter_toggle`, `list_filters`, `refresh_lists`, `enable_list`, `disable_list`, `get_stats`, `get_query_log`, `reload_config`, and `server_health`. Configurable via `mcp:` config section with port (default 8953), bearer token auth, SSE keep-alive, stateful/stateless mode, CORS origins, and DNS rebinding protection (`allowed_hosts`). Endpoint fixed at `/mcp`.
+- **Shared authentication middleware**: extracted bearer token validation into a reusable `auth` module (`interface_adapters::listeners::auth`) with constant-time comparison, shared by both the HTTP API and MCP servers.
 - **DNS-over-TLS (DoT) inbound listener**: DNS-over-TLS server (RFC 7858) accepting queries on TCP port 853 (configurable) with mandatory TLS. Uses RFC 7766 length-prefix framing over TLS — no HTTP layer. Enabled via `listen.dot` with TLS certificate/key configuration and optional auto-generation. Supports multiple bind addresses, privilege separation (bind as root, serve as unprivileged), and the shared request pipeline.
 - **Zone discovery**: new `resolvers.zone_discovery` config section that fetches a JSON index endpoint returning `{"zones": [...]}`, filters zones by allowed types (`reverse`, `forward`, `reverse-aggregate`), resolves each zone's `href` relative to the index URL, and loads zone records as authoritative JSON zones. Supports periodic refresh of both index and zone data, Bearer/Basic authentication (reused for all href fetches), and manual zone priority (zones defined in `resolvers.zones` override discovered ones with the same name).
 - **DNS-over-QUIC (DoQ) inbound listener**: DNS-over-QUIC server (RFC 9250) accepting queries on UDP (configurable port). Enabled via `listen.doq` with TLS certificate/key configuration and optional auto-generation.
 - **Unified hickory-server request handling**: all DNS protocol listeners (UDP, TCP, DoT, DoH, DoQ) now use a single `hickory-server::Server` instance with a shared `HickoryRequestHandler`, replacing per-protocol accept loops and manual framing.
 
 ### Changed
+- **Migrated HTTP API from hyper 0.14 to axum**: replaced raw hyper service with axum `Router`, typed extractors (`State`, `Path`, `Json`), and `axum::serve()` with graceful shutdown. All API endpoints and behavior remain unchanged.
 - **Replaced manual protocol implementations with hickory-server**: DNS UDP/TCP, DoT, DoH, and DoQ listeners are now registered on a single `hickory-server::Server` instead of using custom accept loops, RFC 7766 framing, and hyper HTTP service handling.
 - **Removed DoH authentication**: the `auth_token` field has been removed from `TlsSocketConfig` and DoH configuration. DoH authentication should be handled by a reverse proxy.
 

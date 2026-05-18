@@ -34,6 +34,7 @@ src/
 - DNS over HTTPS (DoH)
 - DNS over QUIC (DoQ)
 - HTTP admin/metrics
+- MCP (Model Context Protocol) via Streamable HTTP
 
 ### Chain of Responsibility Pattern
 - **Placement:** Implemented inside use-case orchestration.

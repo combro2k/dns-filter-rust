@@ -553,11 +553,24 @@ async fn run_daemon(config_path: String, debug: bool) {
     });
 
     // Start the HTTP API server if configured.
+    let mcp_domain_filter = Arc::clone(&domain_filter);
+    let mcp_filtering_enabled = Arc::clone(&filtering_enabled);
+    let mcp_reload_tx = reload_tx.clone();
+
     let api_task = spawn_api_server(
         &config.api,
         domain_filter,
         filtering_enabled,
         reload_tx,
+        shutdown.clone(),
+    );
+
+    // Start the MCP server if configured.
+    let mcp_task = spawn_mcp_server(
+        &config.mcp,
+        mcp_domain_filter,
+        mcp_filtering_enabled,
+        mcp_reload_tx,
         shutdown.clone(),
     );
 
@@ -587,6 +600,17 @@ async fn run_daemon(config_path: String, debug: bool) {
             }
         } => {
             tracing::warn!("HTTP API server exited unexpectedly");
+        }
+        _ = async {
+            if let Some(task) = mcp_task {
+                if let Err(e) = task.await {
+                    tracing::error!("MCP server task panicked: {e}");
+                }
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {
+            tracing::warn!("MCP server exited unexpectedly");
         }
     }
 }
@@ -632,6 +656,40 @@ fn spawn_api_server(
     Some(tokio::spawn(async move {
         if let Err(e) = start_api_server(addr, state).await {
             tracing::error!(error = %e, "HTTP API server failed");
+        }
+    }))
+}
+
+fn spawn_mcp_server(
+    mcp_config: &Option<dns_filter::frameworks::config::schema::McpConfig>,
+    domain_filter: Arc<dyn dns_filter::use_cases::filtering::DomainFilter>,
+    filtering_enabled: Arc<AtomicBool>,
+    reload_tx: tokio::sync::mpsc::Sender<()>,
+    shutdown: CancellationToken,
+) -> Option<tokio::task::JoinHandle<()>> {
+    use dns_filter::interface_adapters::listeners::mcp::{start_mcp_server, McpServerState};
+
+    let mcp_config = mcp_config.as_ref().filter(|c| c.enabled)?;
+
+    let start_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let state = Arc::new(McpServerState {
+        domain_filter,
+        filtering_enabled,
+        query_log: None,
+        reload_tx,
+        start_time,
+        stats: Arc::new(ApiStats::new()),
+        shutdown,
+    });
+
+    let mcp_config = mcp_config.clone();
+    Some(tokio::spawn(async move {
+        if let Err(e) = start_mcp_server(&mcp_config, state).await {
+            tracing::error!(error = %e, "MCP server failed");
         }
     }))
 }

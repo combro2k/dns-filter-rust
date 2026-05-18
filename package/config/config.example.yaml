@@ -48,6 +48,22 @@ listen:
       - "::1"
     port: 9100
 
+# MCP (Model Context Protocol) server for AI/LLM tool integration.
+# Requires the 'mcp' feature flag: cargo build --features mcp
+# mcp:
+#   enabled: false
+#   addresses:
+#     - "0.0.0.0"
+#     - "::"
+#   port: 8953
+#   api_token: "change-me"
+#   sse_keep_alive: 30        # SSE keep-alive ping interval in seconds
+#   stateful_mode: true       # persistent sessions per client
+#   json_response: false      # return JSON instead of SSE (when stateless)
+#   allowed_origins: []       # CORS origins for browser-based clients
+#   # allowed_hosts:          # DNS rebinding protection; auto-derived from addresses if omitted
+#   #   - "dns-filter.local:8953"
+
 blocklists:
   - adguard_base:
       enabled: true
