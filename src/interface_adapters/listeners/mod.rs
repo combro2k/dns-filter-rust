@@ -1,22 +1,34 @@
+#[cfg(any(feature = "http-api", feature = "mcp"))]
 pub mod auth;
 pub mod dns;
+#[cfg(feature = "doh")]
 pub mod doh;
+#[cfg(feature = "doq")]
 pub mod doq;
+#[cfg(feature = "dot")]
 pub mod dot;
 pub mod handler;
+#[cfg(feature = "http-api")]
 pub mod http;
+#[cfg(feature = "mcp")]
 pub mod mcp;
+#[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
 pub mod tls;
 
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
-use rustls::ServerConfig;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{TcpListener, UdpSocket};
 
+#[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
+use rustls::ServerConfig;
+#[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
+use std::sync::Arc;
+
+#[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
 use self::tls::{autogenerate_tls_cert_if_missing, build_tls_server_config, TlsSetupError};
+#[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
 use crate::frameworks::config::schema::TlsConfig;
 
 /// Errors that can occur when setting up listeners.
@@ -33,6 +45,7 @@ pub enum ListenerSetupError {
         addr: SocketAddr,
         source: io::Error,
     },
+    #[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
     #[error("TLS configuration error: {0}")]
     Tls(#[from] TlsSetupError),
     #[error("listener registration error: {0}")]
@@ -66,6 +79,7 @@ pub fn parse_bind_addrs(
 
 /// Builds a [`rustls::ServerConfig`] with the given ALPN protocol for use with
 /// hickory-server listeners. Optionally auto-generates a self-signed certificate.
+#[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
 pub fn build_tls_config_with_alpn(
     tls: &TlsConfig,
     extra_sans: &[String],
@@ -127,4 +141,34 @@ fn configure_socket(socket: &Socket, addr: SocketAddr) -> io::Result<()> {
         socket.set_only_v6(true)?;
     }
     Ok(())
+}
+
+/// Atomic query counters for stats endpoint.
+///
+/// Shared between the HTTP API and MCP server.
+#[cfg(any(feature = "http-api", feature = "mcp"))]
+pub struct ApiStats {
+    pub queries_total: std::sync::atomic::AtomicU64,
+    pub queries_blocked: std::sync::atomic::AtomicU64,
+    pub queries_allowed: std::sync::atomic::AtomicU64,
+    pub queries_passthrough: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(any(feature = "http-api", feature = "mcp"))]
+impl Default for ApiStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(feature = "http-api", feature = "mcp"))]
+impl ApiStats {
+    pub fn new() -> Self {
+        Self {
+            queries_total: std::sync::atomic::AtomicU64::new(0),
+            queries_blocked: std::sync::atomic::AtomicU64::new(0),
+            queries_allowed: std::sync::atomic::AtomicU64::new(0),
+            queries_passthrough: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
 }

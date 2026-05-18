@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,6 +18,7 @@ use crate::use_cases::filtering::DomainFilter;
 
 use super::auth::bearer_auth_middleware;
 use super::bind_tcp;
+pub use super::ApiStats;
 
 /// Shared runtime state accessible by all API handlers.
 pub struct ApiState {
@@ -29,31 +30,6 @@ pub struct ApiState {
     pub start_time: u64,
     pub stats: Arc<ApiStats>,
     pub shutdown: CancellationToken,
-}
-
-/// Atomic query counters for stats endpoint.
-pub struct ApiStats {
-    pub queries_total: AtomicU64,
-    pub queries_blocked: AtomicU64,
-    pub queries_allowed: AtomicU64,
-    pub queries_passthrough: AtomicU64,
-}
-
-impl Default for ApiStats {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ApiStats {
-    pub fn new() -> Self {
-        Self {
-            queries_total: AtomicU64::new(0),
-            queries_blocked: AtomicU64::new(0),
-            queries_allowed: AtomicU64::new(0),
-            queries_passthrough: AtomicU64::new(0),
-        }
-    }
 }
 
 #[derive(Serialize)]
@@ -389,6 +365,7 @@ mod tests {
 
     #[test]
     fn api_stats_starts_at_zero() {
+        use std::sync::atomic::Ordering;
         let stats = ApiStats::new();
         assert_eq!(stats.queries_total.load(Ordering::Relaxed), 0);
         assert_eq!(stats.queries_blocked.load(Ordering::Relaxed), 0);

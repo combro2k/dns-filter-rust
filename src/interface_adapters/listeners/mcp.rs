@@ -19,7 +19,7 @@ use crate::entities::filter::FilterDecision;
 use crate::entities::query_log::QueryLog;
 use crate::frameworks::config::schema::McpConfig;
 use crate::interface_adapters::listeners::auth::bearer_auth_middleware;
-use crate::interface_adapters::listeners::http::ApiStats;
+use crate::interface_adapters::listeners::ApiStats;
 use crate::use_cases::filtering::DomainFilter;
 
 use super::{bind_tcp, parse_bind_addrs};

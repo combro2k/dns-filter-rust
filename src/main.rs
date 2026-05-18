@@ -1,16 +1,19 @@
 use clap::{Parser, Subcommand};
-use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
+#[cfg(any(feature = "http-api", feature = "mcp"))]
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "http-api")]
 use dns_filter::entities::query_log::QueryLog;
 use dns_filter::frameworks::config::loader::load_config;
 use dns_filter::frameworks::config::merger::merge_with_example;
-use dns_filter::frameworks::config::schema::{ApiConfig, DEFAULT_CONTROL_SOCKET_PATH};
+#[cfg(feature = "http-api")]
+use dns_filter::frameworks::config::schema::ApiConfig;
+use dns_filter::frameworks::config::schema::DEFAULT_CONTROL_SOCKET_PATH;
 use dns_filter::frameworks::control_client;
 use dns_filter::frameworks::control_socket::ControlServer;
 use dns_filter::frameworks::logging;
@@ -18,16 +21,27 @@ use dns_filter::frameworks::privileges::{
     drop_privileges, PrivilegeDropConfig, DEFAULT_CHROOT_DIR, DEFAULT_GROUP, DEFAULT_USER,
 };
 use dns_filter::frameworks::signal_handler::{setup_shutdown_signals, setup_sighup_handler};
+#[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
+use dns_filter::interface_adapters::listeners::build_tls_config_with_alpn;
 use dns_filter::interface_adapters::listeners::handler::HickoryRequestHandler;
-use dns_filter::interface_adapters::listeners::http::{start_api_server, ApiState, ApiStats};
-use dns_filter::interface_adapters::listeners::{
-    bind_tcp_tokio, bind_udp_tokio, build_tls_config_with_alpn, parse_bind_addrs,
-};
+#[cfg(feature = "http-api")]
+use dns_filter::interface_adapters::listeners::http::{start_api_server, ApiState};
+#[cfg(any(feature = "http-api", feature = "mcp"))]
+use dns_filter::interface_adapters::listeners::ApiStats;
+use dns_filter::interface_adapters::listeners::{bind_tcp_tokio, bind_udp_tokio, parse_bind_addrs};
 use dns_filter::use_cases::config_bootstrap::{
     build_any_query_policy, build_dns_request_pipeline_full, build_domain_filter,
     build_upstream_resolver, build_zone_entries, validate_config,
 };
 use dns_filter::use_cases::reload::reload_config;
+#[cfg(feature = "http-api")]
+use std::net::SocketAddr;
+#[cfg(feature = "http-api")]
+use std::sync::Mutex as StdMutex;
+#[cfg(feature = "http-api")]
+use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(all(feature = "mcp", not(feature = "http-api")))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/dns-filter/config.yaml";
 
@@ -343,6 +357,7 @@ async fn run_daemon(config_path: String, debug: bool) {
     }
 
     // --- Register DoT listeners ---
+    #[cfg(feature = "dot")]
     if let Some(dot_config) = config.listen.dot.as_ref().filter(|cfg| cfg.enabled) {
         let dot_addrs = match parse_bind_addrs(&dot_config.addresses, dot_config.port) {
             Ok(addrs) => addrs,
@@ -380,6 +395,7 @@ async fn run_daemon(config_path: String, debug: bool) {
     }
 
     // --- Register DoH listeners ---
+    #[cfg(feature = "doh")]
     if let Some(doh_config) = config.listen.doh.as_ref().filter(|cfg| cfg.enabled) {
         let doh_addrs = match parse_bind_addrs(&doh_config.addresses, doh_config.port) {
             Ok(addrs) => addrs,
@@ -419,6 +435,7 @@ async fn run_daemon(config_path: String, debug: bool) {
     }
 
     // --- Register DoQ listeners ---
+    #[cfg(feature = "doq")]
     if let Some(doq_config) = config.listen.doq.as_ref().filter(|cfg| cfg.enabled) {
         let doq_addrs = match parse_bind_addrs(&doq_config.addresses, doq_config.port) {
             Ok(addrs) => addrs,
@@ -553,10 +570,15 @@ async fn run_daemon(config_path: String, debug: bool) {
     });
 
     // Start the HTTP API server if configured.
+    // Clone state for MCP before API takes ownership.
+    #[cfg(feature = "mcp")]
     let mcp_domain_filter = Arc::clone(&domain_filter);
+    #[cfg(feature = "mcp")]
     let mcp_filtering_enabled = Arc::clone(&filtering_enabled);
+    #[cfg(feature = "mcp")]
     let mcp_reload_tx = reload_tx.clone();
 
+    #[cfg(feature = "http-api")]
     let api_task = spawn_api_server(
         &config.api,
         domain_filter,
@@ -564,8 +586,11 @@ async fn run_daemon(config_path: String, debug: bool) {
         reload_tx,
         shutdown.clone(),
     );
+    #[cfg(not(feature = "http-api"))]
+    let api_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // Start the MCP server if configured.
+    #[cfg(feature = "mcp")]
     let mcp_task = spawn_mcp_server(
         &config.mcp,
         mcp_domain_filter,
@@ -573,6 +598,8 @@ async fn run_daemon(config_path: String, debug: bool) {
         mcp_reload_tx,
         shutdown.clone(),
     );
+    #[cfg(not(feature = "mcp"))]
+    let mcp_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // Wait for shutdown or unexpected task exit.
     tokio::select! {
@@ -615,6 +642,7 @@ async fn run_daemon(config_path: String, debug: bool) {
     }
 }
 
+#[cfg(feature = "http-api")]
 fn spawn_api_server(
     api_config: &Option<ApiConfig>,
     domain_filter: Arc<dyn dns_filter::use_cases::filtering::DomainFilter>,
@@ -660,6 +688,7 @@ fn spawn_api_server(
     }))
 }
 
+#[cfg(feature = "mcp")]
 fn spawn_mcp_server(
     mcp_config: &Option<dns_filter::frameworks::config::schema::McpConfig>,
     domain_filter: Arc<dyn dns_filter::use_cases::filtering::DomainFilter>,
