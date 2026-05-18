@@ -126,9 +126,6 @@ pub struct TlsSocketConfig {
     pub addresses: Vec<String>,
     pub port: u16,
     pub tls: TlsConfig,
-    /// Optional Bearer token required for inbound requests (DoH only).
-    #[serde(default)]
-    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

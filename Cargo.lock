@@ -714,10 +714,10 @@ dependencies = [
  "caps",
  "chrono",
  "clap",
- "futures",
  "hickory-net",
  "hickory-proto",
  "hickory-resolver",
+ "hickory-server",
  "hostname 0.4.2",
  "http 1.4.0",
  "hyper 0.14.32",
@@ -877,7 +877,6 @@ checksum = "8b147ee9d1f6d097cef9ce628cd2ee62288d963e16fb287bd9286455b241382d"
 dependencies = [
  "futures-channel",
  "futures-core",
- "futures-executor",
  "futures-io",
  "futures-sink",
  "futures-task",
@@ -899,17 +898,6 @@ name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
-
-[[package]]
-name = "futures-executor"
-version = "0.3.32"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baf29c38818342a3b26b5b923639e7b1f4a61fc5e76102d4b1981c6dc7a7579d"
-dependencies = [
- "futures-core",
- "futures-task",
- "futures-util",
-]
 
 [[package]]
 name = "futures-io"
@@ -1147,6 +1135,8 @@ dependencies = [
  "jni",
  "lru-cache",
  "parking_lot",
+ "pin-project-lite",
+ "quinn",
  "rand 0.10.1",
  "ring",
  "rustls",
@@ -1176,6 +1166,7 @@ dependencies = [
  "rand 0.10.1",
  "ring",
  "rustls-pki-types",
+ "serde",
  "thiserror 2.0.18",
  "time",
  "tinyvec",
@@ -1202,14 +1193,44 @@ dependencies = [
  "ndk-context",
  "once_cell",
  "parking_lot",
+ "quinn",
  "rand 0.10.1",
  "resolv-conf",
  "rustls",
+ "serde",
  "smallvec",
  "system-configuration",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
+ "tracing",
+]
+
+[[package]]
+name = "hickory-server"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "130236ba6abba90da6a7acf7a87b27d862b592c3145dc74bc47bf86d8ff198ec"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "cfg-if",
+ "data-encoding",
+ "futures-util",
+ "h2 0.4.14",
+ "hickory-net",
+ "hickory-proto",
+ "hickory-resolver",
+ "http 1.4.0",
+ "ipnet",
+ "prefix-trie",
+ "rustls",
+ "serde",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
  "tracing",
 ]
 
@@ -3097,6 +3118,7 @@ version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
 dependencies = [
+ "log",
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",
@@ -3217,6 +3239,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]

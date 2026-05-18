@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -18,10 +18,11 @@ use dns_filter::frameworks::privileges::{
     drop_privileges, PrivilegeDropConfig, DEFAULT_CHROOT_DIR, DEFAULT_GROUP, DEFAULT_USER,
 };
 use dns_filter::frameworks::signal_handler::{setup_shutdown_signals, setup_sighup_handler};
-use dns_filter::interface_adapters::listeners::dns::DnsServer;
-use dns_filter::interface_adapters::listeners::doh::DohServer;
-use dns_filter::interface_adapters::listeners::dot::DotServer;
+use dns_filter::interface_adapters::listeners::handler::HickoryRequestHandler;
 use dns_filter::interface_adapters::listeners::http::{start_api_server, ApiState, ApiStats};
+use dns_filter::interface_adapters::listeners::{
+    bind_tcp_tokio, bind_udp_tokio, build_tls_config_with_alpn, parse_bind_addrs,
+};
 use dns_filter::use_cases::config_bootstrap::{
     build_any_query_policy, build_dns_request_pipeline_full, build_domain_filter,
     build_upstream_resolver, build_zone_entries, validate_config,
@@ -302,68 +303,157 @@ async fn run_daemon(config_path: String, debug: bool) {
     // Wrap pipeline in Arc<Mutex<Arc<>>> to allow atomic state swapping on reload.
     let request_pipeline_slot = Arc::new(Mutex::new(Arc::new(request_pipeline)));
 
-    let server = match DnsServer::new(dns_config, Arc::clone(&request_pipeline_slot)) {
-        Ok(s) => s,
+    // Create the unified hickory-server with a single request handler.
+    let handler = HickoryRequestHandler::new(Arc::clone(&request_pipeline_slot));
+    let mut server = hickory_server::server::Server::new(handler);
+
+    // Default timeout for all protocol handshakes.
+    let handshake_timeout = Duration::from_secs(5);
+    // Response buffer size for TCP connections.
+    let tcp_response_buffer_size = 65535;
+
+    // --- Register DNS (UDP + TCP) listeners ---
+    let dns_addrs = match parse_bind_addrs(&dns_config.addresses, dns_config.port) {
+        Ok(addrs) => addrs,
         Err(e) => {
-            eprintln!("failed to initialise DNS server: {e}");
+            eprintln!("failed to parse DNS bind addresses: {e}");
             std::process::exit(1);
         }
     };
+    for addr in &dns_addrs {
+        let udp = match bind_udp_tokio(*addr).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("failed to bind UDP on {addr}: {e}");
+                std::process::exit(1);
+            }
+        };
+        tracing::info!(addr = %addr, "DNS UDP listener bound");
+        server.register_socket(udp);
 
-    // Bind sockets while still running as root (for privileged ports).
-    let bound_server = match server.bind().await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("failed to bind DNS sockets: {e}");
-            std::process::exit(1);
-        }
-    };
+        let tcp = match bind_tcp_tokio(*addr) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("failed to bind TCP on {addr}: {e}");
+                std::process::exit(1);
+            }
+        };
+        tracing::info!(addr = %addr, "DNS TCP listener bound");
+        server.register_listener(tcp, handshake_timeout, tcp_response_buffer_size);
+    }
 
-    // Optionally bind DoH listener while still running as root.
-    let bound_doh_server =
-        if let Some(doh_config) = config.listen.doh.as_ref().filter(|cfg| cfg.enabled) {
-            let doh_server = match DohServer::new(
-                doh_config,
-                Arc::clone(&request_pipeline_slot),
-                doh_config.auth_token.clone(),
+    // --- Register DoT listeners ---
+    if let Some(dot_config) = config.listen.dot.as_ref().filter(|cfg| cfg.enabled) {
+        let dot_addrs = match parse_bind_addrs(&dot_config.addresses, dot_config.port) {
+            Ok(addrs) => addrs,
+            Err(e) => {
+                eprintln!("failed to parse DoT bind addresses: {e}");
+                std::process::exit(1);
+            }
+        };
+        let tls_config =
+            match build_tls_config_with_alpn(&dot_config.tls, &dot_config.addresses, b"dot") {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("failed to configure DoT TLS: {e}");
+                    std::process::exit(1);
+                }
+            };
+        for addr in &dot_addrs {
+            let tcp = match bind_tcp_tokio(*addr) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("failed to bind DoT on {addr}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            tracing::info!(addr = %addr, "DoT listener bound");
+            if let Err(e) = server.register_tls_listener_with_tls_config(
+                tcp,
+                handshake_timeout,
+                Arc::clone(&tls_config),
             ) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("failed to initialise DoH server: {e}");
-                    std::process::exit(1);
-                }
-            };
-            match doh_server.bind().await {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    eprintln!("failed to bind DoH sockets: {e}");
-                    std::process::exit(1);
-                }
+                eprintln!("failed to register DoT listener on {addr}: {e}");
+                std::process::exit(1);
             }
-        } else {
-            None
-        };
+        }
+    }
 
-    // Optionally bind DoT listener while still running as root.
-    let bound_dot_server =
-        if let Some(dot_config) = config.listen.dot.as_ref().filter(|cfg| cfg.enabled) {
-            let dot_server = match DotServer::new(dot_config, Arc::clone(&request_pipeline_slot)) {
-                Ok(s) => s,
+    // --- Register DoH listeners ---
+    if let Some(doh_config) = config.listen.doh.as_ref().filter(|cfg| cfg.enabled) {
+        let doh_addrs = match parse_bind_addrs(&doh_config.addresses, doh_config.port) {
+            Ok(addrs) => addrs,
+            Err(e) => {
+                eprintln!("failed to parse DoH bind addresses: {e}");
+                std::process::exit(1);
+            }
+        };
+        let tls_config =
+            match build_tls_config_with_alpn(&doh_config.tls, &doh_config.addresses, b"h2") {
+                Ok(c) => c,
                 Err(e) => {
-                    eprintln!("failed to initialise DoT server: {e}");
+                    eprintln!("failed to configure DoH TLS: {e}");
                     std::process::exit(1);
                 }
             };
-            match dot_server.bind().await {
-                Ok(s) => Some(s),
+        for addr in &doh_addrs {
+            let tcp = match bind_tcp_tokio(*addr) {
+                Ok(s) => s,
                 Err(e) => {
-                    eprintln!("failed to bind DoT sockets: {e}");
+                    eprintln!("failed to bind DoH on {addr}: {e}");
                     std::process::exit(1);
                 }
+            };
+            tracing::info!(addr = %addr, "DoH listener bound");
+            if let Err(e) = server.register_https_listener_with_tls_config(
+                tcp,
+                handshake_timeout,
+                Arc::clone(&tls_config),
+                None,
+                "/dns-query".to_string(),
+            ) {
+                eprintln!("failed to register DoH listener on {addr}: {e}");
+                std::process::exit(1);
             }
-        } else {
-            None
+        }
+    }
+
+    // --- Register DoQ listeners ---
+    if let Some(doq_config) = config.listen.doq.as_ref().filter(|cfg| cfg.enabled) {
+        let doq_addrs = match parse_bind_addrs(&doq_config.addresses, doq_config.port) {
+            Ok(addrs) => addrs,
+            Err(e) => {
+                eprintln!("failed to parse DoQ bind addresses: {e}");
+                std::process::exit(1);
+            }
         };
+        let tls_config =
+            match build_tls_config_with_alpn(&doq_config.tls, &doq_config.addresses, b"doq") {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("failed to configure DoQ TLS: {e}");
+                    std::process::exit(1);
+                }
+            };
+        for addr in &doq_addrs {
+            let udp = match bind_udp_tokio(*addr).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("failed to bind DoQ on {addr}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            tracing::info!(addr = %addr, "DoQ listener bound");
+            if let Err(e) = server.register_quic_listener_and_tls_config(
+                udp,
+                handshake_timeout,
+                Arc::clone(&tls_config),
+            ) {
+                eprintln!("failed to register DoQ listener on {addr}: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     // Bind control socket while still running as root (before chroot).
     // The fd survives chroot so the accept loop continues to work.
@@ -397,9 +487,8 @@ async fn run_daemon(config_path: String, debug: bool) {
         std::process::exit(1);
     }
 
-    // Shared cancellation token for graceful shutdown from any source
-    // (SIGTERM, SIGINT, control socket stop, API stop).
-    let shutdown = CancellationToken::new();
+    // Use the hickory-server's built-in shutdown token for unified lifecycle.
+    let shutdown = server.shutdown_token().clone();
 
     // Set up SIGTERM/SIGINT handlers for graceful shutdown.
     if let Err(e) = setup_shutdown_signals(shutdown.clone()) {
@@ -415,14 +504,6 @@ async fn run_daemon(config_path: String, debug: bool) {
             std::process::exit(1);
         }
     };
-
-    let server_task = tokio::spawn(bound_server.serve());
-
-    // Spawn DoH serve task if listener was bound.
-    let doh_task = bound_doh_server.map(|s| tokio::spawn(s.serve()));
-
-    // Spawn DoT serve task if listener was bound.
-    let dot_task = bound_dot_server.map(|s| tokio::spawn(s.serve()));
 
     let config_path_for_reload = config_path.clone();
     let pipeline_slot_for_reload = Arc::clone(&request_pipeline_slot);
@@ -485,15 +566,8 @@ async fn run_daemon(config_path: String, debug: bool) {
         _ = shutdown.cancelled() => {
             tracing::info!("shutdown signal received, exiting");
         }
-        result = server_task => {
-            if let Err(e) = result {
-                eprintln!("DNS server task panicked: {e}");
-                std::process::exit(1);
-            }
-            if let Err(e) = result.unwrap() {
-                eprintln!("DNS server exited with error: {e}");
-                std::process::exit(1);
-            }
+        _ = server.block_until_done() => {
+            tracing::warn!("DNS server exited unexpectedly");
         }
         _ = reload_task => {
             eprintln!("Reload task exited unexpectedly");
@@ -513,44 +587,6 @@ async fn run_daemon(config_path: String, debug: bool) {
             }
         } => {
             tracing::warn!("HTTP API server exited unexpectedly");
-        }
-        result = async {
-            if let Some(task) = doh_task {
-                task.await
-            } else {
-                std::future::pending().await
-            }
-        } => {
-            match result {
-                Err(e) => {
-                    eprintln!("DoH server task panicked: {e}");
-                    std::process::exit(1);
-                }
-                Ok(Err(e)) => {
-                    eprintln!("DoH server exited with error: {e}");
-                    std::process::exit(1);
-                }
-                Ok(Ok(())) => {}
-            }
-        }
-        result = async {
-            if let Some(task) = dot_task {
-                task.await
-            } else {
-                std::future::pending().await
-            }
-        } => {
-            match result {
-                Err(e) => {
-                    eprintln!("DoT server task panicked: {e}");
-                    std::process::exit(1);
-                }
-                Ok(Err(e)) => {
-                    eprintln!("DoT server exited with error: {e}");
-                    std::process::exit(1);
-                }
-                Ok(Ok(())) => {}
-            }
         }
     }
 }

@@ -2,14 +2,80 @@ pub mod dns;
 pub mod doh;
 pub mod doq;
 pub mod dot;
+pub mod handler;
 pub mod http;
 pub mod tls;
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
+use rustls::ServerConfig;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{TcpListener, UdpSocket};
+
+use self::tls::{autogenerate_tls_cert_if_missing, build_tls_server_config, TlsSetupError};
+use crate::frameworks::config::schema::TlsConfig;
+
+/// Errors that can occur when setting up listeners.
+#[derive(Debug, thiserror::Error)]
+pub enum ListenerSetupError {
+    #[error("invalid bind address '{addr}': {source}")]
+    InvalidAddress {
+        addr: String,
+        source: std::net::AddrParseError,
+    },
+    #[error("failed to bind {proto} on {addr}: {source}")]
+    BindFailed {
+        proto: &'static str,
+        addr: SocketAddr,
+        source: io::Error,
+    },
+    #[error("TLS configuration error: {0}")]
+    Tls(#[from] TlsSetupError),
+    #[error("listener registration error: {0}")]
+    Registration(String),
+}
+
+/// Parses address strings and a port into a list of [`SocketAddr`]s.
+///
+/// IPv6 addresses are automatically wrapped in brackets before parsing.
+pub fn parse_bind_addrs(
+    addresses: &[String],
+    port: u16,
+) -> Result<Vec<SocketAddr>, ListenerSetupError> {
+    let mut result = Vec::with_capacity(addresses.len());
+    for addr in addresses {
+        let raw = if addr.contains(':') {
+            format!("[{addr}]:{port}")
+        } else {
+            format!("{addr}:{port}")
+        };
+        let parsed = raw
+            .parse::<SocketAddr>()
+            .map_err(|e| ListenerSetupError::InvalidAddress {
+                addr: raw,
+                source: e,
+            })?;
+        result.push(parsed);
+    }
+    Ok(result)
+}
+
+/// Builds a [`rustls::ServerConfig`] with the given ALPN protocol for use with
+/// hickory-server listeners. Optionally auto-generates a self-signed certificate.
+pub fn build_tls_config_with_alpn(
+    tls: &TlsConfig,
+    extra_sans: &[String],
+    alpn: &[u8],
+) -> Result<Arc<ServerConfig>, ListenerSetupError> {
+    if tls.autogenerate.unwrap_or(false) {
+        autogenerate_tls_cert_if_missing(&tls.cert_path, &tls.key_path, extra_sans)?;
+    }
+    let mut config = build_tls_server_config(&tls.cert_path, &tls.key_path)?;
+    config.alpn_protocols = vec![alpn.to_vec()];
+    Ok(Arc::new(config))
+}
 
 /// Creates and binds a UDP socket with proper dual-stack handling.
 ///

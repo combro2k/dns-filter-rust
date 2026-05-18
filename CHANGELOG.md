@@ -7,6 +7,17 @@ All notable changes to this project will be documented in this file.
 ### Added
 - **DNS-over-TLS (DoT) inbound listener**: DNS-over-TLS server (RFC 7858) accepting queries on TCP port 853 (configurable) with mandatory TLS. Uses RFC 7766 length-prefix framing over TLS — no HTTP layer. Enabled via `listen.dot` with TLS certificate/key configuration and optional auto-generation. Supports multiple bind addresses, privilege separation (bind as root, serve as unprivileged), and the shared request pipeline.
 - **Zone discovery**: new `resolvers.zone_discovery` config section that fetches a JSON index endpoint returning `{"zones": [...]}`, filters zones by allowed types (`reverse`, `forward`, `reverse-aggregate`), resolves each zone's `href` relative to the index URL, and loads zone records as authoritative JSON zones. Supports periodic refresh of both index and zone data, Bearer/Basic authentication (reused for all href fetches), and manual zone priority (zones defined in `resolvers.zones` override discovered ones with the same name).
+- **DNS-over-QUIC (DoQ) inbound listener**: DNS-over-QUIC server (RFC 9250) accepting queries on UDP (configurable port). Enabled via `listen.doq` with TLS certificate/key configuration and optional auto-generation.
+- **Unified hickory-server request handling**: all DNS protocol listeners (UDP, TCP, DoT, DoH, DoQ) now use a single `hickory-server::Server` instance with a shared `HickoryRequestHandler`, replacing per-protocol accept loops and manual framing.
+
+### Changed
+- **Replaced manual protocol implementations with hickory-server**: DNS UDP/TCP, DoT, DoH, and DoQ listeners are now registered on a single `hickory-server::Server` instead of using custom accept loops, RFC 7766 framing, and hyper HTTP service handling.
+- **Removed DoH authentication**: the `auth_token` field has been removed from `TlsSocketConfig` and DoH configuration. DoH authentication should be handled by a reverse proxy.
+
+### Removed
+- **`auth_token` config option**: removed from DoH listener configuration (`listen.doh.auth_token`) and `TlsSocketConfig` schema. Use a reverse proxy for authentication.
+- **Manual protocol implementations**: removed custom UDP/TCP accept loops, RFC 7766 framing, hyper HTTP service, TLS accept handling, and `forward_query` functions from `dns.rs`, `doh.rs`, and `dot.rs`. Replaced by hickory-server.
+- **`futures` dependency**: no longer needed after removing manual listener implementations.
 
 ## [2.0.8] - 2026-05-13
 
