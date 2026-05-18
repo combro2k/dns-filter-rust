@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [2.1.0] - 2026-05-18
+## [2.2.0] - 2026-05-18
 
 ### Added
 - **DNS-over-TLS (DoT) inbound listener**: DNS-over-TLS server (RFC 7858) accepting queries on TCP port 853 (configurable) with mandatory TLS. Uses RFC 7766 length-prefix framing over TLS — no HTTP layer. Enabled via `listen.dot` with TLS certificate/key configuration and optional auto-generation. Supports multiple bind addresses, privilege separation (bind as root, serve as unprivileged), and the shared request pipeline.
