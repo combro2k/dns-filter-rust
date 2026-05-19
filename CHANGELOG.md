@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [2.3.0] - 2026-05-19
 
+### Changed
+- **Optional blocklists/allowlists config**: `blocklists` and `allowlists` fields are now optional in the YAML config, defaulting to empty arrays when omitted.
+
 ### Added
 - **Database-backed operational config**: migrated blocklists, allowlists, filtering settings, upstream resolvers, zones, and zone discovery from static YAML to a database-backed configuration store using sqlx. Supports SQLite (default), MySQL, and PostgreSQL via compile-time feature flags (`db-sqlite`, `db-mysql`, `db-postgres`).
 - **Repository pattern**: async repository traits in `use_cases/repositories.rs` with sqlx implementations in `frameworks/database/` for all operational config (filter lists, filter cache, filtering config, upstream config, zones, zone discovery).

@@ -10,7 +10,9 @@ pub const DEFAULT_CONTROL_SOCKET_PATH: &str = "/run/dns-filter/dns-filter.sock";
 #[derive(Debug, Deserialize)]
 pub struct DnsFilterConfig {
     pub listen: ListenConfig,
+    #[serde(default)]
     pub blocklists: Vec<NamedList>,
+    #[serde(default)]
     pub allowlists: Vec<NamedList>,
     pub filtering: Option<FilteringConfig>,
     pub resolvers: ResolversConfig,

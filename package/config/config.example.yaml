@@ -97,12 +97,12 @@ blocklists:
       enabled: true
       url: "https://raw.githubusercontent.com/AdguardTeam/FiltersRegistry/master/filters/filter_2_Base/filter.txt"
       interval: "12h"
-      # list_type: "adguard"             # default
+      # list_type: "adguard"  # default
   - custom_ads:
       enabled: false
       url: "https://example.com/myadblock.txt"
       interval: "30m"
-      # list_type: "adguard"             # default
+      # list_type: "adguard"  # default
   # - stevenblack_hosts:
   #     enabled: false
   #     url: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
