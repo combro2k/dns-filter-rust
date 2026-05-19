@@ -16,6 +16,7 @@ use crate::frameworks::upstream::{
     DnsHttpsClient, DnsTlsClient, DnsUdpTcpClient, RecursiveResolver,
 };
 use crate::use_cases::filtering::{parse_interval, DomainFilter, ListFilterEngine};
+use crate::use_cases::repositories::FilterCacheRepository;
 use crate::use_cases::request_pipeline::{
     AnyQueryPolicy, DnsAnyQueryPolicyStage, DnsFilterStage, DnsRequestPipeline,
     DnsServfailFallbackStage, DnsUpstreamStage,
@@ -94,6 +95,13 @@ pub fn build_zone_entries(config: &DnsFilterConfig) -> Result<Vec<ZoneEntry>> {
 }
 
 pub fn build_domain_filter(config: &DnsFilterConfig) -> Result<Arc<dyn DomainFilter>> {
+    build_domain_filter_with_cache(config, None)
+}
+
+pub fn build_domain_filter_with_cache(
+    config: &DnsFilterConfig,
+    cache_repo: Option<Arc<dyn FilterCacheRepository>>,
+) -> Result<Arc<dyn DomainFilter>> {
     for list in config.blocklists.iter().chain(config.allowlists.iter()) {
         if let Some(interval) = &list.interval {
             parse_interval(interval).map_err(|error| {
@@ -106,7 +114,7 @@ pub fn build_domain_filter(config: &DnsFilterConfig) -> Result<Arc<dyn DomainFil
         }
     }
 
-    let engine = ListFilterEngine::from_config(config)?;
+    let engine = ListFilterEngine::from_config_with_cache(config, cache_repo)?;
     Ok(Arc::new(engine))
 }
 
@@ -628,6 +636,7 @@ mod tests {
             control: None,
             plugins: Vec::new(),
             mcp: None,
+            database: None,
         }
     }
 

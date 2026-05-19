@@ -1,6 +1,7 @@
 pub mod config;
 pub mod control_client;
 pub mod control_socket;
+pub mod database;
 pub mod logging;
 #[cfg(feature = "plugins")]
 pub mod plugin_runtime;

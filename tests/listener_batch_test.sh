@@ -229,6 +229,9 @@ logging:
 
 control:
   socket_path: "$TEMP_DIR/dns-filter.sock"
+
+database:
+  url: "sqlite://$TEMP_DIR/dns-filter.db"
 EOF
 
 note "Starting dns-filter with temporary config: $CONFIG_FILE"
@@ -366,6 +369,7 @@ dns_query_udp_expect_status_on_port() {
 write_zone_test_config() {
   local config_file="$1"
   local zone_enabled="$2"
+  local db_name="${3:-zone-test}"
 
   cat >"$config_file" <<EOF
 listen:
@@ -411,6 +415,9 @@ logging:
 
 control:
   socket_path: "$TEMP_DIR/zone-test.sock"
+
+database:
+  url: "sqlite://$TEMP_DIR/$db_name.db"
 EOF
 }
 
@@ -458,6 +465,9 @@ logging:
 
 control:
   socket_path: "$TEMP_DIR/zone-upstream.sock"
+
+database:
+  url: "sqlite://$TEMP_DIR/zone-upstream.db"
 EOF
 
   note "Starting auxiliary zone upstream on ${DNS_HOST}:${ZONE_UPSTREAM_PORT}"
@@ -499,7 +509,7 @@ EOF
   stop_pid "$ZONE_TEST_PID"
   ZONE_TEST_PID=""
 
-  write_zone_test_config "$zone_disabled_config_file" false
+  write_zone_test_config "$zone_disabled_config_file" false "zone-disabled"
   note "Starting zone forwarding test instance with zone disabled on ${DNS_HOST}:${ZONE_TEST_PORT}"
   "$BINARY" start --config "$zone_disabled_config_file" >"$zone_disabled_log_file" 2>&1 &
   ZONE_TEST_PID=$!

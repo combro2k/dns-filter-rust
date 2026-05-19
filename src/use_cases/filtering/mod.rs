@@ -6,24 +6,21 @@ mod rpz;
 mod wildcard;
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 
 use crate::entities::filter::FilterDecision;
-use crate::frameworks::config::schema::{DnsFilterConfig, FilteringConfig, NamedList};
+use crate::frameworks::config::schema::{DnsFilterConfig, NamedList};
+use crate::use_cases::repositories::FilterCacheRepository;
+use crate::use_cases::repository_types::FilterCacheDocumentRecord;
 use anyhow::{anyhow, Context, Result};
 use common::{matches_any, normalize_domain, ListFormat, ParseDomainLineResult, ParsedLine};
-use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_LIST_INTERVAL_SECS: u64 = 12 * 60 * 60;
-const DEFAULT_DOCUMENT_CACHE_PATH: &str = "/var/lib/dns-filter/filter-cache.db";
-const SQLITE_DOCS_TABLE: &str = "filter_cache_documents";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ListKind {
@@ -53,12 +50,6 @@ struct ListDomains {
 struct FilterSnapshot {
     blocked: HashSet<String>,
     allowed: HashSet<String>,
-}
-
-#[derive(Debug, Clone)]
-enum DocumentCacheMode {
-    MemoryOnly,
-    Sqlite { path: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,15 +95,21 @@ pub struct ListFilterEngine {
     sinkhole_v4: Ipv4Addr,
     sinkhole_v6: Ipv6Addr,
     runtimes: Vec<ListRuntime>,
-    document_cache: DocumentCacheMode,
+    cache_repo: Option<Arc<dyn FilterCacheRepository>>,
     lists: Arc<RwLock<HashMap<String, ListDomains>>>,
     snapshot: Arc<RwLock<FilterSnapshot>>,
 }
 
 impl ListFilterEngine {
     pub fn from_config(config: &DnsFilterConfig) -> Result<Self> {
+        Self::from_config_with_cache(config, None)
+    }
+
+    pub fn from_config_with_cache(
+        config: &DnsFilterConfig,
+        cache_repo: Option<Arc<dyn FilterCacheRepository>>,
+    ) -> Result<Self> {
         let (sinkhole_v4, sinkhole_v6) = parse_sinkhole_addrs(config)?;
-        let document_cache = parse_document_cache_mode(config.filtering.as_ref())?;
 
         let mut runtimes = Vec::new();
         runtimes.extend(build_runtimes(&config.blocklists, ListKind::Block)?);
@@ -122,12 +119,20 @@ impl ListFilterEngine {
             sinkhole_v4,
             sinkhole_v6,
             runtimes,
-            document_cache,
+            cache_repo,
             lists: Arc::new(RwLock::new(HashMap::new())),
             snapshot: Arc::new(RwLock::new(FilterSnapshot::default())),
         };
 
-        engine.try_restore_document_cache();
+        // Synchronous restore from cache at startup.
+        // We use `block_in_place` + `block_on` because the engine is constructed
+        // inside an async context and we need to call async cache repo methods.
+        if engine.cache_repo.is_some() {
+            tokio::task::block_in_place(|| {
+                let handle = tokio::runtime::Handle::current();
+                handle.block_on(engine.try_restore_document_cache());
+            });
+        }
 
         Ok(engine)
     }
@@ -137,7 +142,7 @@ impl ListFilterEngine {
             sinkhole_v4: self.sinkhole_v4,
             sinkhole_v6: self.sinkhole_v6,
             runtimes: self.runtimes.clone(),
-            document_cache: self.document_cache.clone(),
+            cache_repo: self.cache_repo.clone(),
             lists: Arc::clone(&self.lists),
             snapshot: Arc::clone(&self.snapshot),
         }
@@ -240,9 +245,8 @@ impl ListFilterEngine {
         domains: &HashSet<String>,
         exceptions: &HashSet<String>,
     ) -> Result<()> {
-        let path = match &self.document_cache {
-            DocumentCacheMode::MemoryOnly => return Ok(()),
-            DocumentCacheMode::Sqlite { path } => path.clone(),
+        let Some(cache_repo) = &self.cache_repo else {
+            return Ok(());
         };
 
         let mut domain_vec = domains.iter().cloned().collect::<Vec<_>>();
@@ -254,34 +258,48 @@ impl ListFilterEngine {
         let key = runtime.key.clone();
         let kind = CachedListKind::from(runtime.kind);
 
-        tokio::task::spawn_blocking(move || {
-            store_cached_list_document(
-                &path,
-                &key,
-                &CachedListDocument {
-                    kind,
-                    domains: domain_vec,
-                    exceptions: exception_vec,
-                },
-            )
-        })
-        .await
-        .map_err(|error| anyhow!("document cache writer task failed: {error}"))??;
+        let doc = CachedListDocument {
+            kind,
+            domains: domain_vec,
+            exceptions: exception_vec,
+        };
+        let payload = serde_json::to_string(&doc)
+            .with_context(|| format!("failed to serialize cached document '{}'", key))?;
+
+        cache_repo
+            .store(&FilterCacheDocumentRecord {
+                key,
+                value: payload,
+            })
+            .await
+            .context("failed to store cached list document")?;
 
         Ok(())
     }
 
-    fn try_restore_document_cache(&self) {
-        let path = match &self.document_cache {
-            DocumentCacheMode::MemoryOnly => return,
-            DocumentCacheMode::Sqlite { path } => path,
+    async fn try_restore_document_cache(&self) {
+        let Some(cache_repo) = &self.cache_repo else {
+            return;
         };
 
         let mut restored = 0usize;
 
         for runtime in &self.runtimes {
-            match load_cached_list_document(path, &runtime.key) {
-                Ok(Some(document)) => {
+            match cache_repo.load(&runtime.key).await {
+                Ok(Some(record)) => {
+                    let document = match serde_json::from_str::<CachedListDocument>(&record.value) {
+                        Ok(doc) => doc,
+                        Err(e) => {
+                            tracing::warn!(
+                                list = %runtime.name,
+                                key = %runtime.key,
+                                error = %e,
+                                "invalid JSON in cached list document"
+                            );
+                            continue;
+                        }
+                    };
+
                     if CachedListKind::from(runtime.kind) != document.kind {
                         tracing::warn!(
                             list = %runtime.name,
@@ -467,88 +485,6 @@ impl From<ListKind> for CachedListKind {
     }
 }
 
-fn parse_document_cache_mode(filtering: Option<&FilteringConfig>) -> Result<DocumentCacheMode> {
-    let cache = filtering.and_then(|cfg| cfg.cache.as_ref());
-    let mode = cache
-        .and_then(|cfg| cfg.mode.as_deref())
-        .unwrap_or("memory");
-
-    match mode {
-        "memory" => Ok(DocumentCacheMode::MemoryOnly),
-        "sqlite" => {
-            let path = cache
-                .and_then(|cfg| cfg.document_path.clone())
-                .unwrap_or_else(|| DEFAULT_DOCUMENT_CACHE_PATH.to_string());
-            Ok(DocumentCacheMode::Sqlite { path })
-        }
-        _ => Err(anyhow!(
-            "invalid filtering.cache.mode '{mode}'; supported values are: memory, sqlite"
-        )),
-    }
-}
-
-fn open_cache_connection(path: &str) -> Result<Connection> {
-    if let Some(parent) = Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create cache directory '{}'", parent.display())
-            })?;
-        }
-    }
-
-    let conn = Connection::open(path)
-        .with_context(|| format!("failed to open SQLite document cache at {path}"))?;
-
-    conn.execute(
-        &format!(
-            "CREATE TABLE IF NOT EXISTS {SQLITE_DOCS_TABLE} (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-        ),
-        [],
-    )
-    .context("failed to create SQLite document cache schema")?;
-
-    Ok(conn)
-}
-
-fn load_cached_list_document(path: &str, key: &str) -> Result<Option<CachedListDocument>> {
-    let conn = open_cache_connection(path)?;
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT value FROM {SQLITE_DOCS_TABLE} WHERE key = ?1"
-        ))
-        .context("failed to prepare SQLite document cache lookup")?;
-
-    let raw_value = stmt
-        .query_row(params![key], |row| row.get::<_, String>(0))
-        .optional()
-        .context("failed to read SQLite document cache row")?;
-
-    match raw_value {
-        Some(raw) => {
-            let parsed = serde_json::from_str::<CachedListDocument>(&raw)
-                .with_context(|| format!("invalid JSON in cached document '{key}'"))?;
-            Ok(Some(parsed))
-        }
-        None => Ok(None),
-    }
-}
-
-fn store_cached_list_document(path: &str, key: &str, doc: &CachedListDocument) -> Result<()> {
-    let conn = open_cache_connection(path)?;
-    let payload = serde_json::to_string(doc)
-        .with_context(|| format!("failed to serialize cached document '{key}'"))?;
-
-    conn.execute(
-        &format!(
-            "INSERT INTO {SQLITE_DOCS_TABLE} (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
-        ),
-        params![key, payload],
-    )
-    .with_context(|| format!("failed to upsert cached document '{key}'"))?;
-
-    Ok(())
-}
-
 fn build_runtimes(lists: &[NamedList], kind: ListKind) -> Result<Vec<ListRuntime>> {
     lists
         .iter()
@@ -708,9 +644,6 @@ pub fn parse_interval(input: &str) -> Result<Duration> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    use crate::frameworks::config::schema::{FilteringCacheConfig, FilteringConfig};
 
     use super::*;
 
@@ -725,75 +658,6 @@ mod tests {
     fn parse_interval_rejects_invalid_values() {
         assert!(parse_interval("abc").is_err());
         assert!(parse_interval("10w").is_err());
-    }
-
-    #[test]
-    fn parse_document_cache_mode_defaults_to_memory() {
-        let mode = parse_document_cache_mode(None).unwrap();
-        assert!(matches!(mode, DocumentCacheMode::MemoryOnly));
-    }
-
-    #[test]
-    fn parse_document_cache_mode_supports_sqlite() {
-        let filtering = FilteringConfig {
-            sinkhole_ipv4: None,
-            sinkhole_ipv6: None,
-            any_query_policy: None,
-            cache: Some(FilteringCacheConfig {
-                mode: Some("sqlite".into()),
-                document_path: Some("/tmp/dns-filter-cache.db".into()),
-            }),
-        };
-
-        let mode = parse_document_cache_mode(Some(&filtering)).unwrap();
-        match mode {
-            DocumentCacheMode::Sqlite { path } => {
-                assert_eq!(path, "/tmp/dns-filter-cache.db");
-            }
-            DocumentCacheMode::MemoryOnly => panic!("expected sqlite cache mode"),
-        }
-    }
-
-    #[test]
-    fn parse_document_cache_mode_rejects_unknown_value() {
-        let filtering = FilteringConfig {
-            sinkhole_ipv4: None,
-            sinkhole_ipv6: None,
-            any_query_policy: None,
-            cache: Some(FilteringCacheConfig {
-                mode: Some("bad-mode".into()),
-                document_path: None,
-            }),
-        };
-
-        let result = parse_document_cache_mode(Some(&filtering));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn sqlite_document_round_trip_works() {
-        let mut path = std::env::temp_dir();
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        path.push(format!("dns-filter-cache-{unique}.db"));
-        let path_str = path.to_string_lossy().to_string();
-
-        let key = "block:ads";
-        let expected = CachedListDocument {
-            kind: CachedListKind::Block,
-            domains: vec!["ads.example.com".into(), "tracker.example.com".into()],
-            exceptions: vec![],
-        };
-
-        store_cached_list_document(&path_str, key, &expected).unwrap();
-        let loaded = load_cached_list_document(&path_str, key)
-            .unwrap()
-            .expect("document should exist");
-        assert_eq!(loaded, expected);
-
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]

@@ -1,3 +1,17 @@
+# =============================================================================
+# dns-filter configuration
+# =============================================================================
+# Infrastructure settings (listen, logging, security, control, database) are
+# always read from this YAML file.
+#
+# Operational settings (blocklists, allowlists, filtering, resolvers, zones)
+# are seeded into the database on first start.  After that the database is
+# the authoritative source for operational config.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Listener configuration
+# ---------------------------------------------------------------------------
 listen:
   dns:
     enabled: true
@@ -5,6 +19,7 @@ listen:
       - "0.0.0.0"
       - "::"
     port: 53
+
   dot:
     enabled: false
     addresses:
@@ -15,6 +30,7 @@ listen:
       cert_path: "/etc/dns-filter/cert.pem"
       key_path: "/etc/dns-filter/key.pem"
       autogenerate: true
+
   doh:
     enabled: false
     addresses:
@@ -25,6 +41,7 @@ listen:
       cert_path: "/etc/dns-filter/cert.pem"
       key_path: "/etc/dns-filter/key.pem"
       autogenerate: true
+
   doq:
     enabled: false
     addresses:
@@ -35,12 +52,14 @@ listen:
       cert_path: "/etc/dns-filter/cert.pem"
       key_path: "/etc/dns-filter/key.pem"
       autogenerate: true
+
   http:
     enabled: false
     addresses:
       - "0.0.0.0"
       - "::"
     port: 8080
+
   metrics:
     enabled: false
     addresses:
@@ -57,30 +76,33 @@ listen:
 #     - "::"
 #   port: 8953
 #   api_token: "change-me"
-#   sse_keep_alive: 30        # SSE keep-alive ping interval in seconds
-#   stateful_mode: true       # persistent sessions per client
-#   json_response: false      # return JSON instead of SSE (when stateless)
-#   allowed_origins: []       # CORS origins for browser-based clients
-#   # allowed_hosts:          # DNS rebinding protection; auto-derived from addresses if omitted
+#   sse_keep_alive: 30                   # SSE keep-alive ping interval (seconds)
+#   stateful_mode: true                  # persistent sessions per client
+#   json_response: false                 # JSON instead of SSE (stateless only)
+#   allowed_origins: []                  # CORS origins for browser clients
+#   # allowed_hosts:                     # DNS rebinding protection (auto-derived if omitted)
 #   #   - "dns-filter.local:8953"
 
+# ---------------------------------------------------------------------------
+# Blocklists — domains to block
+# ---------------------------------------------------------------------------
+# Supported list_type values:
+#   "adguard"  — AdGuard/ABP filter syntax (default)
+#   "hosts"    — hosts file format (including compressed multi-hostname lines)
+#   "rpz"      — Response Policy Zone format
+#   "domains"  — flat domain list, one domain per line
+#   "wildcard" — wildcard domain list, *.example.com per line
 blocklists:
   - adguard_base:
       enabled: true
       url: "https://raw.githubusercontent.com/AdguardTeam/FiltersRegistry/master/filters/filter_2_Base/filter.txt"
       interval: "12h"
-      # list_type: "adguard"  # default; supports AdGuard/ABP syntax
+      # list_type: "adguard"             # default
   - custom_ads:
       enabled: false
       url: "https://example.com/myadblock.txt"
       interval: "30m"
-      # Supported list_type values:
-      #   "adguard"  — AdGuard/ABP filter syntax (default)
-      #   "hosts"    — hosts file format (including compressed multi-hostname lines)
-      #   "rpz"      — Response Policy Zone format
-      #   "domains"  — flat domain list, one domain per line
-      #   "wildcard" — wildcard domain list, *.example.com per line
-      # list_type: "adguard"
+      # list_type: "adguard"             # default
   # - stevenblack_hosts:
   #     enabled: false
   #     url: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
@@ -102,80 +124,106 @@ blocklists:
   #     interval: "12h"
   #     list_type: "wildcard"
 
+# ---------------------------------------------------------------------------
+# Allowlists — exceptions that bypass filtering
+# ---------------------------------------------------------------------------
+# Allowlists take precedence over blocklists.
 allowlists:
   - corporate_allow:
       enabled: false
       url: "https://example.com/allowlist.txt"
       interval: "1h"
-  - boo:
-      enabled: false
-      url: "/etc/dns-filter/allowlist.txt"
   - local_allow:
       enabled: false
       url: "/etc/dns-filter/allowlist.txt"
 
+# ---------------------------------------------------------------------------
+# Filtering behaviour
+# ---------------------------------------------------------------------------
 filtering:
   sinkhole_ipv4: "0.0.0.0"
   sinkhole_ipv6: "::"
-  # Optional policy for incoming QTYPE=ANY queries:
-  # - "notimp" (default): reply NOTIMP locally, matching RFC 8482 behavior
-  # - "refused": reply REFUSED locally
-  # - "passthrough": forward ANY upstream as-is (may cause SERVFAIL noise)
+  # Policy for incoming QTYPE=ANY queries:
+  #   "notimp"      — reply NOTIMP locally, per RFC 8482 (default)
+  #   "refused"     — reply REFUSED locally
+  #   "passthrough" — forward ANY upstream as-is
   any_query_policy: "notimp"
-  # Optional persistent document cache for warm starts.
-  # mode: "memory" (default) keeps cache in RAM only.
-  # mode: "sqlite" persists list documents to a local SQLite file.
-  cache:
-    mode: "memory"
-    document_path: "/var/lib/dns-filter/filter-cache.db"
 
+# ---------------------------------------------------------------------------
+# Upstream resolvers
+# ---------------------------------------------------------------------------
 resolvers:
+  # Load-balancing strategy: "round_robin", "random", or "failover"
   strategy: "round_robin"
+
+  # Resolvers used to look up upstream hostnames (e.g. DoH/DoT server names)
   bootstrap_resolvers:
     - "1.1.1.1"
+
   servers:
+    # Plain DNS
     - enabled: false
       protocol: "dns"
       address: "8.8.8.8:53"
     - enabled: false
       protocol: "dns"
       address: "1.1.1.1:53"
+
+    # DNS over TLS
     - enabled: false
       protocol: "dot"
       address: "dns.google:853"
       tls:
         cert_path: "/etc/dns-filter/upstream-cert.pem"
         autogenerate: true
+
+    # DNS over HTTPS
     - enabled: false
       protocol: "doh"
       address: "https://dns.google/dns-query"
       tls:
         cert_path: "/etc/dns-filter/upstream-cert.pem"
         autogenerate: true
+
+    # DNS over QUIC
     - enabled: false
       protocol: "doq"
       address: "dns.google:8853"
       tls:
         cert_path: "/etc/dns-filter/upstream-cert.pem"
         autogenerate: true
+
+    # Full recursive resolution with DNSSEC validation
     - enabled: true
       protocol: "recursive"
-      # root_hints_path: "/usr/share/dns/root.hints"  # optional, auto-detected or compiled-in fallback
-      # root_key_path: "/usr/share/dns/root.key"  # optional, auto-detected or compiled-in fallback
-      # max_hops: 12  # optional, default is 12
-      nameserver_ip_family: "ipv4"  # optional: "ipv4" (IPv4 only), "ipv6" (IPv6 only), or omit for both
-      dnssec: true  # enable DNSSEC chain-of-trust validation (default: true)
+      dnssec: true                       # DNSSEC chain-of-trust validation (default: true)
+      nameserver_ip_family: "ipv4"       # "ipv4", "ipv6", or omit for both
+      # root_hints_path: "/usr/share/dns/root.hints"   # auto-detected
+      # root_key_path: "/usr/share/dns/root.key"       # auto-detected
+      # max_hops: 12                                    # default: 12
+
+  # -------------------------------------------------------------------------
+  # Zone forwarding / zone authority
+  # -------------------------------------------------------------------------
+  # Choose exactly one mode per zone:
+  #   1) Forwarding  — route queries to zone-specific servers[]
+  #   2) Authoritative — serve records from a JSON zone_source
   zones:
-    # Zone mode is strict: choose exactly one of:
-    # 1) forwarding mode via servers[]
-    # 2) authoritative mode via zone_source (JSON file or HTTP/HTTPS URL)
     - zone: "home.arpa"
       enabled: false
       bypass_filter: true
       fallback_to_default_resolvers: false
       strategy: "failover"
       servers: []
-    # Zone forwarding with DoH upstream and optional Bearer auth.
+
+    - zone: "168.192.in-addr.arpa"
+      enabled: false
+      bypass_filter: true
+      fallback_to_default_resolvers: false
+      strategy: "failover"
+      servers: []
+
+    # Zone forwarding with DoH upstream and optional Bearer auth
     # - zone: "corp.example"
     #   enabled: false
     #   bypass_filter: false
@@ -187,7 +235,8 @@ resolvers:
     #       address: "https://dns.corp.example/dns-query"
     #       # authentication:
     #       #   token: "my-bearer-token"
-    # Zone authority from a local JSON file.
+
+    # Zone authority from a local JSON file
     # - zone: "example.com"
     #   enabled: false
     #   bypass_filter: false
@@ -196,7 +245,8 @@ resolvers:
     #     - enabled: true
     #       protocol: "json"
     #       address: "file:///etc/dns-filter/zones/example.com.json"
-    # Zone authority from an HTTP(S) URL with periodic refresh.
+
+    # Zone authority from an HTTP(S) URL with periodic refresh
     # - zone: "example.net"
     #   enabled: false
     #   bypass_filter: false
@@ -206,29 +256,22 @@ resolvers:
     #       protocol: "json"
     #       address: "https://zones.example.net/example.net.json"
     #       check_interval: "15m"
-    #       # Use either token (Bearer) OR username+password (Basic), not both.
     #       # authentication:
-    #       #   token: "my-bearer-token"
-    #       # Or for Basic authentication:
-    #       # authentication:
+    #       #   token: "my-bearer-token"        # Bearer
+    #       # authentication:                   # …or Basic
     #       #   username: "user"
     #       #   password: "secret"
-    - zone: "168.192.in-addr.arpa"
-      enabled: false
-      bypass_filter: true
-      fallback_to_default_resolvers: false
-      strategy: "failover"
-      servers: []
-  # Automatic zone discovery from a JSON index endpoint.
-  # Fetches a URL that returns {"zones": [{"href":..., "name":..., "type":...}, ...]},
-  # filters zones by allowed_types, and follows each href to load zone records.
-  # Zones defined explicitly in 'zones' above take priority over discovered ones.
+
+  # -------------------------------------------------------------------------
+  # Zone discovery — auto-import zones from a JSON index endpoint
+  # -------------------------------------------------------------------------
+  # Fetches {"zones": [{"href":…, "name":…, "type":…}, …]} and follows each
+  # href to load zone records.  Explicit zones above take priority.
   zone_discovery: []
   # - enabled: false
   #   address: "https://router.home.arpa/zones"
   #   check_interval: "15m"
-  #   # Only import zones matching these types: "reverse", "forward", "reverse-aggregate"
-  #   allowed_types:
+  #   allowed_types:                     # "reverse", "forward", "reverse-aggregate"
   #     - "reverse"
   #     - "forward"
   #     - "reverse-aggregate"
@@ -237,26 +280,27 @@ resolvers:
   #   # authentication:
   #   #   token: "my-bearer-token"
 
+# ---------------------------------------------------------------------------
 # WASM plugins (requires 'plugins' cargo feature)
+# ---------------------------------------------------------------------------
 # plugins:
 #   - name: "example-plugin"
 #     path: "/etc/dns-filter/plugins/example.wasm"
 #     enabled: true
 plugins: []
 
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 logging:
   syslog:
     enabled: true
-    # Syslog transport: "unix" (default local), "udp", "tcp", or "tls".
-    transport: "unix"
-    # For transport "unix": a socket path (default: /dev/log).
-    # For network transports: host:port (e.g. 192.0.2.10:514).
-    server: "/dev/log"
-    # Syslog message format: "rfc3164" (default) or "rfc5424".
-    format: "rfc3164"
+    transport: "unix"                    # "unix" (default), "udp", "tcp", "tls"
+    server: "/dev/log"                   # socket path or host:port
+    format: "rfc3164"                    # "rfc3164" (default) or "rfc5424"
     facility: local0
     level: info
-    # TLS settings are only used when transport: "tls".
+    # TLS settings (only when transport: "tls")
     # tls:
     #   ca_cert_path: "/etc/ssl/certs/ca-certificates.crt"
     #   verify_hostname: true
@@ -268,36 +312,52 @@ logging:
     enabled: false
     level: debug
 
-# Security settings: privilege dropping after socket bind.
+# ---------------------------------------------------------------------------
+# Security — privilege dropping after socket bind
+# ---------------------------------------------------------------------------
 # The process starts as root to bind privileged ports, then drops to an
-# unprivileged user/group and chroots into a restricted directory.
+# unprivileged user/group and optionally chroots.
 # CAP_NET_BIND_SERVICE is retained on Linux for potential rebinds on reload.
 #
-# NOTE: After chroot, config files and blocklist caches must be accessible
-# from within the chroot directory (e.g. bind-mount or copy into it).
+# NOTE: After chroot, config files and caches must be accessible from within
+# the chroot directory (e.g. bind-mount or copy into it).
 security:
   user: "nobody"
   group: "nogroup"
   chroot_dir: "/var/lib/dns-filter"
 
-# REST API for runtime administration.
-# Provides endpoints for reloading config, refreshing lists, toggling
-# filtering, viewing stats, and query logging.
+# ---------------------------------------------------------------------------
+# REST API — runtime administration
+# ---------------------------------------------------------------------------
+# Endpoints for reloading config, refreshing lists, toggling filtering,
+# viewing stats, and query logging.
 # All /api/* endpoints require a Bearer token when api_token is set.
 # The /health endpoint is always unauthenticated.
 api:
   enabled: false
   address: "0.0.0.0"
   port: 8000
-  # Optional Bearer token for API authentication.
-  # When set, all /api/* requests must include: Authorization: Bearer <token>
   # api_token: "change-me-to-a-secure-value"
   query_logging:
     enabled: false
     max_entries: 10000
 
-# Control socket for CLI-based daemon management (stop, reload).
-# The daemon listens on this Unix socket for JSON control commands.
-# CLI subcommands (dns-filter stop, dns-filter reload) connect here.
+# ---------------------------------------------------------------------------
+# Control socket — CLI-based daemon management (stop, reload)
+# ---------------------------------------------------------------------------
 control:
   socket_path: "/run/dns-filter/dns-filter.sock"
+
+# ---------------------------------------------------------------------------
+# Database — operational config storage
+# ---------------------------------------------------------------------------
+# Operational config (blocklists, allowlists, upstream resolvers, zones, etc.)
+# is stored in the database.  On first start the YAML config above is seeded
+# into the DB; after that the DB is authoritative.
+#
+# Supported backends (compile-time feature flags):
+#   db-sqlite   (default)   sqlite:///var/lib/dns-filter/dns-filter.db
+#   db-mysql                mysql://user:pass@localhost/dns_filter
+#   db-postgres             postgres://user:pass@localhost/dns_filter
+database:
+  url: "sqlite:///var/lib/dns-filter/dns-filter.db"

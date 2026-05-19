@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use crate::frameworks::config::loader::load_config;
 use crate::use_cases::config_bootstrap::{
-    build_any_query_policy, build_domain_filter, build_upstream_resolver, build_zone_entries,
-    validate_config,
+    build_any_query_policy, build_domain_filter, build_domain_filter_with_cache,
+    build_upstream_resolver, build_zone_entries, validate_config,
 };
+use crate::use_cases::config_from_db::{apply_db_config, Repositories};
 use crate::use_cases::filtering::DomainFilter;
 use crate::use_cases::request_pipeline::AnyQueryPolicy;
 use crate::use_cases::upstream_resolver::UpstreamResolver;
@@ -49,6 +50,32 @@ pub fn reload_config(config_path: &str) -> Result<ReloadedConfig> {
     let zone_entries = build_zone_entries(&config)?;
 
     tracing::info!("configuration reloaded successfully");
+
+    Ok((resolver, filter, any_query_policy, zone_entries))
+}
+
+/// Reloads configuration using the database as the source of truth for
+/// operational config, with infrastructure config loaded from the YAML file.
+///
+/// This is the database-aware counterpart of [`reload_config`].  The YAML file
+/// is still loaded for infrastructure fields (listen, logging, etc.), but
+/// operational fields (filter lists, resolvers, zones) come from the database.
+pub async fn reload_config_from_db(
+    config_path: &str,
+    repos: &Repositories,
+) -> Result<ReloadedConfig> {
+    tracing::info!(path = %config_path, "reloading configuration (DB-backed)");
+
+    let config = load_config(config_path)?;
+    let mut config = validate_config(config);
+    apply_db_config(&mut config, repos).await?;
+
+    let resolver = build_upstream_resolver(&config)?;
+    let filter = build_domain_filter_with_cache(&config, Some(Arc::clone(&repos.filter_cache)))?;
+    let any_query_policy = build_any_query_policy(&config)?;
+    let zone_entries = build_zone_entries(&config)?;
+
+    tracing::info!("configuration reloaded successfully (DB-backed)");
 
     Ok((resolver, filter, any_query_policy, zone_entries))
 }

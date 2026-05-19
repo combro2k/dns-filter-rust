@@ -1,8 +1,12 @@
 pub mod config_bootstrap;
+pub mod config_from_db;
 pub mod filtering;
 pub mod plugin_handler;
 pub mod reload;
+pub mod repositories;
+pub mod repository_types;
 pub mod request_pipeline;
+pub mod seed;
 pub mod server_operations;
 pub mod upstream_resolver;
 pub mod zone_authority;

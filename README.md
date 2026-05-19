@@ -8,6 +8,7 @@
 
 - **Multi-Protocol Support**: DNS (UDP/TCP), DoT (DNS over TLS), DoH (DNS over HTTPS), DoQ (DNS over QUIC), and HTTP admin/metrics
 - **Advanced Filtering**: Blocklists and allowlists with automatic refresh, configurable sinkhole responses, persistent caching
+- **Database-Backed Config**: Operational config (blocklists, allowlists, upstream resolvers, zones) stored in SQLite, MySQL, or PostgreSQL with automatic YAML seed on first start
 - **Intelligent Routing**: Zone-based forwarding to route queries by domain suffix to dedicated resolvers
 - **Authoritative Zones** *(Experimental)*: Serve authoritative DNS answers from local JSON zone files with optional URL-based refresh
 - **Zone Discovery**: Automatically import zones from a JSON index endpoint, filtered by type (forward, reverse, reverse-aggregate)
@@ -296,6 +297,9 @@ mcp:             # MCP server
   enabled: false
   port: 8953
 
+database:        # Database for operational config storage
+  url: "sqlite:///var/lib/dns-filter/dns-filter.db"
+
 plugins:         # WASM plugins (requires 'plugins' feature)
   - name: "..."
     path: "..."
@@ -334,11 +338,6 @@ filtering:
   # How to handle ANY queries
   # Options: "notimp" (RFC 8482), "refused", "passthrough"
   any_query_policy: "notimp"            # default: "notimp"
-  
-  # Caching configuration
-  cache:
-    mode: "memory"                      # "memory" (fast, volatile) or "sqlite" (persistent)
-    document_path: "/var/lib/dns-filter/cache.db"  # for sqlite mode
 ```
 
 ### Blocklists
@@ -394,27 +393,10 @@ allowlists:
 
 ### Cache Modes
 
-**Memory Cache (Default):**
-```yaml
-filtering:
-  cache:
-    mode: "memory"  # Fast, in-process, lost on restart
-```
-- Fastest option
-- Useful for filtering and blocklist lookups
-- Lost on service restart
+Filter list document caching is now handled by the database backend configured in the `database:` section. Parsed blocklist and allowlist documents are automatically cached in the `filter_cache_documents` table and restored on restart, eliminating re-download and re-parse overhead.
 
-**SQLite Cache:**
-```yaml
-filtering:
-  cache:
-    mode: "sqlite"
-    document_path: "/var/lib/dns-filter/cache.db"
-```
-- Persistent across restarts
-- Slightly slower than memory
-- Useful for large blocklists (warm-start after restart)
-- SSD recommended for best performance
+- Cache is persistent across restarts when using a file-backed database (SQLite, MySQL, PostgreSQL)
+- No additional configuration required — caching is automatic
 
 ### Examples
 
@@ -436,11 +418,9 @@ allowlists:
 filtering:
   sinkhole_ipv4: "0.0.0.0"
   sinkhole_ipv6: "::"
-  cache:
-    mode: "memory"
 ```
 
-**Custom Blocking with Persistent Cache:**
+**Custom Blocking:**
 ```yaml
 blocklists:
   - custom_ads:
@@ -452,9 +432,6 @@ filtering:
   sinkhole_ipv4: "127.0.0.1"  # Common choice for localhost testing
   sinkhole_ipv6: "::1"
   any_query_policy: "refused"
-  cache:
-    mode: "sqlite"
-    document_path: "/var/lib/dns-filter/cache.db"
 ```
 
 **Minimal Filtering (No Blocklists):**
@@ -465,8 +442,6 @@ allowlists: []
 filtering:
   sinkhole_ipv4: "0.0.0.0"
   sinkhole_ipv6: "::"
-  cache:
-    mode: "memory"
 ```
 
 ---
@@ -1053,6 +1028,60 @@ resolvers:
         username: "dns-filter"
         password: "s3cret-token"
 ```
+
+---
+
+## Database Configuration
+
+Operational configuration (blocklists, allowlists, filtering settings, upstream resolvers, zones, and zone discovery) is stored in a database. On first start with an empty database, all operational config from the YAML file is automatically seeded into the DB. After seeding, the database is the authoritative source for operational config. Infrastructure settings (listen addresses, logging, security, control socket) remain in YAML.
+
+### Supported Backends
+
+| Backend | Feature Flag | Default | Connection URL Example |
+|---------|-------------|---------|------------------------|
+| SQLite | `db-sqlite` | ✅ | `sqlite:///var/lib/dns-filter/dns-filter.db` |
+| MySQL | `db-mysql` | | `mysql://user:pass@localhost/dns_filter` |
+| PostgreSQL | `db-postgres` | | `postgres://user:pass@localhost/dns_filter` |
+
+### Configuration
+
+```yaml
+database:
+  url: "sqlite:///var/lib/dns-filter/dns-filter.db"  # default
+```
+
+To build with a non-default backend:
+
+```bash
+# MySQL backend
+cargo build --release --no-default-features --features dot,doh,doq,http-api,mcp,db-mysql
+
+# PostgreSQL backend
+cargo build --release --no-default-features --features dot,doh,doq,http-api,mcp,db-postgres
+```
+
+### How It Works
+
+1. **First start**: If the database is empty, the YAML operational config is imported (seeded) into the database.
+2. **Subsequent starts**: Operational config is loaded from the database; YAML operational sections are ignored.
+3. **Reload (SIGHUP)**: Infrastructure config is reloaded from YAML; operational config is reloaded from the database.
+4. **Migrations**: Database schema migrations run automatically on startup.
+
+### What Goes Where
+
+| Config Section | Source | Notes |
+|---------------|--------|-------|
+| `listen` | YAML | Bind addresses and ports |
+| `logging` | YAML | Log targets and levels |
+| `security` | YAML | Privilege dropping, chroot |
+| `control` | YAML | Control socket path |
+| `database` | YAML | Database connection URL |
+| `blocklists` | Database | Seeded from YAML on first start |
+| `allowlists` | Database | Seeded from YAML on first start |
+| `filtering` | Database | Sinkhole IPs, ANY policy |
+| `resolvers.servers` | Database | Upstream DNS servers |
+| `resolvers.zones` | Database | Zone forwarding rules |
+| `resolvers.zone_discovery` | Database | Zone discovery endpoints |
 
 ---
 
@@ -2433,9 +2462,10 @@ dns-filter follows a **Clean Architecture** design with **Domain-Driven Design**
 
 **Use Cases** (`src/use_cases/`)
 - Application orchestration
-- Business logic: `filtering.rs`, `upstream_resolver.rs`, `zone_forwarding.rs`, `zone_authority.rs`, `plugin_handler.rs`
+- Business logic: `filtering/`, `upstream_resolver.rs`, `zone_forwarding.rs`, `zone_authority.rs`, `plugin_handler.rs`
+- Repository traits (`repositories.rs`) and DB-to-config bridge (`config_from_db.rs`)
 - Request pipeline with Chain of Responsibility pattern
-- Configuration bootstrap and reload
+- Configuration bootstrap, seed, and reload
 
 **Interface Adapters** (`src/interface_adapters/`)
 - Protocol boundaries: DNS, DoT, DoH, DoQ, HTTP
@@ -2445,6 +2475,7 @@ dns-filter follows a **Clean Architecture** design with **Domain-Driven Design**
 
 **Frameworks** (`src/frameworks/`)
 - External systems: config loading, logging, upstream client, privilege management
+- Database layer (`database/`): sqlx connection pool, migrations, repository implementations
 - WASM plugin runtime (`plugin_runtime/`, behind `plugins` feature)
 - I/O and side effects
 - Isolated from core logic
@@ -2558,6 +2589,12 @@ cargo build --release
 
 # Build with WASM plugin support (optional)
 cargo build --release --features plugins
+
+# Build with MySQL database backend
+cargo build --release --no-default-features --features dot,doh,doq,http-api,mcp,db-mysql
+
+# Build with PostgreSQL database backend
+cargo build --release --no-default-features --features dot,doh,doq,http-api,mcp,db-postgres
 
 # Run tests
 cargo test
@@ -2688,7 +2725,12 @@ pub fn is_blocked(domain: &str) -> bool { }
 - `src/use_cases/` — Business logic (filtering, resolution, zones, plugin handler)
 - `src/interface_adapters/listeners/` — Protocol implementations (DNS, DoT, DoH, DoQ)
 - `src/frameworks/config/schema.rs` — Configuration schema definition
+- `src/frameworks/database/` — Database pool, migrations, and repository implementations
 - `src/frameworks/plugin_runtime/` — WASM plugin runtime (behind `plugins` feature)
+- `src/use_cases/repositories.rs` — Repository trait definitions
+- `src/use_cases/seed.rs` — YAML-to-database seed logic
+- `src/use_cases/config_from_db.rs` — Database-to-config bridge
+- `migrations/` — SQL migration files (sqlite/, mysql/, postgres/)
 - `AGENTS.md` — Architecture documentation and project governance
 - `CHANGELOG.md` — Version history and change log
 
@@ -2726,6 +2768,6 @@ This project is licensed under the MIT License and/or Apache License 2.0. See th
 
 ---
 
-**Last Updated:** May 13, 2026  
+**Last Updated:** May 19, 2026  
 **Current Version:** 2.2.2  
 **Status:** Stable with experimental zone authority and draft WASM plugin features

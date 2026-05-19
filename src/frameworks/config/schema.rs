@@ -21,6 +21,7 @@ pub struct DnsFilterConfig {
     pub api: Option<ApiConfig>,
     pub control: Option<ControlConfig>,
     pub mcp: Option<McpConfig>,
+    pub database: Option<DatabaseConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -45,6 +46,18 @@ impl DnsFilterConfig {
 pub struct ControlConfig {
     #[serde(default = "default_control_socket_path")]
     pub socket_path: Option<String>,
+}
+
+pub const DEFAULT_DATABASE_URL: &str = "sqlite:///var/lib/dns-filter/dns-filter.db";
+
+#[derive(Debug, Deserialize)]
+pub struct DatabaseConfig {
+    #[serde(default = "default_database_url")]
+    pub url: String,
+}
+
+fn default_database_url() -> String {
+    DEFAULT_DATABASE_URL.to_string()
 }
 
 fn default_control_socket_path() -> Option<String> {
@@ -282,7 +295,7 @@ pub struct FilteringConfig {
     pub cache: Option<FilteringCacheConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct FilteringCacheConfig {
     pub mode: Option<String>,
     pub document_path: Option<String>,

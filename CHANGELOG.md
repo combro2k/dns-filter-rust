@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Database-backed operational config**: migrated blocklists, allowlists, filtering settings, upstream resolvers, zones, and zone discovery from static YAML to a database-backed configuration store using sqlx. Supports SQLite (default), MySQL, and PostgreSQL via compile-time feature flags (`db-sqlite`, `db-mysql`, `db-postgres`).
+- **Repository pattern**: async repository traits in `use_cases/repositories.rs` with sqlx implementations in `frameworks/database/` for all operational config (filter lists, filter cache, filtering config, upstream config, zones, zone discovery).
+- **Database migrations**: SQL migration files for all three backends under `migrations/sqlite/`, `migrations/mysql/`, and `migrations/postgres/`.
+- **YAML-to-DB seed**: on first start with an empty database, operational config from the YAML file is automatically imported so the DB becomes the authoritative source (`use_cases/seed.rs`).
+- **DB-to-config bridge**: `apply_db_config()` loads operational config from DB repositories and overwrites the corresponding fields of the in-memory config, keeping infrastructure settings (listen, logging, security) in YAML (`use_cases/config_from_db.rs`).
+- **Database config section**: new `database:` section in YAML config with `url` field (defaults to `sqlite:///var/lib/dns-filter/dns-filter.db`).
+- **DB-aware config reload**: SIGHUP reload now loads infrastructure from YAML and operational config from the database via `reload_config_from_db()`.
+
+### Changed
+- **Filter cache backend**: replaced rusqlite-based document cache with the `FilterCacheRepository` trait, using the same sqlx database pool as other operational config.
+- **Removed rusqlite dependency**: all SQLite operations now go through sqlx; the `rusqlite` crate is no longer a dependency.
+
 - **Multi-format blocklist/allowlist support**: added `list_type` configuration option per blocklist/allowlist entry. Supported formats:
   - `adguard` (default) — AdGuard/ABP filter syntax with cosmetic rule filtering, modifier validation, and `@@` exception support. Also accepts hosts-file and plain-domain lines as fallback.
   - `hosts` — hosts file format (`<IP> domain1 [domain2 …]`), including compressed multi-hostname lines with multiple domains per line.

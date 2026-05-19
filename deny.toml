@@ -20,6 +20,9 @@ ignore = [
     { id = "RUSTSEC-2024-0437", reason = "tracked: prometheus is unused, removal pending" },
     # rustls-pemfile: unmaintained, migrate to rustls-pki-types PemObject trait
     { id = "RUSTSEC-2025-0134", reason = "tracked: migrate to rustls-pki-types PemObject" },
+    # rsa 0.9.x Marvin Attack timing sidechannel (via sqlx-mysql transitive dep)
+    # sqlx-mysql is only compiled with db-mysql feature; default build uses sqlite
+    { id = "RUSTSEC-2023-0071", reason = "tracked: sqlx-mysql transitive dep, not used in default sqlite build" },
 ]
 
 # ---------------------------------------------------------------------------

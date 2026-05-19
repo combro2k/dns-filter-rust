@@ -13,9 +13,14 @@ use dns_filter::frameworks::config::loader::load_config;
 use dns_filter::frameworks::config::merger::merge_with_example;
 #[cfg(feature = "http-api")]
 use dns_filter::frameworks::config::schema::ApiConfig;
-use dns_filter::frameworks::config::schema::DEFAULT_CONTROL_SOCKET_PATH;
+use dns_filter::frameworks::config::schema::{DEFAULT_CONTROL_SOCKET_PATH, DEFAULT_DATABASE_URL};
 use dns_filter::frameworks::control_client;
 use dns_filter::frameworks::control_socket::ControlServer;
+use dns_filter::frameworks::database;
+use dns_filter::frameworks::database::{
+    SqlxFilterCacheRepository, SqlxFilterListRepository, SqlxFilteringConfigRepository,
+    SqlxUpstreamConfigRepository, SqlxZoneDiscoveryRepository, SqlxZoneRepository,
+};
 use dns_filter::frameworks::logging;
 use dns_filter::frameworks::privileges::{
     drop_privileges, PrivilegeDropConfig, DEFAULT_CHROOT_DIR, DEFAULT_GROUP, DEFAULT_USER,
@@ -28,10 +33,12 @@ use dns_filter::interface_adapters::listeners::handler::HickoryRequestHandler;
 use dns_filter::interface_adapters::listeners::http::{start_api_server, ApiState};
 use dns_filter::interface_adapters::listeners::{bind_tcp_tokio, bind_udp_tokio, parse_bind_addrs};
 use dns_filter::use_cases::config_bootstrap::{
-    build_any_query_policy, build_dns_request_pipeline_full, build_domain_filter,
+    build_any_query_policy, build_dns_request_pipeline_full, build_domain_filter_with_cache,
     build_upstream_resolver, build_zone_entries, validate_config,
 };
-use dns_filter::use_cases::reload::reload_config;
+use dns_filter::use_cases::config_from_db::{apply_db_config, Repositories};
+use dns_filter::use_cases::reload::reload_config_from_db;
+use dns_filter::use_cases::seed;
 #[cfg(any(feature = "http-api", feature = "mcp"))]
 use dns_filter::use_cases::server_operations::{QueryStats, ServerOperations};
 #[cfg(feature = "http-api")]
@@ -245,7 +252,7 @@ fn run_merge_config(config_path: &str, overwrite: bool) {
 
 /// Main daemon entry point.
 async fn run_daemon(config_path: String, debug: bool) {
-    let config = match load_config(&config_path) {
+    let mut config = match load_config(&config_path) {
         Ok(cfg) => validate_config(cfg),
         Err(e) => {
             eprintln!("{e}");
@@ -263,6 +270,49 @@ async fn run_daemon(config_path: String, debug: bool) {
         }
     };
 
+    // --- Initialize database ---
+    let db_url = config
+        .database
+        .as_ref()
+        .map(|d| d.url.as_str())
+        .unwrap_or(DEFAULT_DATABASE_URL);
+
+    let db_pool = match database::pool::init_pool(db_url).await {
+        Ok(pool) => pool,
+        Err(e) => {
+            eprintln!("failed to initialize database: {e:#}");
+            std::process::exit(1);
+        }
+    };
+
+    let filter_cache: Arc<dyn dns_filter::use_cases::repositories::FilterCacheRepository> =
+        Arc::new(SqlxFilterCacheRepository::new(db_pool.clone()));
+
+    let repos = Arc::new(Repositories {
+        filter_lists: Box::new(SqlxFilterListRepository::new(db_pool.clone())),
+        filter_cache: Arc::clone(&filter_cache),
+        filtering_config: Box::new(SqlxFilteringConfigRepository::new(db_pool.clone())),
+        upstream_config: Box::new(SqlxUpstreamConfigRepository::new(db_pool.clone())),
+        zones: Box::new(SqlxZoneRepository::new(db_pool.clone())),
+        zone_discovery: Box::new(SqlxZoneDiscoveryRepository::new(db_pool.clone())),
+    });
+
+    // Seed the database from YAML config if the DB is empty.
+    match seed::seed_if_empty(&config, &repos).await {
+        Ok(true) => tracing::info!("database seeded from YAML configuration"),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("failed to seed database: {e:#}");
+            std::process::exit(1);
+        }
+    }
+
+    // Load operational config from the database (source of truth).
+    if let Err(e) = apply_db_config(&mut config, &repos).await {
+        eprintln!("failed to load operational config from database: {e:#}");
+        std::process::exit(1);
+    }
+
     let upstream_resolver = match build_upstream_resolver(&config) {
         Ok(resolver) => resolver,
         Err(e) => {
@@ -271,13 +321,14 @@ async fn run_daemon(config_path: String, debug: bool) {
         }
     };
 
-    let domain_filter = match build_domain_filter(&config) {
-        Ok(filter) => filter,
-        Err(e) => {
-            eprintln!("invalid filtering configuration: {e:#}");
-            std::process::exit(1);
-        }
-    };
+    let domain_filter =
+        match build_domain_filter_with_cache(&config, Some(Arc::clone(&filter_cache))) {
+            Ok(filter) => filter,
+            Err(e) => {
+                eprintln!("invalid filtering configuration: {e:#}");
+                std::process::exit(1);
+            }
+        };
     domain_filter.clone().start_background_refresh();
 
     let any_query_policy = match build_any_query_policy(&config) {
@@ -544,6 +595,7 @@ async fn run_daemon(config_path: String, debug: bool) {
     let config_path_for_reload = config_path.clone();
     let pipeline_slot_for_reload = Arc::clone(&request_pipeline_slot);
     let filtering_enabled_for_reload = Arc::clone(&filtering_enabled);
+    let repos_for_reload = Arc::clone(&repos);
 
     // Create a channel so SIGHUP, the API, and the control socket can trigger reloads.
     let (reload_tx, mut reload_rx) = tokio::sync::mpsc::channel::<()>(4);
@@ -558,7 +610,7 @@ async fn run_daemon(config_path: String, debug: bool) {
 
     let reload_task = tokio::spawn(async move {
         while reload_rx.recv().await.is_some() {
-            match reload_config(&config_path_for_reload) {
+            match reload_config_from_db(&config_path_for_reload, &repos_for_reload).await {
                 Ok((new_resolver, new_filter, new_any_query_policy, new_zone_entries)) => {
                     new_filter.clone().start_background_refresh();
                     let new_pipeline = Arc::new(build_dns_request_pipeline_full(
