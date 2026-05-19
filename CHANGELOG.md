@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.3.0] - 2026-05-19
 
 ### Added
 - **Database-backed operational config**: migrated blocklists, allowlists, filtering settings, upstream resolvers, zones, and zone discovery from static YAML to a database-backed configuration store using sqlx. Supports SQLite (default), MySQL, and PostgreSQL via compile-time feature flags (`db-sqlite`, `db-mysql`, `db-postgres`).
