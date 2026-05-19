@@ -57,6 +57,12 @@ pub enum ServerOperationError {
     ChannelClosed,
 }
 
+impl From<anyhow::Error> for ServerOperationError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Internal(format!("{e:#}"))
+    }
+}
+
 /// Shared business logic for all management interfaces (MCP, HTTP API, control socket).
 pub struct ServerOperations {
     pub(crate) domain_filter: Arc<dyn DomainFilter>,
@@ -314,7 +320,7 @@ impl ServerOperations {
             .filter_lists
             .get_all()
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+            .map_err(ServerOperationError::from)?;
         Ok(all.into_iter().filter(|r| r.kind == kind).collect())
     }
 
@@ -336,7 +342,7 @@ impl ServerOperations {
             .filter_lists
             .get_by_name(&input.name)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .map_err(ServerOperationError::from)?
             .is_some()
         {
             return Err(ServerOperationError::InvalidInput(format!(
@@ -359,7 +365,7 @@ impl ServerOperations {
             .filter_lists
             .create(&record)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+            .map_err(ServerOperationError::from)?;
 
         self.reload_after_mutation().await;
         Ok(record)
@@ -375,7 +381,7 @@ impl ServerOperations {
             .filter_lists
             .get_by_name(name)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .map_err(ServerOperationError::from)?
             .ok_or_else(|| {
                 ServerOperationError::NotFound(format!("filter list '{name}' not found"))
             })?;
@@ -399,7 +405,7 @@ impl ServerOperations {
             .filter_lists
             .update(&record)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+            .map_err(ServerOperationError::from)?;
 
         self.reload_after_mutation().await;
         Ok(record)
@@ -414,7 +420,7 @@ impl ServerOperations {
             .filter_lists
             .get_by_name(name)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .map_err(ServerOperationError::from)?
             .ok_or_else(|| {
                 ServerOperationError::NotFound(format!("filter list '{name}' not found"))
             })?;
@@ -423,7 +429,7 @@ impl ServerOperations {
             .filter_lists
             .delete(&record.id)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+            .map_err(ServerOperationError::from)?;
 
         self.reload_after_mutation().await;
         Ok(DeleteResult {
@@ -439,7 +445,7 @@ impl ServerOperations {
             .zones
             .get_all_with_servers()
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))
+            .map_err(ServerOperationError::from)
     }
 
     pub async fn add_zone(
@@ -455,7 +461,7 @@ impl ServerOperations {
             .zones
             .get_by_zone(&input.zone)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .map_err(ServerOperationError::from)?
             .is_some()
         {
             return Err(ServerOperationError::InvalidInput(format!(
@@ -479,7 +485,7 @@ impl ServerOperations {
             .zones
             .create_zone(&zone_record)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+            .map_err(ServerOperationError::from)?;
 
         let mut server_records = Vec::new();
         for (i, server) in input.servers.unwrap_or_default().into_iter().enumerate() {
@@ -506,7 +512,7 @@ impl ServerOperations {
                 .zones
                 .create_zone_server(&rec)
                 .await
-                .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+                .map_err(ServerOperationError::from)?;
             server_records.push(rec);
         }
 
@@ -527,7 +533,7 @@ impl ServerOperations {
             .zones
             .get_by_zone(zone_name)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .map_err(ServerOperationError::from)?
             .ok_or_else(|| {
                 ServerOperationError::NotFound(format!("zone '{zone_name}' not found"))
             })?;
@@ -549,7 +555,7 @@ impl ServerOperations {
             .zones
             .update_zone(&record)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+            .map_err(ServerOperationError::from)?;
 
         // Replace servers if provided
         if let Some(servers) = input.servers {
@@ -557,7 +563,7 @@ impl ServerOperations {
                 .zones
                 .delete_zone_servers(&record.id)
                 .await
-                .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+                .map_err(ServerOperationError::from)?;
 
             let mut server_records = Vec::new();
             for (i, server) in servers.into_iter().enumerate() {
@@ -584,7 +590,7 @@ impl ServerOperations {
                     .zones
                     .create_zone_server(&rec)
                     .await
-                    .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+                    .map_err(ServerOperationError::from)?;
                 server_records.push(rec);
             }
             record.servers = server_records;
@@ -600,7 +606,7 @@ impl ServerOperations {
             .zones
             .get_by_zone(zone_name)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .map_err(ServerOperationError::from)?
             .ok_or_else(|| {
                 ServerOperationError::NotFound(format!("zone '{zone_name}' not found"))
             })?;
@@ -609,7 +615,7 @@ impl ServerOperations {
             .zones
             .delete_zone(&record.id)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+            .map_err(ServerOperationError::from)?;
 
         self.reload_after_mutation().await;
         Ok(DeleteResult {
@@ -627,7 +633,7 @@ impl ServerOperations {
             .zone_discovery
             .get_all()
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))
+            .map_err(ServerOperationError::from)
     }
 
     pub async fn add_zone_discovery(
@@ -664,7 +670,7 @@ impl ServerOperations {
             .zone_discovery
             .create(&record)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+            .map_err(ServerOperationError::from)?;
 
         self.reload_after_mutation().await;
         Ok(record)
@@ -680,7 +686,7 @@ impl ServerOperations {
             .zone_discovery
             .get_by_id(id)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .map_err(ServerOperationError::from)?
             .ok_or_else(|| {
                 ServerOperationError::NotFound(format!("zone discovery '{id}' not found"))
             })?;
@@ -717,7 +723,7 @@ impl ServerOperations {
             .zone_discovery
             .update(&record)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+            .map_err(ServerOperationError::from)?;
 
         self.reload_after_mutation().await;
         Ok(record)
@@ -734,7 +740,7 @@ impl ServerOperations {
             .zone_discovery
             .get_by_id(id)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .map_err(ServerOperationError::from)?
             .ok_or_else(|| {
                 ServerOperationError::NotFound(format!("zone discovery '{id}' not found"))
             })?;
@@ -743,7 +749,7 @@ impl ServerOperations {
             .zone_discovery
             .delete(id)
             .await
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+            .map_err(ServerOperationError::from)?;
 
         self.reload_after_mutation().await;
         Ok(DeleteResult {

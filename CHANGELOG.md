@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **OpenRC service fails to start (exit 32)**: the init script lacked a `directory` directive, so `start-stop-daemon` launched the daemon with CWD `/` where migration files could not be found. Added `directory="/var/lib/dns-filter"` to match systemd's `WorkingDirectory`. Also added `output_log`/`error_log` so startup errors are no longer silently lost.
+- **Migrations not found when started by init system**: migration SQL files were loaded from the filesystem relative to CWD, which broke when OpenRC or systemd launched the binary from `/`. Migrations are now embedded in the binary at compile time via `sqlx::migrate!()`, eliminating runtime filesystem dependency. Removed the `install-migrations` Makefile target as it is no longer needed.
+- **MCP/API CRUD operations fail with opaque "internal error"**: database errors during CRUD mutations (insert, update, delete) were reported as just the outermost context message (e.g. "failed to insert filter list") because `anyhow::Error.to_string()` discards the root cause chain. Switched to `format!("{e:#}")` so the full error chain (including the underlying SQLite/database error) is now visible in error responses.
+- **SQLite concurrent access errors (SQLITE_BUSY)**: the connection pool was created without explicit WAL journal mode, causing write operations to fail when concurrent reads (e.g. from a config reload) held shared locks. The pool now explicitly sets `journal_mode=WAL` and `busy_timeout=5s`, allowing concurrent readers and writers without lock contention.
+
 ### Changed
 - **Normalized list columns in database schema**: replaced JSON-encoded TEXT columns (`resolver_config.bootstrap_resolvers` and `zone_discovery.allowed_types`) with proper relational tables (`bootstrap_resolvers` and `zone_discovery_allowed_types`). Existing JSON data is automatically migrated. This eliminates JSON serialization/deserialization in application code and makes the schema consistent with how other collections (upstream servers, zone servers) are stored.
 

@@ -57,6 +57,7 @@ install-config:
 install-data:
 	install -d -m 0755 $(DESTDIR)$(DATADIR)
 
+
 install-service:
 ifeq ($(INIT_SYSTEM),systemd)
 	@$(MAKE) install-systemd-service
