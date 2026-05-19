@@ -25,8 +25,8 @@ mod tests {
             .expect("connect to in-memory SQLite");
 
         // Run the migration SQL manually for tests
-        let migration_sql = include_str!("../../../migrations/sqlite/001_initial_schema.sql");
-        for statement in migration_sql.split(';') {
+        let migration_001 = include_str!("../../../migrations/sqlite/001_initial_schema.sql");
+        for statement in migration_001.split(';') {
             let trimmed = statement.trim();
             if !trimmed.is_empty() {
                 sqlx::query(trimmed)
@@ -35,6 +35,19 @@ mod tests {
                     .unwrap_or_else(|e| panic!("migration statement failed: {e}\nSQL: {trimmed}"));
             }
         }
+
+        let migration_002 =
+            include_str!("../../../migrations/sqlite/002_normalize_list_columns.sql");
+        for statement in migration_002.split(';') {
+            let trimmed = statement.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed)
+                    .execute(&pool)
+                    .await
+                    .unwrap_or_else(|e| panic!("migration statement failed: {e}\nSQL: {trimmed}"));
+            }
+        }
+
         pool
     }
 
@@ -171,7 +184,7 @@ mod tests {
         // Update resolver config
         repo.update_resolver_config(&ResolverConfigRecord {
             strategy: "failover".to_string(),
-            bootstrap_resolvers: r#"["8.8.8.8"]"#.to_string(),
+            bootstrap_resolvers: vec!["8.8.8.8".to_string()],
         })
         .await
         .unwrap();
@@ -274,7 +287,7 @@ mod tests {
             enabled: true,
             address: "https://example.com/zones.json".to_string(),
             check_interval: Some("15m".to_string()),
-            allowed_types: r#"["reverse","forward"]"#.to_string(),
+            allowed_types: vec!["reverse".to_string(), "forward".to_string()],
             bypass_filter: false,
             fallback_to_default_resolvers: true,
             auth_token: Some("secret".to_string()),
