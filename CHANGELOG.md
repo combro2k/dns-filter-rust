@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.4.0] - 2026-05-19
 
 ### Added
 - **OpenAPI documentation**: auto-generated OpenAPI 3.1 spec served at `GET /api/v1/openapi.json`, derived from endpoint annotations using `utoipa`. The endpoint is gated behind bearer token authentication when `api_token` is configured (same auth as all other `/api/v1` routes).
