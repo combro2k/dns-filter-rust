@@ -1,5 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{middleware, Router};
@@ -11,27 +10,18 @@ use rmcp::transport::streamable_http_server::tower::{
 };
 use rmcp::{tool_handler, tool_router};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::entities::filter::FilterDecision;
-use crate::entities::query_log::QueryLog;
 use crate::frameworks::config::schema::McpConfig;
 use crate::interface_adapters::listeners::auth::bearer_auth_middleware;
-use crate::interface_adapters::listeners::ApiStats;
-use crate::use_cases::filtering::DomainFilter;
+use crate::use_cases::server_operations::ServerOperations;
 
 use super::{bind_tcp, parse_bind_addrs};
 
-/// Shared runtime state accessible by all MCP tool handlers.
+/// MCP-specific server state: shared operations + adapter-only concerns.
 pub struct McpServerState {
-    pub domain_filter: Arc<dyn DomainFilter>,
-    pub filtering_enabled: Arc<AtomicBool>,
-    pub query_log: Option<Arc<Mutex<QueryLog>>>,
-    pub reload_tx: mpsc::Sender<()>,
-    pub start_time: u64,
-    pub stats: Arc<ApiStats>,
+    pub ops: Arc<ServerOperations>,
     pub shutdown: CancellationToken,
 }
 
@@ -67,6 +57,18 @@ struct OptionalListActionParams {
     name: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ZoneSearchParams {
+    /// Search query to fuzzy-match against domain names in zones
+    query: String,
+    /// Optional zone name to limit the search to a specific zone
+    zone: Option<String>,
+    /// Optional record type filter (e.g. "A", "AAAA", "CNAME", "MX")
+    record_type: Option<String>,
+    /// Maximum number of results to return (default: 50, max: 500)
+    limit: Option<usize>,
+}
+
 // --- Tool implementations ---
 
 #[tool_router]
@@ -75,49 +77,39 @@ impl McpHandler {
         description = "Look up a domain against the DNS filter and return whether it is allowed, blocked, or neutral"
     )]
     async fn dns_lookup(&self, Parameters(params): Parameters<DnsLookupParams>) -> String {
-        let decision = self.state.domain_filter.decide(&params.domain);
-        let status = match decision {
-            FilterDecision::Allow => "allowed",
-            FilterDecision::Block => "blocked",
-            FilterDecision::Neutral => "neutral (passthrough)",
-        };
-        serde_json::json!({
-            "domain": params.domain,
-            "decision": status,
-            "filtering_enabled": self.state.filtering_enabled.load(Ordering::Relaxed),
-        })
-        .to_string()
+        let result = self.state.ops.dns_lookup(&params.domain);
+        serde_json::to_string(&result)
+            .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
     }
 
     #[tool(description = "Get the current filtering status (enabled or disabled)")]
     async fn filter_status(&self) -> String {
-        let enabled = self.state.filtering_enabled.load(Ordering::Relaxed);
-        serde_json::json!({ "filtering_enabled": enabled }).to_string()
+        let result = self.state.ops.filter_status();
+        serde_json::to_string(&result)
+            .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
     }
 
     #[tool(description = "Enable or disable global DNS filtering")]
     async fn filter_toggle(&self, Parameters(params): Parameters<FilterToggleParams>) -> String {
-        self.state
-            .filtering_enabled
-            .store(params.enabled, Ordering::Relaxed);
-        let action = if params.enabled {
-            "enabled"
-        } else {
-            "disabled"
-        };
-        tracing::info!(source = "mcp", "global filtering {action} via MCP");
-        serde_json::json!({
-            "filtering_enabled": params.enabled,
-            "message": format!("filtering {action}"),
-        })
-        .to_string()
+        let result = self.state.ops.set_filtering(params.enabled);
+        tracing::info!(
+            source = "mcp",
+            "global filtering {} via MCP",
+            if params.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        serde_json::to_string(&result)
+            .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
     }
 
     #[tool(
         description = "List all configured filter lists with their status, domain counts, and configuration"
     )]
     async fn list_filters(&self) -> String {
-        let lists = self.state.domain_filter.list_names();
+        let lists = self.state.ops.list_filters();
         serde_json::to_string(&lists).unwrap_or_else(|_| "[]".to_string())
     }
 
@@ -129,26 +121,19 @@ impl McpHandler {
         Parameters(params): Parameters<OptionalListActionParams>,
     ) -> String {
         if let Some(name) = &params.name {
-            if self.state.domain_filter.refresh_list(name) {
-                tracing::info!(source = "mcp", list = %name, "list refresh triggered via MCP");
-                serde_json::json!({
-                    "list": name,
-                    "status": "refreshing",
-                })
-                .to_string()
-            } else {
-                serde_json::json!({
-                    "error": format!("list '{}' not found", name),
-                })
-                .to_string()
+            match self.state.ops.refresh_list(name) {
+                Ok(result) => {
+                    tracing::info!(source = "mcp", list = %name, "list refresh triggered via MCP");
+                    serde_json::to_string(&result)
+                        .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+                }
+                Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
             }
         } else {
-            let refreshed = self.state.domain_filter.refresh_all_lists();
-            tracing::info!(source = "mcp", lists = ?refreshed, "all lists refresh triggered via MCP");
-            serde_json::json!({
-                "lists_refreshing": refreshed,
-            })
-            .to_string()
+            let result = self.state.ops.refresh_all_lists();
+            tracing::info!(source = "mcp", lists = ?result.lists_refreshing, "all lists refresh triggered via MCP");
+            serde_json::to_string(&result)
+                .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
         }
     }
 
@@ -156,35 +141,8 @@ impl McpHandler {
         description = "Get query statistics including total queries, blocked, allowed, passthrough counts, and uptime"
     )]
     async fn get_stats(&self) -> String {
-        let uptime = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            .saturating_sub(self.state.start_time);
-
-        let lists = self.state.domain_filter.list_names();
-
-        #[derive(Serialize)]
-        struct Stats {
-            uptime_seconds: u64,
-            filtering_enabled: bool,
-            queries_total: u64,
-            queries_blocked: u64,
-            queries_allowed: u64,
-            queries_passthrough: u64,
-            lists: Vec<crate::use_cases::filtering::ListInfo>,
-        }
-
-        let stats = Stats {
-            uptime_seconds: uptime,
-            filtering_enabled: self.state.filtering_enabled.load(Ordering::Relaxed),
-            queries_total: self.state.stats.queries_total.load(Ordering::Relaxed),
-            queries_blocked: self.state.stats.queries_blocked.load(Ordering::Relaxed),
-            queries_allowed: self.state.stats.queries_allowed.load(Ordering::Relaxed),
-            queries_passthrough: self.state.stats.queries_passthrough.load(Ordering::Relaxed),
-            lists,
-        };
-        serde_json::to_string(&stats)
+        let result = self.state.ops.get_stats();
+        serde_json::to_string(&result)
             .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
     }
 
@@ -192,99 +150,81 @@ impl McpHandler {
         description = "Get the recent DNS query log. Requires query logging to be enabled in config."
     )]
     async fn get_query_log(&self) -> String {
-        let Some(ref query_log) = self.state.query_log else {
-            return serde_json::json!({
-                "error": "query logging is not enabled; set api.query_logging.enabled = true in config",
-            })
-            .to_string();
-        };
-
-        let log = query_log
-            .lock()
-            .expect("query log lock poisoned while reading");
-
-        #[derive(Serialize)]
-        struct QueryLogResponse {
-            total: usize,
-            max_entries: usize,
-            entries: std::collections::VecDeque<crate::entities::query_log::QueryLogEntry>,
+        match self.state.ops.get_query_log() {
+            Ok(result) => serde_json::to_string(&result)
+                .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
         }
-
-        let resp = QueryLogResponse {
-            total: log.len(),
-            max_entries: log.max_entries(),
-            entries: log.entries().clone(),
-        };
-        serde_json::to_string(&resp)
-            .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
     }
 
     #[tool(description = "Trigger a configuration reload from disk")]
     async fn reload_config(&self) -> String {
-        match self.state.reload_tx.send(()).await {
-            Ok(()) => {
+        match self.state.ops.trigger_reload().await {
+            Ok(result) => {
                 tracing::info!(source = "mcp", "configuration reload triggered via MCP");
-                serde_json::json!({
-                    "status": "triggered",
-                    "message": "configuration reload initiated",
-                })
-                .to_string()
+                serde_json::to_string(&result)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
             }
-            Err(_) => serde_json::json!({
-                "error": "reload channel closed; reload handler not running",
-            })
-            .to_string(),
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
         }
     }
 
     #[tool(description = "Get server health status including version and uptime")]
     async fn server_health(&self) -> String {
-        let uptime = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            .saturating_sub(self.state.start_time);
-
-        serde_json::json!({
-            "status": "healthy",
-            "version": env!("CARGO_PKG_VERSION"),
-            "uptime_seconds": uptime,
-            "filtering_enabled": self.state.filtering_enabled.load(Ordering::Relaxed),
-        })
-        .to_string()
+        let result = self.state.ops.server_health();
+        serde_json::to_string(&result)
+            .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
     }
 
     #[tool(description = "Enable a specific filter list by name")]
     async fn enable_list(&self, Parameters(params): Parameters<ListActionParams>) -> String {
-        if self.state.domain_filter.enable_list(&params.name) {
-            tracing::info!(source = "mcp", list = %params.name, "list enabled via MCP");
-            serde_json::json!({
-                "list": params.name,
-                "enabled": true,
-            })
-            .to_string()
-        } else {
-            serde_json::json!({
-                "error": format!("list '{}' not found", params.name),
-            })
-            .to_string()
+        match self.state.ops.enable_list(&params.name) {
+            Ok(result) => {
+                tracing::info!(source = "mcp", list = %params.name, "list enabled via MCP");
+                serde_json::to_string(&result)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
         }
     }
 
     #[tool(description = "Disable a specific filter list by name")]
     async fn disable_list(&self, Parameters(params): Parameters<ListActionParams>) -> String {
-        if self.state.domain_filter.disable_list(&params.name) {
-            tracing::info!(source = "mcp", list = %params.name, "list disabled via MCP");
-            serde_json::json!({
-                "list": params.name,
-                "enabled": false,
-            })
-            .to_string()
-        } else {
-            serde_json::json!({
-                "error": format!("list '{}' not found", params.name),
-            })
-            .to_string()
+        match self.state.ops.disable_list(&params.name) {
+            Ok(result) => {
+                tracing::info!(source = "mcp", list = %params.name, "list disabled via MCP");
+                serde_json::to_string(&result)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(description = "List all configured DNS zones with record counts and metadata")]
+    async fn list_zones(&self) -> String {
+        match self.state.ops.list_zones() {
+            Ok(result) => serde_json::to_string(&result)
+                .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Search for DNS records across zones using fuzzy domain name matching. Supports filtering by zone, record type, and result limit."
+    )]
+    async fn search_zone_records(
+        &self,
+        Parameters(params): Parameters<ZoneSearchParams>,
+    ) -> String {
+        match self.state.ops.search_zone_records(
+            &params.query,
+            params.zone.as_deref(),
+            params.record_type.as_deref(),
+            params.limit,
+        ) {
+            Ok(result) => serde_json::to_string(&result)
+                .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
         }
     }
 }

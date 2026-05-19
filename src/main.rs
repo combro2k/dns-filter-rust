@@ -26,21 +26,19 @@ use dns_filter::interface_adapters::listeners::build_tls_config_with_alpn;
 use dns_filter::interface_adapters::listeners::handler::HickoryRequestHandler;
 #[cfg(feature = "http-api")]
 use dns_filter::interface_adapters::listeners::http::{start_api_server, ApiState};
-#[cfg(any(feature = "http-api", feature = "mcp"))]
-use dns_filter::interface_adapters::listeners::ApiStats;
 use dns_filter::interface_adapters::listeners::{bind_tcp_tokio, bind_udp_tokio, parse_bind_addrs};
 use dns_filter::use_cases::config_bootstrap::{
     build_any_query_policy, build_dns_request_pipeline_full, build_domain_filter,
     build_upstream_resolver, build_zone_entries, validate_config,
 };
 use dns_filter::use_cases::reload::reload_config;
+#[cfg(any(feature = "http-api", feature = "mcp"))]
+use dns_filter::use_cases::server_operations::{QueryStats, ServerOperations};
 #[cfg(feature = "http-api")]
 use std::net::SocketAddr;
 #[cfg(feature = "http-api")]
 use std::sync::Mutex as StdMutex;
-#[cfg(feature = "http-api")]
-use std::time::{SystemTime, UNIX_EPOCH};
-#[cfg(all(feature = "mcp", not(feature = "http-api")))]
+#[cfg(any(feature = "http-api", feature = "mcp"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/dns-filter/config.yaml";
@@ -296,6 +294,27 @@ async fn run_daemon(config_path: String, debug: bool) {
             eprintln!("invalid zone forwarding configuration: {e:#}");
             std::process::exit(1);
         }
+    };
+
+    // Build the zone registry from searchable zone entries (for MCP/API zone search).
+    #[cfg(feature = "mcp")]
+    let zone_registry = {
+        use dns_filter::use_cases::zone_registry::{ZoneMetadata, ZoneRegistry};
+        let searchable_zones: Vec<_> = zone_entries
+            .iter()
+            .filter_map(|entry| {
+                entry.searchable().map(|s| {
+                    (
+                        Arc::clone(s),
+                        ZoneMetadata {
+                            bypass_filter: entry.bypass_filter(),
+                            fallback_to_default_resolvers: entry.fallback_to_default_resolvers(),
+                        },
+                    )
+                })
+            })
+            .collect();
+        Arc::new(ZoneRegistry::new(searchable_zones))
     };
 
     // Global filtering toggle shared with the API and filter pipeline stage.
@@ -571,33 +590,55 @@ async fn run_daemon(config_path: String, debug: bool) {
 
     // Start the HTTP API server if configured.
     // Clone state for MCP before API takes ownership.
-    #[cfg(feature = "mcp")]
-    let mcp_domain_filter = Arc::clone(&domain_filter);
-    #[cfg(feature = "mcp")]
-    let mcp_filtering_enabled = Arc::clone(&filtering_enabled);
-    #[cfg(feature = "mcp")]
-    let mcp_reload_tx = reload_tx.clone();
+    #[cfg(any(feature = "http-api", feature = "mcp"))]
+    let start_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    #[cfg(any(feature = "http-api", feature = "mcp"))]
+    let shared_stats = Arc::new(QueryStats::new());
+
+    #[cfg(any(feature = "http-api", feature = "mcp"))]
+    let query_log = {
+        #[cfg(feature = "http-api")]
+        {
+            config
+                .api
+                .as_ref()
+                .and_then(|api| api.query_logging.as_ref())
+                .filter(|ql| ql.enabled)
+                .map(|ql| Arc::new(StdMutex::new(QueryLog::new(ql.max_entries))))
+        }
+        #[cfg(not(feature = "http-api"))]
+        {
+            None::<Arc<StdMutex<QueryLog>>>
+        }
+    };
+
+    #[cfg(any(feature = "http-api", feature = "mcp"))]
+    let server_ops = {
+        let ops = ServerOperations::new(
+            Arc::clone(&domain_filter),
+            Arc::clone(&filtering_enabled),
+            query_log,
+            reload_tx.clone(),
+            start_time,
+            Arc::clone(&shared_stats),
+        );
+        #[cfg(feature = "mcp")]
+        let ops = ops.with_zone_registry(zone_registry);
+        Arc::new(ops)
+    };
 
     #[cfg(feature = "http-api")]
-    let api_task = spawn_api_server(
-        &config.api,
-        domain_filter,
-        filtering_enabled,
-        reload_tx,
-        shutdown.clone(),
-    );
+    let api_task = spawn_api_server(&config.api, Arc::clone(&server_ops), shutdown.clone());
     #[cfg(not(feature = "http-api"))]
     let api_task: Option<tokio::task::JoinHandle<()>> = None;
 
     // Start the MCP server if configured.
     #[cfg(feature = "mcp")]
-    let mcp_task = spawn_mcp_server(
-        &config.mcp,
-        mcp_domain_filter,
-        mcp_filtering_enabled,
-        mcp_reload_tx,
-        shutdown.clone(),
-    );
+    let mcp_task = spawn_mcp_server(&config.mcp, Arc::clone(&server_ops), shutdown.clone());
     #[cfg(not(feature = "mcp"))]
     let mcp_task: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -645,9 +686,7 @@ async fn run_daemon(config_path: String, debug: bool) {
 #[cfg(feature = "http-api")]
 fn spawn_api_server(
     api_config: &Option<ApiConfig>,
-    domain_filter: Arc<dyn dns_filter::use_cases::filtering::DomainFilter>,
-    filtering_enabled: Arc<AtomicBool>,
-    reload_tx: tokio::sync::mpsc::Sender<()>,
+    ops: Arc<ServerOperations>,
     shutdown: CancellationToken,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let api_config = api_config.as_ref().filter(|c| c.enabled)?;
@@ -659,25 +698,9 @@ fn spawn_api_server(
             std::process::exit(1);
         });
 
-    let query_log = api_config
-        .query_logging
-        .as_ref()
-        .filter(|ql| ql.enabled)
-        .map(|ql| Arc::new(StdMutex::new(QueryLog::new(ql.max_entries))));
-
-    let start_time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
     let state = Arc::new(ApiState {
-        domain_filter,
-        filtering_enabled,
-        query_log,
-        reload_tx,
+        ops,
         api_token: api_config.api_token.clone(),
-        start_time,
-        stats: Arc::new(ApiStats::new()),
         shutdown,
     });
 
@@ -691,29 +714,14 @@ fn spawn_api_server(
 #[cfg(feature = "mcp")]
 fn spawn_mcp_server(
     mcp_config: &Option<dns_filter::frameworks::config::schema::McpConfig>,
-    domain_filter: Arc<dyn dns_filter::use_cases::filtering::DomainFilter>,
-    filtering_enabled: Arc<AtomicBool>,
-    reload_tx: tokio::sync::mpsc::Sender<()>,
+    ops: Arc<ServerOperations>,
     shutdown: CancellationToken,
 ) -> Option<tokio::task::JoinHandle<()>> {
     use dns_filter::interface_adapters::listeners::mcp::{start_mcp_server, McpServerState};
 
     let mcp_config = mcp_config.as_ref().filter(|c| c.enabled)?;
 
-    let start_time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let state = Arc::new(McpServerState {
-        domain_filter,
-        filtering_enabled,
-        query_log: None,
-        reload_tx,
-        start_time,
-        stats: Arc::new(ApiStats::new()),
-        shutdown,
-    });
+    let state = Arc::new(McpServerState { ops, shutdown });
 
     let mcp_config = mcp_config.clone();
     Some(tokio::spawn(async move {

@@ -143,32 +143,6 @@ fn configure_socket(socket: &Socket, addr: SocketAddr) -> io::Result<()> {
     Ok(())
 }
 
-/// Atomic query counters for stats endpoint.
-///
-/// Shared between the HTTP API and MCP server.
+/// Re-export of [`QueryStats`] for backward compatibility.
 #[cfg(any(feature = "http-api", feature = "mcp"))]
-pub struct ApiStats {
-    pub queries_total: std::sync::atomic::AtomicU64,
-    pub queries_blocked: std::sync::atomic::AtomicU64,
-    pub queries_allowed: std::sync::atomic::AtomicU64,
-    pub queries_passthrough: std::sync::atomic::AtomicU64,
-}
-
-#[cfg(any(feature = "http-api", feature = "mcp"))]
-impl Default for ApiStats {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(any(feature = "http-api", feature = "mcp"))]
-impl ApiStats {
-    pub fn new() -> Self {
-        Self {
-            queries_total: std::sync::atomic::AtomicU64::new(0),
-            queries_blocked: std::sync::atomic::AtomicU64::new(0),
-            queries_allowed: std::sync::atomic::AtomicU64::new(0),
-            queries_passthrough: std::sync::atomic::AtomicU64::new(0),
-        }
-    }
-}
+pub use crate::use_cases::server_operations::QueryStats as ApiStats;

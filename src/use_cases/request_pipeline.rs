@@ -223,10 +223,15 @@ impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError
         &self,
         request: &DnsPipelineRequest,
     ) -> Result<Option<DnsPipelineResponse>, DnsPipelineError> {
-        let response = self
-            .upstream_resolver
-            .resolve(request.query.clone())
-            .await?;
+        let response = match self.upstream_resolver.resolve(request.query.clone()).await {
+            Ok(r) => r,
+            Err(error) => {
+                tracing::warn!(%error, "upstream resolution failed; returning SERVFAIL");
+                return Ok(Some(DnsPipelineResponse::new(build_servfail_response(
+                    &request.query,
+                ))));
+            }
+        };
 
         if let Ok(mut msg) = Message::from_vec(&response) {
             msg.metadata.id = request.client_query_id;
@@ -711,17 +716,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dns_pipeline_returns_error_when_upstream_fails_without_fallback() {
+    async fn dns_pipeline_returns_servfail_when_upstream_fails_without_fallback() {
         let resolver: Arc<dyn UpstreamResolver> = Arc::new(AlwaysFailResolver);
         let pipeline = DnsRequestPipeline::default()
             .add_stage(DnsAnyQueryPolicyStage::new(AnyQueryPolicy::Passthrough))
             .add_stage(DnsUpstreamStage::new(resolver));
 
-        let result = pipeline
+        let response = pipeline
             .handle_request(&DnsPipelineRequest::new(make_query("example.com.")))
-            .await;
+            .await
+            .expect("pipeline should not error")
+            .expect("pipeline should return a response")
+            .into_bytes();
 
-        assert!(result.is_err());
+        let message = Message::from_vec(&response).expect("valid DNS message");
+        assert_eq!(message.response_code, ResponseCode::ServFail);
     }
 
     #[tokio::test]

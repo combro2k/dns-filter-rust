@@ -6,7 +6,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::frameworks::config::schema::ZoneDiscoveryConfig;
-use crate::use_cases::zone_authority::{ZoneAuthorityResolver, ZoneSourceAuth};
+use crate::use_cases::zone_authority::{ZoneAuthorityResolver, ZoneSearchable, ZoneSourceAuth};
 use crate::use_cases::zone_forwarding::ZoneEntry;
 
 const HTTP_TIMEOUT_SECS: u64 = 30;
@@ -121,12 +121,16 @@ pub fn build_zone_discovery_entries(
             )
         })?;
 
+        let resolver = Arc::new(resolver);
+        let searchable: Arc<dyn ZoneSearchable> = Arc::clone(&resolver) as Arc<dyn ZoneSearchable>;
+
         let entry = ZoneEntry::new(
             zone_item.name.clone(),
             discovery.bypass_filter,
             discovery.fallback_to_default_resolvers,
-            Arc::new(resolver),
+            resolver,
         )
+        .map(|entry| entry.with_searchable(searchable))
         .with_context(|| {
             format!(
                 "zone_discovery: failed to create zone entry for '{}'",

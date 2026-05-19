@@ -209,12 +209,16 @@ fn build_zone_entry(
                 );
             }
             let resolver = build_zone_json_resolver(zone, json_servers[0])?;
+            let resolver = Arc::new(resolver);
+            let searchable: Arc<dyn crate::use_cases::zone_authority::ZoneSearchable> =
+                Arc::clone(&resolver) as Arc<dyn crate::use_cases::zone_authority::ZoneSearchable>;
             ZoneEntry::new(
                 zone.zone.clone(),
                 zone.bypass_filter,
                 zone.fallback_to_default_resolvers,
-                Arc::new(resolver),
+                resolver,
             )
+            .map(|entry| entry.with_searchable(searchable))
         }
         // Only upstream entries — build forwarding resolver.
         (true, false) => {

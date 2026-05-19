@@ -9,6 +9,7 @@ use crate::use_cases::request_pipeline::{
     AsyncRequestStage, DnsPipelineError, DnsPipelineRequest, DnsPipelineResponse,
 };
 use crate::use_cases::upstream_resolver::UpstreamResolver;
+use crate::use_cases::zone_authority::ZoneSearchable;
 
 #[derive(Clone)]
 pub struct ZoneEntry {
@@ -16,6 +17,7 @@ pub struct ZoneEntry {
     bypass_filter: bool,
     fallback_to_default_resolvers: bool,
     resolver: Arc<dyn UpstreamResolver>,
+    searchable: Option<Arc<dyn ZoneSearchable>>,
 }
 
 impl fmt::Debug for ZoneEntry {
@@ -45,7 +47,17 @@ impl ZoneEntry {
             bypass_filter,
             fallback_to_default_resolvers,
             resolver,
+            searchable: None,
         })
+    }
+
+    pub fn with_searchable(mut self, searchable: Arc<dyn ZoneSearchable>) -> Self {
+        self.searchable = Some(searchable);
+        self
+    }
+
+    pub fn searchable(&self) -> Option<&Arc<dyn ZoneSearchable>> {
+        self.searchable.as_ref()
     }
 
     pub fn zone(&self) -> &str {
@@ -125,7 +137,17 @@ impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError
                 );
                 Ok(None)
             }
-            Err(error) => Err(error.into()),
+            Err(error) => {
+                tracing::warn!(
+                    domain = %domain,
+                    zone = %entry.zone,
+                    error = %error,
+                    "zone-specific resolver failed; returning SERVFAIL"
+                );
+                Ok(Some(DnsPipelineResponse::new(
+                    crate::use_cases::request_pipeline::build_servfail_response(&request.query),
+                )))
+            }
         }
     }
 }
@@ -322,7 +344,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn returns_error_when_zone_failure_cannot_fall_back() {
+    async fn returns_servfail_when_zone_failure_cannot_fall_back() {
         let stage = ZoneForwardingStage::non_bypass(vec![zone_entry(
             "home.arpa",
             false,
@@ -330,14 +352,17 @@ mod tests {
             Arc::new(AlwaysFailResolver),
         )]);
 
-        let error = stage
+        let response = stage
             .handle(&make_query("printer.home.arpa."))
             .await
-            .expect_err("stage should error");
+            .expect("stage should not error")
+            .expect("stage should return a response")
+            .into_bytes();
 
-        assert!(matches!(
-            error,
-            DnsPipelineError::Upstream(UpstreamResolveError::AllFailed)
-        ));
+        let message = hickory_proto::op::Message::from_vec(&response).expect("valid DNS message");
+        assert_eq!(
+            message.response_code,
+            hickory_proto::op::ResponseCode::ServFail
+        );
     }
 }

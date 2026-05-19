@@ -1,7 +1,5 @@
-use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, State};
@@ -10,25 +8,17 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use serde::Serialize;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::entities::query_log::{QueryLog, QueryLogEntry};
-use crate::use_cases::filtering::DomainFilter;
+use crate::use_cases::server_operations::{ServerOperationError, ServerOperations};
 
 use super::auth::bearer_auth_middleware;
 use super::bind_tcp;
-pub use super::ApiStats;
 
-/// Shared runtime state accessible by all API handlers.
+/// HTTP API-specific server state: shared operations + adapter-only concerns.
 pub struct ApiState {
-    pub domain_filter: Arc<dyn DomainFilter>,
-    pub filtering_enabled: Arc<AtomicBool>,
-    pub query_log: Option<Arc<Mutex<QueryLog>>>,
-    pub reload_tx: mpsc::Sender<()>,
+    pub ops: Arc<ServerOperations>,
     pub api_token: Option<String>,
-    pub start_time: u64,
-    pub stats: Arc<ApiStats>,
     pub shutdown: CancellationToken,
 }
 
@@ -126,36 +116,17 @@ pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> anyhow:
 // --- Handler implementations ---
 
 async fn handle_health(State(state): State<Arc<ApiState>>) -> Response {
-    #[derive(Serialize)]
-    struct HealthResponse {
-        status: &'static str,
-        uptime_seconds: u64,
-    }
-
-    let uptime = now_unix().saturating_sub(state.start_time);
-    json_ok(HealthResponse {
-        status: "healthy",
-        uptime_seconds: uptime,
-    })
+    let result = state.ops.server_health();
+    json_ok(result)
 }
 
 async fn handle_reload(State(state): State<Arc<ApiState>>) -> Response {
-    #[derive(Serialize)]
-    struct ReloadResponse {
-        reload_status: &'static str,
-    }
-
-    match state.reload_tx.send(()).await {
-        Ok(()) => {
+    match state.ops.trigger_reload().await {
+        Ok(result) => {
             tracing::info!(source = "api", "configuration reload triggered via API");
-            json_ok(ReloadResponse {
-                reload_status: "triggered",
-            })
+            json_ok(result)
         }
-        Err(_) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "reload channel closed; reload handler not running",
-        ),
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
@@ -175,81 +146,47 @@ async fn handle_stop(State(state): State<Arc<ApiState>>) -> Response {
 }
 
 async fn handle_filtering_disable(State(state): State<Arc<ApiState>>) -> Response {
-    state.filtering_enabled.store(false, Ordering::Relaxed);
+    let result = state.ops.set_filtering(false);
     tracing::info!(source = "api", "global filtering disabled via API");
-
-    #[derive(Serialize)]
-    struct FilteringState {
-        enabled: bool,
-    }
-    json_ok(FilteringState { enabled: false })
+    json_ok(result)
 }
 
 async fn handle_filtering_enable(State(state): State<Arc<ApiState>>) -> Response {
-    state.filtering_enabled.store(true, Ordering::Relaxed);
+    let result = state.ops.set_filtering(true);
     tracing::info!(source = "api", "global filtering enabled via API");
-
-    #[derive(Serialize)]
-    struct FilteringState {
-        enabled: bool,
-    }
-    json_ok(FilteringState { enabled: true })
+    json_ok(result)
 }
 
 async fn handle_filtering_status(State(state): State<Arc<ApiState>>) -> Response {
-    #[derive(Serialize)]
-    struct FilteringState {
-        enabled: bool,
-    }
-    json_ok(FilteringState {
-        enabled: state.filtering_enabled.load(Ordering::Relaxed),
-    })
+    let result = state.ops.filter_status();
+    json_ok(result)
 }
 
 async fn handle_list_all(State(state): State<Arc<ApiState>>) -> Response {
-    let lists = state.domain_filter.list_names();
+    let lists = state.ops.list_filters();
     json_ok(lists)
 }
 
 async fn handle_refresh_all(State(state): State<Arc<ApiState>>) -> Response {
-    let refreshed = state.domain_filter.refresh_all_lists();
+    let result = state.ops.refresh_all_lists();
     tracing::info!(
         source = "api",
-        lists = ?refreshed,
+        lists = ?result.lists_refreshing,
         "all lists refresh triggered via API"
     );
-
-    #[derive(Serialize)]
-    struct RefreshAllResponse {
-        lists_refreshing: Vec<String>,
-    }
-    json_ok(RefreshAllResponse {
-        lists_refreshing: refreshed,
-    })
+    json_ok(result)
 }
 
 async fn handle_refresh_single(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
 ) -> Response {
-    if state.domain_filter.refresh_list(&name) {
-        tracing::info!(
-            source = "api",
-            list = %name,
-            "list refresh triggered via API"
-        );
-
-        #[derive(Serialize)]
-        struct RefreshResponse {
-            list: String,
-            status: &'static str,
+    match state.ops.refresh_list(&name) {
+        Ok(result) => {
+            tracing::info!(source = "api", list = %name, "list refresh triggered via API");
+            json_ok(result)
         }
-        json_ok(RefreshResponse {
-            list: name,
-            status: "refreshing",
-        })
-    } else {
-        json_error(StatusCode::NOT_FOUND, &format!("list '{name}' not found"))
+        Err(e) => op_error_to_response(e),
     }
 }
 
@@ -257,18 +194,9 @@ async fn handle_disable_list(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
 ) -> Response {
-    if state.domain_filter.disable_list(&name) {
-        #[derive(Serialize)]
-        struct ListState {
-            list: String,
-            enabled: bool,
-        }
-        json_ok(ListState {
-            list: name,
-            enabled: false,
-        })
-    } else {
-        json_error(StatusCode::NOT_FOUND, &format!("list '{name}' not found"))
+    match state.ops.disable_list(&name) {
+        Ok(result) => json_ok(result),
+        Err(e) => op_error_to_response(e),
     }
 }
 
@@ -276,71 +204,32 @@ async fn handle_enable_list(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
 ) -> Response {
-    if state.domain_filter.enable_list(&name) {
-        #[derive(Serialize)]
-        struct ListState {
-            list: String,
-            enabled: bool,
-        }
-        json_ok(ListState {
-            list: name,
-            enabled: true,
-        })
-    } else {
-        json_error(StatusCode::NOT_FOUND, &format!("list '{name}' not found"))
+    match state.ops.enable_list(&name) {
+        Ok(result) => json_ok(result),
+        Err(e) => op_error_to_response(e),
     }
 }
 
 async fn handle_stats(State(state): State<Arc<ApiState>>) -> Response {
-    #[derive(Serialize)]
-    struct StatsResponse {
-        uptime_seconds: u64,
-        filtering_enabled: bool,
-        queries_total: u64,
-        queries_blocked: u64,
-        queries_allowed: u64,
-        queries_passthrough: u64,
-        lists: Vec<crate::use_cases::filtering::ListInfo>,
-    }
-
-    let uptime = now_unix().saturating_sub(state.start_time);
-    let lists = state.domain_filter.list_names();
-
-    json_ok(StatsResponse {
-        uptime_seconds: uptime,
-        filtering_enabled: state.filtering_enabled.load(Ordering::Relaxed),
-        queries_total: state.stats.queries_total.load(Ordering::Relaxed),
-        queries_blocked: state.stats.queries_blocked.load(Ordering::Relaxed),
-        queries_allowed: state.stats.queries_allowed.load(Ordering::Relaxed),
-        queries_passthrough: state.stats.queries_passthrough.load(Ordering::Relaxed),
-        lists,
-    })
+    let result = state.ops.get_stats();
+    json_ok(result)
 }
 
 async fn handle_query_log(State(state): State<Arc<ApiState>>) -> Response {
-    let Some(ref query_log) = state.query_log else {
-        return json_error(
-            StatusCode::NOT_FOUND,
-            "query logging is not enabled; set api.query_logging.enabled = true in config",
-        );
-    };
-
-    #[derive(Serialize)]
-    struct QueryLogResponse {
-        total: usize,
-        max_entries: usize,
-        entries: VecDeque<QueryLogEntry>,
+    match state.ops.get_query_log() {
+        Ok(result) => json_ok(result),
+        Err(e) => op_error_to_response(e),
     }
+}
 
-    let log = query_log
-        .lock()
-        .expect("query log lock poisoned while reading");
-
-    json_ok(QueryLogResponse {
-        total: log.len(),
-        max_entries: log.max_entries(),
-        entries: log.entries().clone(),
-    })
+fn op_error_to_response(e: ServerOperationError) -> Response {
+    let status = match &e {
+        ServerOperationError::NotFound(_) => StatusCode::NOT_FOUND,
+        ServerOperationError::Unavailable(_) => StatusCode::NOT_FOUND,
+        ServerOperationError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        ServerOperationError::ChannelClosed => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    json_error(status, &e.to_string())
 }
 
 #[cfg(test)]
@@ -364,10 +253,14 @@ mod tests {
     }
 
     #[test]
-    fn api_stats_starts_at_zero() {
-        use std::sync::atomic::Ordering;
-        let stats = ApiStats::new();
-        assert_eq!(stats.queries_total.load(Ordering::Relaxed), 0);
-        assert_eq!(stats.queries_blocked.load(Ordering::Relaxed), 0);
+    fn op_error_not_found_maps_to_404() {
+        let resp = op_error_to_response(ServerOperationError::NotFound("test".to_string()));
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn op_error_channel_closed_maps_to_500() {
+        let resp = op_error_to_response(ServerOperationError::ChannelClosed);
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

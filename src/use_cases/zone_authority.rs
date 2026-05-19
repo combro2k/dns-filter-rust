@@ -21,6 +21,29 @@ const DEFAULT_URL_CHECK_INTERVAL_SECS: u64 = 15 * 60;
 const HTTP_TIMEOUT_SECS: u64 = 30;
 const MAX_ZONE_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 
+/// A single DNS record from a zone, suitable for search results.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ZoneRecord {
+    pub name: String,
+    pub record_type: String,
+    pub ttl: u32,
+    pub data: String,
+    pub zone: String,
+}
+
+/// Trait for zone resolvers that support record introspection and search.
+pub trait ZoneSearchable: Send + Sync {
+    fn zone_name(&self) -> String;
+    fn record_count(&self) -> usize;
+    fn list_records(&self, record_type: Option<&str>) -> Vec<ZoneRecord>;
+    fn search_records(
+        &self,
+        query: &str,
+        record_type: Option<&str>,
+        limit: usize,
+    ) -> Vec<(ZoneRecord, i64)>;
+}
+
 #[derive(Debug, Clone)]
 enum ZoneSource {
     File(String),
@@ -134,6 +157,144 @@ impl UpstreamResolver for ZoneAuthorityResolver {
         response.to_vec().map_err(|e| {
             UpstreamResolveError::Protocol(format!("failed to encode DNS response: {e}"))
         })
+    }
+}
+
+impl ZoneSearchable for ZoneAuthorityResolver {
+    fn zone_name(&self) -> String {
+        self.snapshot
+            .read()
+            .map(|s| s.zone.clone())
+            .unwrap_or_default()
+    }
+
+    fn record_count(&self) -> usize {
+        self.snapshot
+            .read()
+            .map(|s| s.records_by_name.values().map(|v| v.len()).sum())
+            .unwrap_or(0)
+    }
+
+    fn list_records(&self, record_type: Option<&str>) -> Vec<ZoneRecord> {
+        let snapshot = match self.snapshot.read() {
+            Ok(s) => s.clone(),
+            Err(_) => return Vec::new(),
+        };
+        let type_filter = record_type.and_then(parse_record_type_filter);
+        snapshot_to_zone_records(&snapshot, type_filter.as_ref())
+    }
+
+    fn search_records(
+        &self,
+        query: &str,
+        record_type: Option<&str>,
+        limit: usize,
+    ) -> Vec<(ZoneRecord, i64)> {
+        use fuzzy_matcher::skim::SkimMatcherV2;
+        use fuzzy_matcher::FuzzyMatcher;
+
+        let snapshot = match self.snapshot.read() {
+            Ok(s) => s.clone(),
+            Err(_) => return Vec::new(),
+        };
+        let type_filter = record_type.and_then(parse_record_type_filter);
+        let matcher = SkimMatcherV2::default();
+        let zone = &snapshot.zone;
+
+        let mut scored: Vec<(ZoneRecord, i64)> = snapshot
+            .records_by_name
+            .iter()
+            .flat_map(|(name, records)| {
+                let score = matcher.fuzzy_match(name, query);
+                records
+                    .iter()
+                    .filter(|r| match &type_filter {
+                        Some(rt) => r.record_type() == *rt,
+                        None => true,
+                    })
+                    .filter_map(move |record| {
+                        score.map(|s| (record_to_zone_record(record, name, zone), s))
+                    })
+            })
+            .collect();
+
+        scored.sort_by_key(|b| std::cmp::Reverse(b.1));
+        scored.truncate(limit);
+        scored
+    }
+}
+
+fn parse_record_type_filter(s: &str) -> Option<RecordType> {
+    match s.to_uppercase().as_str() {
+        "A" => Some(RecordType::A),
+        "AAAA" => Some(RecordType::AAAA),
+        "NS" => Some(RecordType::NS),
+        "CNAME" => Some(RecordType::CNAME),
+        "PTR" => Some(RecordType::PTR),
+        "MX" => Some(RecordType::MX),
+        "TXT" => Some(RecordType::TXT),
+        "SOA" => Some(RecordType::SOA),
+        "SRV" => Some(RecordType::SRV),
+        "CAA" => Some(RecordType::CAA),
+        "TLSA" => Some(RecordType::TLSA),
+        "NAPTR" => Some(RecordType::NAPTR),
+        _ => None,
+    }
+}
+
+fn snapshot_to_zone_records(
+    snapshot: &ZoneSnapshot,
+    type_filter: Option<&RecordType>,
+) -> Vec<ZoneRecord> {
+    snapshot
+        .records_by_name
+        .iter()
+        .flat_map(|(name, records)| {
+            records
+                .iter()
+                .filter(|r| match type_filter {
+                    Some(rt) => r.record_type() == *rt,
+                    None => true,
+                })
+                .map(move |record| record_to_zone_record(record, name, &snapshot.zone))
+        })
+        .collect()
+}
+
+fn record_to_zone_record(record: &Record, name: &str, zone: &str) -> ZoneRecord {
+    ZoneRecord {
+        name: name.to_string(),
+        record_type: record.record_type().to_string(),
+        ttl: record.ttl,
+        data: rdata_display(&record.data),
+        zone: zone.to_string(),
+    }
+}
+
+fn rdata_display(rdata: &RData) -> String {
+    match rdata {
+        RData::A(a) => a.0.to_string(),
+        RData::AAAA(aaaa) => aaaa.0.to_string(),
+        RData::NS(ns) => ns.0.to_string(),
+        RData::CNAME(cname) => cname.0.to_string(),
+        RData::PTR(ptr) => ptr.0.to_string(),
+        RData::MX(mx) => format!("{} {}", mx.preference, mx.exchange),
+        RData::TXT(txt) => String::from_utf8_lossy(
+            &txt.txt_data
+                .iter()
+                .flat_map(|s| s.iter().copied())
+                .collect::<Vec<u8>>(),
+        )
+        .into_owned(),
+        RData::SOA(soa) => format!(
+            "{} {} {} {} {} {} {}",
+            soa.mname, soa.rname, soa.serial, soa.refresh, soa.retry, soa.expire, soa.minimum
+        ),
+        RData::SRV(srv) => format!(
+            "{} {} {} {}",
+            srv.priority, srv.weight, srv.port, srv.target
+        ),
+        _ => format!("{rdata:?}"),
     }
 }
 

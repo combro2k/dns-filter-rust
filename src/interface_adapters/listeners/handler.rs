@@ -6,9 +6,7 @@ use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseI
 use hickory_server::zone_handler::MessageResponseBuilder;
 use tokio::sync::Mutex;
 
-use crate::use_cases::request_pipeline::{
-    build_servfail_response, DnsPipelineRequest, DnsRequestPipeline,
-};
+use crate::use_cases::request_pipeline::{DnsPipelineRequest, DnsRequestPipeline};
 
 /// Bridges hickory-server's request/response model to the existing `DnsRequestPipeline`.
 ///
@@ -38,13 +36,19 @@ impl RequestHandler for HickoryRequestHandler {
 
         let response_bytes = match pipeline.handle_request(&dns_request).await {
             Ok(Some(response)) => response.into_bytes(),
-            Ok(None) => {
-                tracing::warn!("pipeline returned no response; returning SERVFAIL");
-                build_servfail_response(query_bytes)
-            }
-            Err(error) => {
-                tracing::warn!(%error, "pipeline failed; returning SERVFAIL");
-                build_servfail_response(query_bytes)
+            Ok(None) | Err(_) => {
+                // Pipeline guarantees a response via DnsServfailFallbackStage;
+                // this branch is a defensive guard for protocol-level failures.
+                tracing::error!("pipeline produced no response (unexpected)");
+                let builder = MessageResponseBuilder::from_message_request(request);
+                let msg_response = builder.error_msg(&request.metadata, ResponseCode::ServFail);
+                return match response_handle.send_response(msg_response).await {
+                    Ok(info) => info,
+                    Err(error) => {
+                        tracing::error!(%error, "failed to send DNS response");
+                        serve_failed_info(request)
+                    }
+                };
             }
         };
 

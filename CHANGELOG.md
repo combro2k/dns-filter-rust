@@ -8,9 +8,14 @@ All notable changes to this project will be documented in this file.
 - **Feature-gated listeners**: all non-DNS listeners are now behind Cargo feature flags (`dot`, `doh`, `doq`, `http-api`, `mcp`). All features are enabled by default preserving current behavior. Building with `--no-default-features` produces a DNS-only binary. Dependencies like `axum`, `rmcp`, `schemars`, `rcgen`, and `hostname` are now optional and only compiled when their associated features are enabled.
 - **MCP (Model Context Protocol) server**: built-in MCP server listener using the `rmcp` crate with Streamable HTTP transport. Exposes DNS filter management tools to AI/LLM clients: `dns_lookup`, `filter_status`, `filter_toggle`, `list_filters`, `refresh_lists`, `enable_list`, `disable_list`, `get_stats`, `get_query_log`, `reload_config`, and `server_health`. Configurable via `mcp:` config section with port (default 8953), bearer token auth, SSE keep-alive, stateful/stateless mode, CORS origins, and DNS rebinding protection (`allowed_hosts`). Endpoint fixed at `/mcp`.
 - **Shared authentication middleware**: extracted bearer token validation into a reusable `auth` module (`interface_adapters::listeners::auth`) with constant-time comparison, shared by both the HTTP API and MCP servers.
+- **MCP zone search tools**: new `list_zones` and `search_zone_records` MCP tools for browsing and fuzzy-searching DNS records across authoritative JSON zones. `search_zone_records` supports filtering by zone name, record type, and configurable result limits (default 50, max 500). Uses `fuzzy-matcher` crate for fuzzy domain name matching with relevance scoring.
+- **Shared server operations layer**: extracted all MCP and HTTP API business logic into a shared `ServerOperations` use-case (`use_cases::server_operations`), eliminating duplicated logic between the two interfaces. Both MCP tools and HTTP API handlers are now thin wrappers that delegate to `ServerOperations`.
+- **Zone registry**: new `ZoneRegistry` use-case (`use_cases::zone_registry`) that aggregates all searchable zones and provides cross-zone record listing and fuzzy search capabilities.
+- **Zone searchable trait**: `ZoneSearchable` trait on `ZoneAuthorityResolver` enabling record introspection and fuzzy search without exposing internal zone data structures.
 
 ### Changed
 - **Migrated HTTP API from hyper 0.14 to axum**: replaced raw hyper service with axum `Router`, typed extractors (`State`, `Path`, `Json`), and `axum::serve()` with graceful shutdown. All API endpoints and behavior remain unchanged.
+- **Moved error-to-SERVFAIL policy from adapter to use-case layer**: `DnsUpstreamStage` and `ZoneForwardingStage` now return SERVFAIL responses directly on failure instead of propagating errors. This removes the business policy decision from `HickoryRequestHandler` (interface adapter) and keeps it in the use-case pipeline where it belongs per Clean Architecture.
 
 ## [2.2.0] - 2026-05-18
 
