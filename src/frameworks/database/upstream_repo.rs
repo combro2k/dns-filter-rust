@@ -19,27 +19,49 @@ impl SqlxUpstreamConfigRepository {
 impl UpstreamConfigRepository for SqlxUpstreamConfigRepository {
     async fn get_resolver_config(&self) -> Result<ResolverConfigRecord> {
         let row = sqlx::query_as::<_, ResolverConfigRow>(
-            "SELECT strategy, bootstrap_resolvers FROM resolver_config WHERE id = 1",
+            "SELECT strategy FROM resolver_config WHERE id = 1",
         )
         .fetch_one(&self.pool)
         .await
         .context("failed to fetch resolver config")?;
 
+        let bootstrap_rows = sqlx::query_as::<_, BootstrapResolverRow>(
+            "SELECT address FROM bootstrap_resolvers ORDER BY sort_order, id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to fetch bootstrap resolvers")?;
+
         Ok(ResolverConfigRecord {
             strategy: row.strategy,
-            bootstrap_resolvers: row.bootstrap_resolvers,
+            bootstrap_resolvers: bootstrap_rows.into_iter().map(|r| r.address).collect(),
         })
     }
 
     async fn update_resolver_config(&self, record: &ResolverConfigRecord) -> Result<()> {
-        sqlx::query(
-            "UPDATE resolver_config SET strategy = ?, bootstrap_resolvers = ? WHERE id = 1",
-        )
-        .bind(&record.strategy)
-        .bind(&record.bootstrap_resolvers)
-        .execute(&self.pool)
-        .await
-        .context("failed to update resolver config")?;
+        sqlx::query("UPDATE resolver_config SET strategy = ? WHERE id = 1")
+            .bind(&record.strategy)
+            .execute(&self.pool)
+            .await
+            .context("failed to update resolver config")?;
+
+        // Atomic replace: delete all, then re-insert
+        sqlx::query("DELETE FROM bootstrap_resolvers")
+            .execute(&self.pool)
+            .await
+            .context("failed to delete bootstrap resolvers")?;
+
+        for (i, address) in record.bootstrap_resolvers.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO bootstrap_resolvers (id, address, sort_order) VALUES (?, ?, ?)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(address)
+            .bind(i as i32)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("failed to insert bootstrap resolver '{address}'"))?;
+        }
 
         Ok(())
     }
@@ -97,7 +119,11 @@ impl UpstreamConfigRepository for SqlxUpstreamConfigRepository {
 #[derive(sqlx::FromRow)]
 struct ResolverConfigRow {
     strategy: String,
-    bootstrap_resolvers: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct BootstrapResolverRow {
+    address: String,
 }
 
 #[derive(sqlx::FromRow)]

@@ -214,7 +214,7 @@ impl SqlxZoneDiscoveryRepository {
 impl ZoneDiscoveryRepository for SqlxZoneDiscoveryRepository {
     async fn get_all(&self) -> Result<Vec<ZoneDiscoveryRecord>> {
         let rows = sqlx::query_as::<_, ZoneDiscoveryRow>(
-            "SELECT id, enabled, address, check_interval, allowed_types, bypass_filter, \
+            "SELECT id, enabled, address, check_interval, bypass_filter, \
              fallback_to_default_resolvers, auth_token, auth_username, auth_password \
              FROM zone_discovery ORDER BY id",
         )
@@ -222,12 +222,32 @@ impl ZoneDiscoveryRepository for SqlxZoneDiscoveryRepository {
         .await
         .context("failed to fetch zone discovery entries")?;
 
-        Ok(rows.into_iter().map(ZoneDiscoveryRecord::from).collect())
+        let type_rows = sqlx::query_as::<_, ZoneDiscoveryAllowedTypeRow>(
+            "SELECT zone_discovery_id, allowed_type \
+             FROM zone_discovery_allowed_types ORDER BY zone_discovery_id, allowed_type",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to fetch zone discovery allowed types")?;
+
+        let mut records: Vec<ZoneDiscoveryRecord> =
+            rows.into_iter().map(ZoneDiscoveryRecord::from).collect();
+
+        for type_row in type_rows {
+            if let Some(record) = records
+                .iter_mut()
+                .find(|r| r.id == type_row.zone_discovery_id)
+            {
+                record.allowed_types.push(type_row.allowed_type);
+            }
+        }
+
+        Ok(records)
     }
 
     async fn get_by_id(&self, id: &str) -> Result<Option<ZoneDiscoveryRecord>> {
         let row = sqlx::query_as::<_, ZoneDiscoveryRow>(
-            "SELECT id, enabled, address, check_interval, allowed_types, bypass_filter, \
+            "SELECT id, enabled, address, check_interval, bypass_filter, \
              fallback_to_default_resolvers, auth_token, auth_username, auth_password \
              FROM zone_discovery WHERE id = ?",
         )
@@ -236,21 +256,37 @@ impl ZoneDiscoveryRepository for SqlxZoneDiscoveryRepository {
         .await
         .context("failed to fetch zone discovery by id")?;
 
-        Ok(row.map(ZoneDiscoveryRecord::from))
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let type_rows = sqlx::query_as::<_, ZoneDiscoveryAllowedTypeRow>(
+            "SELECT zone_discovery_id, allowed_type \
+             FROM zone_discovery_allowed_types WHERE zone_discovery_id = ? \
+             ORDER BY allowed_type",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to fetch zone discovery allowed types")?;
+
+        let mut record = ZoneDiscoveryRecord::from(row);
+        record.allowed_types = type_rows.into_iter().map(|r| r.allowed_type).collect();
+
+        Ok(Some(record))
     }
 
     async fn create(&self, record: &ZoneDiscoveryRecord) -> Result<()> {
         sqlx::query(
             "INSERT INTO zone_discovery \
-             (id, enabled, address, check_interval, allowed_types, bypass_filter, \
+             (id, enabled, address, check_interval, bypass_filter, \
               fallback_to_default_resolvers, auth_token, auth_username, auth_password) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&record.id)
         .bind(record.enabled)
         .bind(&record.address)
         .bind(&record.check_interval)
-        .bind(&record.allowed_types)
         .bind(record.bypass_filter)
         .bind(record.fallback_to_default_resolvers)
         .bind(&record.auth_token)
@@ -260,19 +296,36 @@ impl ZoneDiscoveryRepository for SqlxZoneDiscoveryRepository {
         .await
         .with_context(|| format!("failed to insert zone discovery '{}'", record.id))?;
 
+        for allowed_type in &record.allowed_types {
+            sqlx::query(
+                "INSERT INTO zone_discovery_allowed_types \
+                 (id, zone_discovery_id, allowed_type) VALUES (?, ?, ?)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(&record.id)
+            .bind(allowed_type)
+            .execute(&self.pool)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to insert allowed type '{}' for zone discovery '{}'",
+                    allowed_type, record.id
+                )
+            })?;
+        }
+
         Ok(())
     }
 
     async fn update(&self, record: &ZoneDiscoveryRecord) -> Result<()> {
         sqlx::query(
             "UPDATE zone_discovery SET enabled = ?, address = ?, check_interval = ?, \
-             allowed_types = ?, bypass_filter = ?, fallback_to_default_resolvers = ?, \
+             bypass_filter = ?, fallback_to_default_resolvers = ?, \
              auth_token = ?, auth_username = ?, auth_password = ? WHERE id = ?",
         )
         .bind(record.enabled)
         .bind(&record.address)
         .bind(&record.check_interval)
-        .bind(&record.allowed_types)
         .bind(record.bypass_filter)
         .bind(record.fallback_to_default_resolvers)
         .bind(&record.auth_token)
@@ -282,6 +335,36 @@ impl ZoneDiscoveryRepository for SqlxZoneDiscoveryRepository {
         .execute(&self.pool)
         .await
         .with_context(|| format!("failed to update zone discovery '{}'", record.id))?;
+
+        // Atomic replace: delete all allowed types, then re-insert
+        sqlx::query("DELETE FROM zone_discovery_allowed_types WHERE zone_discovery_id = ?")
+            .bind(&record.id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to delete allowed types for zone discovery '{}'",
+                    record.id
+                )
+            })?;
+
+        for allowed_type in &record.allowed_types {
+            sqlx::query(
+                "INSERT INTO zone_discovery_allowed_types \
+                 (id, zone_discovery_id, allowed_type) VALUES (?, ?, ?)",
+            )
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(&record.id)
+            .bind(allowed_type)
+            .execute(&self.pool)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to insert allowed type '{}' for zone discovery '{}'",
+                    allowed_type, record.id
+                )
+            })?;
+        }
 
         Ok(())
     }
@@ -367,12 +450,17 @@ struct ZoneDiscoveryRow {
     enabled: bool,
     address: String,
     check_interval: Option<String>,
-    allowed_types: String,
     bypass_filter: bool,
     fallback_to_default_resolvers: bool,
     auth_token: Option<String>,
     auth_username: Option<String>,
     auth_password: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct ZoneDiscoveryAllowedTypeRow {
+    zone_discovery_id: String,
+    allowed_type: String,
 }
 
 impl From<ZoneDiscoveryRow> for ZoneDiscoveryRecord {
@@ -382,7 +470,7 @@ impl From<ZoneDiscoveryRow> for ZoneDiscoveryRecord {
             enabled: row.enabled,
             address: row.address,
             check_interval: row.check_interval,
-            allowed_types: row.allowed_types,
+            allowed_types: Vec::new(),
             bypass_filter: row.bypass_filter,
             fallback_to_default_resolvers: row.fallback_to_default_resolvers,
             auth_token: row.auth_token,

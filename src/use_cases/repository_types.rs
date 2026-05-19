@@ -37,8 +37,7 @@ pub struct FilteringConfigRecord {
 #[derive(Debug, Clone)]
 pub struct ResolverConfigRecord {
     pub strategy: String,
-    /// JSON-encoded array of bootstrap resolver IP addresses.
-    pub bootstrap_resolvers: String,
+    pub bootstrap_resolvers: Vec<String>,
 }
 
 /// An upstream DNS server entry.
@@ -101,8 +100,7 @@ pub struct ZoneDiscoveryRecord {
     pub enabled: bool,
     pub address: String,
     pub check_interval: Option<String>,
-    /// JSON-encoded array of allowed zone types.
-    pub allowed_types: String,
+    pub allowed_types: Vec<String>,
     pub bypass_filter: bool,
     pub fallback_to_default_resolvers: bool,
     pub auth_token: Option<String>,

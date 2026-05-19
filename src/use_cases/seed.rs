@@ -119,14 +119,11 @@ async fn seed_filtering_config(config: &DnsFilterConfig, repos: &Repositories) -
 }
 
 async fn seed_resolver_config(config: &DnsFilterConfig, repos: &Repositories) -> Result<()> {
-    let bootstrap_json = serde_json::to_string(&config.resolvers.bootstrap_resolvers)
-        .context("serializing bootstrap resolvers")?;
-
     repos
         .upstream_config
         .update_resolver_config(&ResolverConfigRecord {
             strategy: config.resolvers.strategy.clone(),
-            bootstrap_resolvers: bootstrap_json,
+            bootstrap_resolvers: config.resolvers.bootstrap_resolvers.clone(),
         })
         .await
         .context("seeding resolver config")?;
@@ -212,8 +209,6 @@ async fn seed_zones(config: &DnsFilterConfig, repos: &Repositories) -> Result<()
 
 async fn seed_zone_discovery(config: &DnsFilterConfig, repos: &Repositories) -> Result<()> {
     for discovery in &config.resolvers.zone_discovery {
-        let allowed_types_json =
-            serde_json::to_string(&discovery.allowed_types).context("serializing allowed_types")?;
         let auth = discovery.authentication.as_ref();
 
         repos
@@ -223,7 +218,7 @@ async fn seed_zone_discovery(config: &DnsFilterConfig, repos: &Repositories) -> 
                 enabled: discovery.enabled,
                 address: discovery.address.clone(),
                 check_interval: discovery.check_interval.clone(),
-                allowed_types: allowed_types_json,
+                allowed_types: discovery.allowed_types.clone(),
                 bypass_filter: discovery.bypass_filter,
                 fallback_to_default_resolvers: discovery.fallback_to_default_resolvers,
                 auth_token: auth.and_then(|a| a.token.clone()),

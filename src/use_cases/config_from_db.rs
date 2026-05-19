@@ -87,9 +87,7 @@ pub async fn apply_db_config(config: &mut DnsFilterConfig, repos: &Repositories)
         .await
         .context("loading resolver config from DB")?;
 
-    let bootstrap_resolvers: Vec<String> =
-        serde_json::from_str(&resolver_record.bootstrap_resolvers)
-            .context("parsing bootstrap_resolvers JSON from DB")?;
+    let bootstrap_resolvers = resolver_record.bootstrap_resolvers;
 
     let upstream_servers = repos
         .upstream_config
@@ -155,18 +153,14 @@ pub async fn apply_db_config(config: &mut DnsFilterConfig, repos: &Repositories)
 
     let zone_discovery: Vec<ZoneDiscoveryConfig> = discovery_records
         .into_iter()
-        .map(|d| {
-            let allowed_types: Vec<String> =
-                serde_json::from_str(&d.allowed_types).unwrap_or_default();
-            ZoneDiscoveryConfig {
-                enabled: d.enabled,
-                address: d.address,
-                check_interval: d.check_interval,
-                allowed_types,
-                bypass_filter: d.bypass_filter,
-                fallback_to_default_resolvers: d.fallback_to_default_resolvers,
-                authentication: build_auth(d.auth_token, d.auth_username, d.auth_password),
-            }
+        .map(|d| ZoneDiscoveryConfig {
+            enabled: d.enabled,
+            address: d.address,
+            check_interval: d.check_interval,
+            allowed_types: d.allowed_types,
+            bypass_filter: d.bypass_filter,
+            fallback_to_default_resolvers: d.fallback_to_default_resolvers,
+            authentication: build_auth(d.auth_token, d.auth_username, d.auth_password),
         })
         .collect();
 

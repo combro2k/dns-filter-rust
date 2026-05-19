@@ -644,8 +644,6 @@ impl ServerOperations {
         let allowed_types = input
             .allowed_types
             .unwrap_or_else(|| vec!["forward".into(), "reverse".into()]);
-        let allowed_types_json = serde_json::to_string(&allowed_types)
-            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
 
         let auth = input.authentication.as_ref();
         let record = ZoneDiscoveryRecord {
@@ -653,7 +651,7 @@ impl ServerOperations {
             enabled: input.enabled.unwrap_or(true),
             address: input.address,
             check_interval: input.check_interval,
-            allowed_types: allowed_types_json,
+            allowed_types,
             bypass_filter: input.bypass_filter.unwrap_or(false),
             fallback_to_default_resolvers: input.fallback_to_default_resolvers.unwrap_or(false),
             auth_token: auth.and_then(|a| a.token.clone()),
@@ -701,8 +699,7 @@ impl ServerOperations {
             for t in types {
                 validate_allowed_type(t)?;
             }
-            record.allowed_types = serde_json::to_string(types)
-                .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+            record.allowed_types = types.clone();
         }
         if let Some(bypass_filter) = input.bypass_filter {
             record.bypass_filter = bypass_filter;

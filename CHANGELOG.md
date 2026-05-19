@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **Normalized list columns in database schema**: replaced JSON-encoded TEXT columns (`resolver_config.bootstrap_resolvers` and `zone_discovery.allowed_types`) with proper relational tables (`bootstrap_resolvers` and `zone_discovery_allowed_types`). Existing JSON data is automatically migrated. This eliminates JSON serialization/deserialization in application code and makes the schema consistent with how other collections (upstream servers, zone servers) are stored.
+
 ## [2.4.0] - 2026-05-19
 
 ### Added
