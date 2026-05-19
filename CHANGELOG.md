@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.4.1] - 2026-05-20
+
 ### Fixed
 - **OpenRC service fails to start (exit 32)**: the init script lacked a `directory` directive, so `start-stop-daemon` launched the daemon with CWD `/` where migration files could not be found. Added `directory="/var/lib/dns-filter"` to match systemd's `WorkingDirectory`. Also added `output_log`/`error_log` so startup errors are no longer silently lost.
 - **Migrations not found when started by init system**: migration SQL files were loaded from the filesystem relative to CWD, which broke when OpenRC or systemd launched the binary from `/`. Migrations are now embedded in the binary at compile time via `sqlx::migrate!()`, eliminating runtime filesystem dependency. Removed the `install-migrations` Makefile target as it is no longer needed.
