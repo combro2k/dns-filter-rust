@@ -21,6 +21,9 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - **Moved error-to-SERVFAIL policy from adapter to use-case layer**: `DnsUpstreamStage` and `ZoneForwardingStage` now return SERVFAIL responses directly on failure instead of propagating errors. This removes the business policy decision from `HickoryRequestHandler` (interface adapter) and keeps it in the use-case pipeline where it belongs per Clean Architecture.
 
+### Fixed
+- **Suppress noisy hickory-server query logs at info level**: added `hickory_server=error` to the tracing `EnvFilter`, preventing per-query log lines (e.g. `query:example.com.:AAAA:IN`) from flooding syslog when running at info level.
+
 ## [2.2.0] - 2026-05-18
 
 ### Added

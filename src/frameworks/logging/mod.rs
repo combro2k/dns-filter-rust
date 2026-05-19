@@ -177,7 +177,7 @@ fn build_env_filter(level: tracing::Level, debug: bool) -> EnvFilter {
         EnvFilter::new(format!("{level}"))
     } else {
         EnvFilter::new(format!(
-            "{level},hickory_proto=error,hickory_resolver=error,hickory_net=error,hickory_recursor=error"
+            "{level},hickory_proto=error,hickory_resolver=error,hickory_net=error,hickory_recursor=error,hickory_server=error"
         ))
     }
 }
