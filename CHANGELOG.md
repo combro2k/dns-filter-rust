@@ -17,6 +17,10 @@ All notable changes to this project will be documented in this file.
   - Optional authentication details (token, username, password) supported on zone servers and zone discovery endpoints.
 - **`InvalidInput` error variant**: new `ServerOperationError::InvalidInput` mapped to HTTP 400 Bad Request for validation failures.
 - **Extended repository traits**: added `get_by_zone`, `update_zone`, `delete_zone`, `delete_zone_servers` to `ZoneRepository`; added `get_by_id`, `update`, `delete` to `ZoneDiscoveryRepository`.
+- **API CRUD integration tests**: comprehensive `listener_batch_test.sh` coverage for all CRUD endpoints including blocklists, allowlists, zones, zone discovery, authentication enforcement, duplicate-name rejection, not-found handling, and input validation (invalid names, URLs, list types).
+
+### Fixed
+- **Blocking reqwest panic during async reload**: wrapped `build_zone_entries` in `tokio::task::spawn_blocking` inside the DB-backed reload path to prevent the `reqwest::blocking::Client` from panicking when dropped inside an async context. This crash was triggered when zone discovery entries existed in the database.
 
 ### Changed
 - **`ServerOperations` extended with repository access**: accepts an optional `Arc<Repositories>` via `.with_repositories()` builder method, enabling CRUD operations from any management interface (HTTP API, MCP, control socket).

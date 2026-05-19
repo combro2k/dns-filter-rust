@@ -73,7 +73,14 @@ pub async fn reload_config_from_db(
     let resolver = build_upstream_resolver(&config)?;
     let filter = build_domain_filter_with_cache(&config, Some(Arc::clone(&repos.filter_cache)))?;
     let any_query_policy = build_any_query_policy(&config)?;
-    let zone_entries = build_zone_entries(&config)?;
+
+    // `build_zone_entries` may use `reqwest::blocking` internally (zone
+    // discovery fetches). Running it on a blocking thread avoids the Tokio
+    // panic that occurs when a blocking runtime is dropped inside an async
+    // context.
+    let zone_entries = tokio::task::spawn_blocking(move || build_zone_entries(&config))
+        .await
+        .map_err(|e| anyhow::anyhow!("zone entry build task panicked: {e}"))??;
 
     tracing::info!("configuration reloaded successfully (DB-backed)");
 

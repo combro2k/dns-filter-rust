@@ -14,6 +14,8 @@ DOH_PORT="1443"
 DOQ_PORT="18853"
 HTTP_PORT="18080"
 METRICS_PORT="19100"
+API_PORT="18090"
+API_TOKEN="test-api-token-for-batch"
 ZONE_UPSTREAM_PORT="25354"
 ZONE_TEST_PORT="25355"
 
@@ -229,6 +231,12 @@ logging:
 
 control:
   socket_path: "$TEMP_DIR/dns-filter.sock"
+
+api:
+  enabled: true
+  address: "$DNS_HOST"
+  port: $API_PORT
+  api_token: "$API_TOKEN"
 
 database:
   url: "sqlite://$TEMP_DIR/dns-filter.db"
@@ -658,6 +666,264 @@ if command_exists kdig; then
 else
   skip "DoQ check skipped (install kdig)"
 fi
+
+# ---------------------------------------------------------------------------
+# API CRUD tests (blocklists, allowlists, zones, zone-discovery)
+# ---------------------------------------------------------------------------
+
+run_api_crud_tests() {
+  if ! command_exists curl; then
+    skip "API CRUD tests skipped (install curl)"
+    return
+  fi
+
+  if ! wait_for_tcp_port "$API_PORT"; then
+    fail "API server did not start on ${DNS_HOST}:${API_PORT}"
+    return
+  fi
+
+  local api_base="http://${DNS_HOST}:${API_PORT}/api/v1"
+  local auth_header="Authorization: Bearer $API_TOKEN"
+  local content_type="Content-Type: application/json"
+  local http_code body
+
+  # --- Health check (no auth required) ---
+  http_code="$(curl -sS -o /dev/null -w "%{http_code}" "http://${DNS_HOST}:${API_PORT}/health" 2>/dev/null || true)"
+  if [ "$http_code" = "200" ]; then
+    pass "API health check returned 200"
+  else
+    fail "API health check returned $http_code (expected 200)"
+    return
+  fi
+
+  # --- Auth enforcement ---
+  http_code="$(curl -sS -o /dev/null -w "%{http_code}" "$api_base/stats" 2>/dev/null || true)"
+  if [ "$http_code" = "401" ]; then
+    pass "API rejects unauthenticated request with 401"
+  else
+    fail "API did not reject unauthenticated request (got $http_code, expected 401)"
+  fi
+
+  # --- Blocklist CRUD ---
+  # Create
+  body="$(curl -sS -w '\n%{http_code}' -X POST "$api_base/blocklists" \
+    -H "$auth_header" -H "$content_type" \
+    -d '{"name":"test-blocklist","url":"https://example.com/block.txt","list_type":"domains"}' 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  if [ "$http_code" = "201" ]; then
+    pass "API create blocklist returned 201"
+  else
+    fail "API create blocklist returned $http_code (expected 201)"
+  fi
+
+  # List
+  body="$(curl -sS -w '\n%{http_code}' "$api_base/blocklists" \
+    -H "$auth_header" 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  response_body="$(echo "$body" | sed '$d')"
+  if [ "$http_code" = "200" ] && echo "$response_body" | grep -q "test-blocklist"; then
+    pass "API list blocklists contains created entry"
+  else
+    fail "API list blocklists failed (code=$http_code)"
+  fi
+
+  # Update
+  body="$(curl -sS -w '\n%{http_code}' -X PUT "$api_base/blocklists/test-blocklist" \
+    -H "$auth_header" -H "$content_type" \
+    -d '{"enabled":false}' 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  if [ "$http_code" = "200" ]; then
+    pass "API update blocklist returned 200"
+  else
+    fail "API update blocklist returned $http_code (expected 200)"
+  fi
+
+  # Duplicate name rejected
+  body="$(curl -sS -w '\n%{http_code}' -X POST "$api_base/blocklists" \
+    -H "$auth_header" -H "$content_type" \
+    -d '{"name":"test-blocklist","url":"https://example.com/dup.txt"}' 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  if [ "$http_code" = "400" ]; then
+    pass "API rejects duplicate blocklist name with 400"
+  else
+    fail "API duplicate blocklist returned $http_code (expected 400)"
+  fi
+
+  # Delete
+  body="$(curl -sS -w '\n%{http_code}' -X DELETE "$api_base/blocklists/test-blocklist" \
+    -H "$auth_header" 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  if [ "$http_code" = "200" ]; then
+    pass "API delete blocklist returned 200"
+  else
+    fail "API delete blocklist returned $http_code (expected 200)"
+  fi
+
+  # Delete non-existent returns 404
+  body="$(curl -sS -w '\n%{http_code}' -X DELETE "$api_base/blocklists/no-such-list" \
+    -H "$auth_header" 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  if [ "$http_code" = "404" ]; then
+    pass "API delete non-existent blocklist returned 404"
+  else
+    fail "API delete non-existent blocklist returned $http_code (expected 404)"
+  fi
+
+  # --- Allowlist CRUD ---
+  body="$(curl -sS -w '\n%{http_code}' -X POST "$api_base/allowlists" \
+    -H "$auth_header" -H "$content_type" \
+    -d '{"name":"test-allowlist","url":"https://example.com/allow.txt"}' 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  if [ "$http_code" = "201" ]; then
+    pass "API create allowlist returned 201"
+  else
+    fail "API create allowlist returned $http_code (expected 201)"
+  fi
+
+  body="$(curl -sS -w '\n%{http_code}' "$api_base/allowlists" \
+    -H "$auth_header" 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  response_body="$(echo "$body" | sed '$d')"
+  if [ "$http_code" = "200" ] && echo "$response_body" | grep -q "test-allowlist"; then
+    pass "API list allowlists contains created entry"
+  else
+    fail "API list allowlists failed (code=$http_code)"
+  fi
+
+  body="$(curl -sS -w '\n%{http_code}' -X DELETE "$api_base/allowlists/test-allowlist" \
+    -H "$auth_header" 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  if [ "$http_code" = "200" ]; then
+    pass "API delete allowlist returned 200"
+  else
+    fail "API delete allowlist returned $http_code (expected 200)"
+  fi
+
+  # --- Zone CRUD ---
+  body="$(curl -sS -w '\n%{http_code}' -X POST "$api_base/zones" \
+    -H "$auth_header" -H "$content_type" \
+    -d '{"zone":"test.arpa","bypass_filter":true,"servers":[{"protocol":"dns","address":"127.0.0.1:53"}]}' 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  if [ "$http_code" = "201" ]; then
+    pass "API create zone returned 201"
+  else
+    fail "API create zone returned $http_code (expected 201)"
+  fi
+
+  body="$(curl -sS -w '\n%{http_code}' "$api_base/zones" \
+    -H "$auth_header" 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  response_body="$(echo "$body" | sed '$d')"
+  if [ "$http_code" = "200" ] && echo "$response_body" | grep -q "test.arpa"; then
+    pass "API list zones contains created entry"
+  else
+    fail "API list zones failed (code=$http_code)"
+  fi
+
+  body="$(curl -sS -w '\n%{http_code}' -X PUT "$api_base/zones/test.arpa" \
+    -H "$auth_header" -H "$content_type" \
+    -d '{"enabled":false,"bypass_filter":false}' 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  if [ "$http_code" = "200" ]; then
+    pass "API update zone returned 200"
+  else
+    fail "API update zone returned $http_code (expected 200)"
+  fi
+
+  body="$(curl -sS -w '\n%{http_code}' -X DELETE "$api_base/zones/test.arpa" \
+    -H "$auth_header" 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  if [ "$http_code" = "200" ]; then
+    pass "API delete zone returned 200"
+  else
+    fail "API delete zone returned $http_code (expected 200)"
+  fi
+
+  # --- Zone discovery CRUD ---
+  body="$(curl -sS -w '\n%{http_code}' -X POST "$api_base/zone-discovery" \
+    -H "$auth_header" -H "$content_type" \
+    -d '{"address":"https://example.com/zones","allowed_types":["forward","reverse"],"authentication":{"token":"test-token"}}' 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  response_body="$(echo "$body" | sed '$d')"
+  if [ "$http_code" = "201" ]; then
+    pass "API create zone discovery returned 201"
+  else
+    fail "API create zone discovery returned $http_code (expected 201)"
+  fi
+
+  # Extract the ID from the response for subsequent operations
+  local discovery_id
+  discovery_id="$(echo "$response_body" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)"
+
+  body="$(curl -sS -w '\n%{http_code}' "$api_base/zone-discovery" \
+    -H "$auth_header" 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  response_body="$(echo "$body" | sed '$d')"
+  if [ "$http_code" = "200" ] && echo "$response_body" | grep -q "$discovery_id"; then
+    pass "API list zone discovery contains created entry"
+  else
+    fail "API list zone discovery failed (code=$http_code)"
+  fi
+
+  if [ -n "$discovery_id" ]; then
+    body="$(curl -sS -w '\n%{http_code}' -X PUT "$api_base/zone-discovery/$discovery_id" \
+      -H "$auth_header" -H "$content_type" \
+      -d '{"enabled":false,"check_interval":"30m"}' 2>/dev/null)"
+    http_code="$(echo "$body" | tail -1)"
+    if [ "$http_code" = "200" ]; then
+      pass "API update zone discovery returned 200"
+    else
+      fail "API update zone discovery returned $http_code (expected 200)"
+    fi
+
+    body="$(curl -sS -w '\n%{http_code}' -X DELETE "$api_base/zone-discovery/$discovery_id" \
+      -H "$auth_header" 2>/dev/null)"
+    http_code="$(echo "$body" | tail -1)"
+    if [ "$http_code" = "200" ]; then
+      pass "API delete zone discovery returned 200"
+    else
+      fail "API delete zone discovery returned $http_code (expected 200)"
+    fi
+  else
+    fail "API could not extract zone discovery ID from create response"
+  fi
+
+  # --- Validation tests ---
+  # Invalid list name
+  body="$(curl -sS -w '\n%{http_code}' -X POST "$api_base/blocklists" \
+    -H "$auth_header" -H "$content_type" \
+    -d '{"name":"invalid name!","url":"https://example.com/list.txt"}' 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  if [ "$http_code" = "400" ]; then
+    pass "API rejects invalid list name with 400"
+  else
+    fail "API invalid list name returned $http_code (expected 400)"
+  fi
+
+  # Invalid URL
+  body="$(curl -sS -w '\n%{http_code}' -X POST "$api_base/blocklists" \
+    -H "$auth_header" -H "$content_type" \
+    -d '{"name":"valid-name","url":"ftp://bad-scheme.com/list.txt"}' 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  if [ "$http_code" = "400" ]; then
+    pass "API rejects invalid URL scheme with 400"
+  else
+    fail "API invalid URL returned $http_code (expected 400)"
+  fi
+
+  # Invalid list_type
+  body="$(curl -sS -w '\n%{http_code}' -X POST "$api_base/blocklists" \
+    -H "$auth_header" -H "$content_type" \
+    -d '{"name":"valid-name","url":"https://example.com/list.txt","list_type":"bogus"}' 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  if [ "$http_code" = "400" ]; then
+    pass "API rejects invalid list_type with 400"
+  else
+    fail "API invalid list_type returned $http_code (expected 400)"
+  fi
+}
+
+run_api_crud_tests
 
 # Test recursive resolver (optional, disabled by default in the main config above)
 if [ "${TEST_RECURSIVE:-0}" -eq 1 ]; then
