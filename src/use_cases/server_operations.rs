@@ -388,6 +388,7 @@ mod tests {
                 name: "test-list".to_string(),
                 url: "https://example.com/list.txt".to_string(),
                 kind: "block",
+                list_type: "adguard",
                 enabled: true,
                 interval_secs: 3600,
                 domain_count: 100,

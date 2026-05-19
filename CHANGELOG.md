@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Multi-format blocklist/allowlist support**: added `list_type` configuration option per blocklist/allowlist entry. Supported formats:
+  - `adguard` (default) — AdGuard/ABP filter syntax with cosmetic rule filtering, modifier validation, and `@@` exception support. Also accepts hosts-file and plain-domain lines as fallback.
+  - `hosts` — hosts file format (`<IP> domain1 [domain2 …]`), including compressed multi-hostname lines with multiple domains per line.
+  - `rpz` — Response Policy Zone format (`domain CNAME .` for block, `CNAME rpz-passthru.` for allow). Handles wildcard owners, TTL/CLASS fields, and A/AAAA walled-garden records.
+  - `domains` — flat domain list with one domain or subdomain per line.
+  - `wildcard` — wildcard domain list (`*.example.com` per line); strips `*.` prefix and normalises to base domain.
+
+### Changed
+- **Refactored filtering module**: restructured `src/use_cases/filtering.rs` into a module directory (`src/use_cases/filtering/`) with dedicated parser files per format (`adguard.rs`, `hosts.rs`, `rpz.rs`, `domains.rs`, `wildcard.rs`) and shared utilities (`common.rs`).
+
 ## [2.2.1] - 2026-05-19
 
 ### Added

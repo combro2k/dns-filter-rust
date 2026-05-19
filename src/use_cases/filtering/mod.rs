@@ -1,3 +1,10 @@
+mod adguard;
+mod common;
+mod domains;
+mod hosts;
+mod rpz;
+mod wildcard;
+
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -10,7 +17,7 @@ use std::time::Duration;
 use crate::entities::filter::FilterDecision;
 use crate::frameworks::config::schema::{DnsFilterConfig, FilteringConfig, NamedList};
 use anyhow::{anyhow, Context, Result};
-use hickory_proto::rr::Name;
+use common::{matches_any, normalize_domain, ListFormat, ParseDomainLineResult, ParsedLine};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -24,17 +31,6 @@ enum ListKind {
     Allow,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ParsedLine {
-    Block(String),
-    Allow(String),
-}
-
-enum ParseDomainLineResult {
-    Parsed(ParsedLine),
-    Skipped,
-}
-
 #[derive(Debug, Clone)]
 struct ListRuntime {
     key: String,
@@ -42,6 +38,7 @@ struct ListRuntime {
     url: String,
     interval: Duration,
     kind: ListKind,
+    format: ListFormat,
     runtime_disabled: Arc<AtomicBool>,
 }
 
@@ -96,6 +93,7 @@ pub struct ListInfo {
     pub name: String,
     pub url: String,
     pub kind: &'static str,
+    pub list_type: &'static str,
     pub enabled: bool,
     pub interval_secs: u64,
     pub domain_count: usize,
@@ -148,7 +146,8 @@ impl ListFilterEngine {
     async fn refresh_single_list(&self, runtime: &ListRuntime) {
         match fetch_list_content(&runtime.url).await {
             Ok(content) => {
-                let (domains, exceptions, skipped_entries_added) = parse_domains(&content);
+                let (domains, exceptions, skipped_entries_added) =
+                    parse_list_content(&content, runtime.format);
                 {
                     let mut lists = self
                         .lists
@@ -399,6 +398,7 @@ impl DomainFilter for ListFilterEngine {
                         ListKind::Block => "blocklist",
                         ListKind::Allow => "allowlist",
                     },
+                    list_type: rt.format.as_str(),
                     enabled: !rt.runtime_disabled.load(Ordering::Relaxed),
                     interval_secs: rt.interval.as_secs(),
                     domain_count,
@@ -561,6 +561,9 @@ fn build_runtimes(lists: &[NamedList], kind: ListKind) -> Result<Vec<ListRuntime
                 None => Duration::from_secs(DEFAULT_LIST_INTERVAL_SECS),
             };
 
+            let format = ListFormat::from_option(list.list_type.as_deref())
+                .map_err(|e| anyhow!("invalid list_type for list '{}': {}", list.name, e))?;
+
             let key = match kind {
                 ListKind::Block => format!("block:{}", list.name),
                 ListKind::Allow => format!("allow:{}", list.name),
@@ -572,6 +575,7 @@ fn build_runtimes(lists: &[NamedList], kind: ListKind) -> Result<Vec<ListRuntime
                 url: list.url.clone(),
                 interval,
                 kind,
+                format,
                 runtime_disabled: Arc::new(AtomicBool::new(false)),
             })
         })
@@ -618,192 +622,57 @@ async fn fetch_list_content(source: &str) -> Result<String> {
         .with_context(|| format!("failed to read list file {source}"))
 }
 
-/// Splits `||`-stripped pattern into `(domain, modifiers)`.
-/// Handles both `example.com^$mod` and `example.com$mod` forms.
-fn split_domain_and_modifiers(stripped: &str) -> (&str, &str) {
-    if let Some(caret_pos) = stripped.find('^') {
-        let domain = &stripped[..caret_pos];
-        let after_caret = &stripped[caret_pos + 1..];
-        let modifiers = after_caret.strip_prefix('$').unwrap_or("");
-        return (domain, modifiers);
-    }
-    if let Some(dollar_pos) = stripped.find('$') {
-        return (&stripped[..dollar_pos], &stripped[dollar_pos + 1..]);
-    }
-    (stripped, "")
-}
-
-/// Returns the first modifier that is NOT applicable at DNS level, or `None`
-/// if all modifiers are DNS-safe. Uses an allowlist approach (fail-closed):
-/// only known DNS-safe modifiers are permitted; any unknown or
-/// response-modification modifier causes the rule to be skipped.
-fn restricting_modifier(modifiers: &str) -> Option<&str> {
-    for raw in modifiers.split(',') {
-        let m = raw.trim();
-        if m.is_empty() {
-            continue;
-        }
-        let key = m
-            .trim_start_matches('~')
-            .split('=')
-            .next()
-            .unwrap_or("")
-            .trim();
-        match key {
-            // DNS-safe modifiers — these do not restrict applicability at DNS level
-            "important" | "match-case" | "all" => {}
-            // AdGuard noop modifier (one or more underscores)
-            k if !k.is_empty() && k.chars().all(|c| c == '_') => {}
-            // Empty key (e.g. trailing comma) — ignore
-            "" => {}
-            // Everything else is not evaluable at DNS level — skip the rule
-            _ => return Some(key),
-        }
-    }
-    None
-}
-
-fn parse_domains(content: &str) -> (HashSet<String>, HashSet<String>, usize) {
+/// Parses list content using the specified format and returns
+/// `(blocked_domains, exception_domains, skipped_count)`.
+fn parse_list_content(
+    content: &str,
+    format: ListFormat,
+) -> (HashSet<String>, HashSet<String>, usize) {
     let mut blocks = HashSet::new();
     let mut exceptions = HashSet::new();
     let mut skipped_entries = 0usize;
 
-    for parsed in content.lines().filter_map(parse_domain_line_with_status) {
-        match parsed {
-            ParseDomainLineResult::Parsed(ParsedLine::Block(d)) => {
-                blocks.insert(d);
-            }
-            ParseDomainLineResult::Parsed(ParsedLine::Allow(d)) => {
-                exceptions.insert(d);
-            }
-            ParseDomainLineResult::Skipped => skipped_entries += 1,
+    let mut collect = |result: ParseDomainLineResult| match result {
+        ParseDomainLineResult::Parsed(ParsedLine::Block(d)) => {
+            blocks.insert(d);
         }
-    }
-    (blocks, exceptions, skipped_entries)
-}
-
-#[cfg(test)]
-fn parse_domain_line(line: &str) -> Option<ParsedLine> {
-    parse_domain_line_with_status(line).and_then(|result| match result {
-        ParseDomainLineResult::Parsed(parsed) => Some(parsed),
-        ParseDomainLineResult::Skipped => None,
-    })
-}
-
-fn parse_domain_line_with_status(line: &str) -> Option<ParseDomainLineResult> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('!') {
-        return None;
-    }
-
-    // Skip non-network rules: cosmetic, CSS injection, scriptlet, HTML filter.
-    // Longer markers must be listed before shorter ones that are substrings,
-    // although `contains()` makes order irrelevant for correctness.
-    const COSMETIC_MARKERS: &[&str] = &[
-        "#@$?#", // Extended CSS + CSS injection exception
-        "#$?#",  // Extended CSS + CSS injection
-        "#@?#",  // Extended CSS element hiding exception
-        "#?#",   // Extended CSS element hiding
-        "#@$#",  // CSS injection exception
-        "#@%#",  // JavaScript injection exception
-        "#@#",   // Element hiding exception
-        "##",    // Element hiding
-        "#$#",   // CSS injection / scriptlet injection
-        "#%#",   // JavaScript injection (AdGuard)
-        "$@$",   // HTML filtering exception
-        "$$",    // HTML filtering
-    ];
-    if COSMETIC_MARKERS.iter().any(|m| trimmed.contains(m)) {
-        return Some(ParseDomainLineResult::Skipped);
-    }
-
-    // Detect exception (`@@`) prefix
-    let (is_exception, rule) = if let Some(rest) = trimmed.strip_prefix("@@") {
-        (true, rest)
-    } else {
-        (false, trimmed)
+        ParseDomainLineResult::Parsed(ParsedLine::Allow(d)) => {
+            exceptions.insert(d);
+        }
+        ParseDomainLineResult::Skipped => skipped_entries += 1,
     };
 
-    // Handle `||domain[^][$modifiers]` AdGuard/ABP network rules
-    if let Some(stripped) = rule.strip_prefix("||") {
-        let (domain_part, modifiers) = split_domain_and_modifiers(stripped);
-        if let Some(reason) = restricting_modifier(modifiers) {
-            tracing::debug!(
-                rule = %trimmed,
-                reason = %reason,
-                "filter rule skipped: modifier not applicable at DNS level"
-            );
-            return Some(ParseDomainLineResult::Skipped);
+    match format {
+        ListFormat::Adguard => {
+            for parsed in content.lines().filter_map(adguard::parse_adguard_line) {
+                collect(parsed);
+            }
         }
-        return normalize_domain_opt(domain_part)
-            .map(|d| {
-                if is_exception {
-                    ParseDomainLineResult::Parsed(ParsedLine::Allow(d))
-                } else {
-                    ParseDomainLineResult::Parsed(ParsedLine::Block(d))
+        ListFormat::Hosts => {
+            for line in content.lines() {
+                for parsed in hosts::parse_hosts_line(line) {
+                    collect(parsed);
                 }
-            })
-            .or(Some(ParseDomainLineResult::Skipped));
-    }
-
-    // Exception rules without `||` prefix are too specific to evaluate at DNS level
-    if is_exception {
-        return Some(ParseDomainLineResult::Skipped);
-    }
-
-    // HOSTS-file format and plain domain entries
-    let without_comment = trimmed.split('#').next().unwrap_or(trimmed).trim();
-    if without_comment.is_empty() {
-        return None;
-    }
-
-    let mut parts = without_comment.split_whitespace();
-    let first = parts.next()?;
-    let second = parts.next();
-
-    let domain = match second {
-        Some(d) if is_ip_like(first) => d,
-        _ => first,
-    };
-
-    normalize_domain_opt(domain)
-        .map(|d| ParseDomainLineResult::Parsed(ParsedLine::Block(d)))
-        .or(Some(ParseDomainLineResult::Skipped))
-}
-
-fn is_ip_like(value: &str) -> bool {
-    value.parse::<Ipv4Addr>().is_ok() || value.parse::<Ipv6Addr>().is_ok()
-}
-
-fn normalize_domain_opt(input: &str) -> Option<String> {
-    let normalized = normalize_domain(input);
-    if normalized.is_empty() {
-        return None;
-    }
-
-    Name::from_ascii(&normalized).ok()?;
-    Some(normalized)
-}
-
-fn normalize_domain(input: &str) -> String {
-    input
-        .trim()
-        .trim_end_matches('.')
-        .to_ascii_lowercase()
-        .trim_start_matches("*.")
-        .to_string()
-}
-
-fn matches_any(set: &HashSet<String>, domain: &str) -> bool {
-    let labels = domain.split('.').collect::<Vec<_>>();
-    for idx in 0..labels.len() {
-        let candidate = labels[idx..].join(".");
-        if set.contains(&candidate) {
-            return true;
+            }
+        }
+        ListFormat::Rpz => {
+            for parsed in content.lines().filter_map(rpz::parse_rpz_line) {
+                collect(parsed);
+            }
+        }
+        ListFormat::Domains => {
+            for parsed in content.lines().filter_map(domains::parse_domain_list_line) {
+                collect(parsed);
+            }
+        }
+        ListFormat::Wildcard => {
+            for parsed in content.lines().filter_map(wildcard::parse_wildcard_line) {
+                collect(parsed);
+            }
         }
     }
 
-    false
+    (blocks, exceptions, skipped_entries)
 }
 
 pub fn parse_interval(input: &str) -> Result<Duration> {
@@ -856,29 +725,6 @@ mod tests {
     fn parse_interval_rejects_invalid_values() {
         assert!(parse_interval("abc").is_err());
         assert!(parse_interval("10w").is_err());
-    }
-
-    #[test]
-    fn parse_domain_line_supports_hosts_and_adblock_formats() {
-        assert_eq!(
-            parse_domain_line("0.0.0.0 ads.example.com"),
-            Some(ParsedLine::Block("ads.example.com".into()))
-        );
-        assert_eq!(
-            parse_domain_line("||tracker.example.org^"),
-            Some(ParsedLine::Block("tracker.example.org".into()))
-        );
-        assert_eq!(
-            parse_domain_line("plain.example.net"),
-            Some(ParsedLine::Block("plain.example.net".into()))
-        );
-    }
-
-    #[test]
-    fn matching_checks_parent_domains() {
-        let mut set = HashSet::new();
-        set.insert("example.com".to_string());
-        assert!(matches_any(&set, "a.b.example.com"));
     }
 
     #[test]
@@ -951,109 +797,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_domain_line_handles_exceptions_and_modifiers() {
-        // Plain exception → Allow
-        assert_eq!(
-            parse_domain_line("@@||example.com^"),
-            Some(ParsedLine::Allow("example.com".into()))
-        );
-        // Behavior-only modifier $important → Block
-        assert_eq!(
-            parse_domain_line("||example.com^$important"),
-            Some(ParsedLine::Block("example.com".into()))
-        );
-        // $all means all types → Block
-        assert_eq!(
-            parse_domain_line("||example.com^$all"),
-            Some(ParsedLine::Block("example.com".into()))
-        );
-        // Content-type restrictor → skip
-        assert_eq!(parse_domain_line("||example.com^$script"), None);
-        // Context restrictor → skip
-        assert_eq!(parse_domain_line("||example.com^$third-party"), None);
-        // Multiple modifiers with a restrictor → skip
-        assert_eq!(parse_domain_line("||example.com^$image,third-party"), None);
-        // No `^` but has context modifier → skip
-        assert_eq!(parse_domain_line("||example.com$third-party"), None);
-        // Exception with narrowing modifier → skip
-        assert_eq!(parse_domain_line("@@||example.com^$script"), None);
-        // Response-modification modifiers → skip (fail-closed allowlist)
-        assert_eq!(
-            parse_domain_line("||example.com^$csp=script-src 'self'"),
-            None
-        );
-        assert_eq!(parse_domain_line("||example.com^$redirect=noopjs"), None);
-        assert_eq!(
-            parse_domain_line("||example.com^$removeparam=utm_source"),
-            None
-        );
-        assert_eq!(
-            parse_domain_line("||example.com^$removeheader=refresh"),
-            None
-        );
-        assert_eq!(parse_domain_line("||example.com^$cookie"), None);
-        assert_eq!(parse_domain_line("||example.com^$stealth"), None);
-        assert_eq!(parse_domain_line("||example.com^$badfilter"), None);
-        assert_eq!(
-            parse_domain_line("||example.com^$replace=/test/test2/"),
-            None
-        );
-        // Noop modifier (underscores) should still be DNS-safe → Block
-        assert_eq!(
-            parse_domain_line("||example.com^$_____,important"),
-            Some(ParsedLine::Block("example.com".into()))
-        );
-    }
-
-    #[test]
-    fn parse_domain_line_skips_cosmetic_rules() {
-        // Original markers
-        assert_eq!(parse_domain_line("example.com##.advertisement"), None);
-        assert_eq!(parse_domain_line("example.com#@#.selector"), None);
-        assert_eq!(parse_domain_line("example.com#$#body { color: red }"), None);
-        assert_eq!(
-            parse_domain_line("example.com#%#//scriptlet(abort-on-property-read, alert)"),
-            None
-        );
-        assert_eq!(parse_domain_line("example.com$$script[data-src]"), None);
-
-        // Extended CSS markers
-        assert_eq!(
-            parse_domain_line("imdb.com#$?#.interstitial-adWrapper { remove: true; }"),
-            None
-        );
-        assert_eq!(
-            parse_domain_line("example.com#?#.banner:matches-css(width: 360px)"),
-            None
-        );
-        assert_eq!(parse_domain_line("example.com#@?#.banner"), None);
-        assert_eq!(
-            parse_domain_line("example.com#@$?#div { remove: true; }"),
-            None
-        );
-
-        // Exception markers for injection rules
-        assert_eq!(
-            parse_domain_line("example.com#@$#.textad { visibility: hidden; }"),
-            None
-        );
-        assert_eq!(
-            parse_domain_line("example.com#@%#window.__gaq = undefined;"),
-            None
-        );
-
-        // HTML filtering exception
-        assert_eq!(
-            parse_domain_line("example.com$@$script[tag-content=\"banner\"]"),
-            None
-        );
-    }
-
-    #[test]
-    fn parse_domains_separates_blocks_and_exceptions() {
+    fn parse_list_content_adguard_separates_blocks_and_exceptions() {
         let content =
             "||ads.example.com^\n@@||safe.example.com^\n||tracker.org^$third-party\n!comment\n";
-        let (blocks, exceptions, skipped_entries) = parse_domains(content);
+        let (blocks, exceptions, skipped_entries) =
+            parse_list_content(content, ListFormat::Adguard);
         assert!(
             blocks.contains("ads.example.com"),
             "should block ads.example.com"
@@ -1077,10 +825,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_domains_counts_multiple_skipped_rule_kinds() {
+    fn parse_list_content_adguard_counts_multiple_skipped() {
         let content =
             "||ok.example^\n||skip-modifier.example^$script\n@@plain-exception.example.com\nhttp://not-a-domain/\n# comment\n";
-        let (blocks, exceptions, skipped_entries) = parse_domains(content);
+        let (blocks, exceptions, skipped_entries) =
+            parse_list_content(content, ListFormat::Adguard);
 
         assert!(
             blocks.contains("ok.example"),
@@ -1094,6 +843,49 @@ mod tests {
     }
 
     #[test]
+    fn parse_list_content_hosts_multi_domain() {
+        let content = "0.0.0.0 ads.example.com tracker.example.com\n127.0.0.1 malware.example.com\n# comment\n";
+        let (blocks, exceptions, skipped) = parse_list_content(content, ListFormat::Hosts);
+        assert_eq!(blocks.len(), 3);
+        assert!(blocks.contains("ads.example.com"));
+        assert!(blocks.contains("tracker.example.com"));
+        assert!(blocks.contains("malware.example.com"));
+        assert!(exceptions.is_empty());
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn parse_list_content_rpz_blocks_and_allows() {
+        let content = "bad.example.com CNAME .\ngood.example.com CNAME rpz-passthru.\n; comment\n";
+        let (blocks, exceptions, skipped) = parse_list_content(content, ListFormat::Rpz);
+        assert!(blocks.contains("bad.example.com"));
+        assert!(exceptions.contains("good.example.com"));
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn parse_list_content_domains_flat() {
+        let content = "ads.example.com\ntracker.example.com\n# comment\n";
+        let (blocks, exceptions, skipped) = parse_list_content(content, ListFormat::Domains);
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks.contains("ads.example.com"));
+        assert!(blocks.contains("tracker.example.com"));
+        assert!(exceptions.is_empty());
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn parse_list_content_wildcard() {
+        let content = "*.ads.example.com\ntracker.example.com\n# comment\n";
+        let (blocks, exceptions, skipped) = parse_list_content(content, ListFormat::Wildcard);
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks.contains("ads.example.com"));
+        assert!(blocks.contains("tracker.example.com"));
+        assert!(exceptions.is_empty());
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
     fn build_runtimes_skips_disabled_lists() {
         let lists = vec![
             NamedList {
@@ -1101,18 +893,21 @@ mod tests {
                 url: "https://example.com/1".into(),
                 interval: Some("12h".into()),
                 enabled: Some(true),
+                list_type: None,
             },
             NamedList {
                 name: "disabled".into(),
                 url: "https://example.com/2".into(),
                 interval: Some("12h".into()),
                 enabled: Some(false),
+                list_type: None,
             },
             NamedList {
                 name: "default".into(),
                 url: "https://example.com/3".into(),
                 interval: None,
                 enabled: None,
+                list_type: None,
             },
         ];
 
@@ -1120,5 +915,50 @@ mod tests {
         assert_eq!(runtimes.len(), 2);
         assert_eq!(runtimes[0].name, "enabled");
         assert_eq!(runtimes[1].name, "default");
+    }
+
+    #[test]
+    fn build_runtimes_parses_list_type() {
+        let lists = vec![
+            NamedList {
+                name: "hosts_list".into(),
+                url: "https://example.com/hosts".into(),
+                interval: None,
+                enabled: Some(true),
+                list_type: Some("hosts".into()),
+            },
+            NamedList {
+                name: "rpz_list".into(),
+                url: "https://example.com/rpz".into(),
+                interval: None,
+                enabled: Some(true),
+                list_type: Some("rpz".into()),
+            },
+            NamedList {
+                name: "default_type".into(),
+                url: "https://example.com/default".into(),
+                interval: None,
+                enabled: Some(true),
+                list_type: None,
+            },
+        ];
+
+        let runtimes = build_runtimes(&lists, ListKind::Block).expect("runtimes should build");
+        assert_eq!(runtimes[0].format, ListFormat::Hosts);
+        assert_eq!(runtimes[1].format, ListFormat::Rpz);
+        assert_eq!(runtimes[2].format, ListFormat::Adguard);
+    }
+
+    #[test]
+    fn build_runtimes_rejects_invalid_list_type() {
+        let lists = vec![NamedList {
+            name: "bad".into(),
+            url: "https://example.com/bad".into(),
+            interval: None,
+            enabled: Some(true),
+            list_type: Some("invalid-format".into()),
+        }];
+
+        assert!(build_runtimes(&lists, ListKind::Block).is_err());
     }
 }

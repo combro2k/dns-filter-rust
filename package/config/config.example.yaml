@@ -69,10 +69,38 @@ blocklists:
       enabled: true
       url: "https://raw.githubusercontent.com/AdguardTeam/FiltersRegistry/master/filters/filter_2_Base/filter.txt"
       interval: "12h"
+      # list_type: "adguard"  # default; supports AdGuard/ABP syntax
   - custom_ads:
       enabled: false
       url: "https://example.com/myadblock.txt"
       interval: "30m"
+      # Supported list_type values:
+      #   "adguard"  — AdGuard/ABP filter syntax (default)
+      #   "hosts"    — hosts file format (including compressed multi-hostname lines)
+      #   "rpz"      — Response Policy Zone format
+      #   "domains"  — flat domain list, one domain per line
+      #   "wildcard" — wildcard domain list, *.example.com per line
+      # list_type: "adguard"
+  # - stevenblack_hosts:
+  #     enabled: false
+  #     url: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+  #     interval: "12h"
+  #     list_type: "hosts"
+  # - rpz_blocklist:
+  #     enabled: false
+  #     url: "https://example.com/rpz-zone.txt"
+  #     interval: "6h"
+  #     list_type: "rpz"
+  # - simple_domains:
+  #     enabled: false
+  #     url: "https://example.com/domains.txt"
+  #     interval: "12h"
+  #     list_type: "domains"
+  # - wildcard_ads:
+  #     enabled: false
+  #     url: "https://example.com/wildcards.txt"
+  #     interval: "12h"
+  #     list_type: "wildcard"
 
 allowlists:
   - corporate_allow:

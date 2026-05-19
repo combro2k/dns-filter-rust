@@ -210,6 +210,7 @@ pub struct NamedList {
     pub url: String,
     pub interval: Option<String>,
     pub enabled: Option<bool>,
+    pub list_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -217,6 +218,7 @@ struct NamedListEntry {
     url: String,
     interval: Option<String>,
     enabled: Option<bool>,
+    list_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -227,6 +229,7 @@ enum NamedListRepr {
         url: String,
         interval: Option<String>,
         enabled: Option<bool>,
+        list_type: Option<String>,
     },
     Nested(BTreeMap<String, NamedListEntry>),
 }
@@ -244,11 +247,13 @@ impl<'de> Deserialize<'de> for NamedList {
                 url,
                 interval,
                 enabled,
+                list_type,
             } => Ok(Self {
                 name,
                 url,
                 interval,
                 enabled,
+                list_type,
             }),
             NamedListRepr::Nested(map) => {
                 let mut iter = map.into_iter();
@@ -258,6 +263,7 @@ impl<'de> Deserialize<'de> for NamedList {
                         url: entry.url,
                         interval: entry.interval,
                         enabled: entry.enabled,
+                        list_type: entry.list_type,
                     }),
                     _ => Err(serde::de::Error::custom(
                         "named list map must contain exactly one item",

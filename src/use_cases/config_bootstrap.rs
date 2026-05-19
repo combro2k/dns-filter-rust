@@ -845,6 +845,7 @@ mod tests {
             url: "https://example.com/ads.txt".into(),
             interval: None,
             enabled: None,
+            list_type: None,
         }];
 
         let filter = build_domain_filter(&config).expect("domain filter should build");
@@ -865,6 +866,7 @@ mod tests {
             url: "https://example.com/ads.txt".into(),
             interval: Some("99w".into()),
             enabled: None,
+            list_type: None,
         }];
 
         let result = build_domain_filter(&config);
