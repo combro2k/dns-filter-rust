@@ -15,6 +15,10 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - **Migrated HTTP API from hyper 0.14 to axum**: replaced raw hyper service with axum `Router`, typed extractors (`State`, `Path`, `Json`), and `axum::serve()` with graceful shutdown. All API endpoints and behavior remain unchanged.
+
+## [2.2.2] - 2026-05-19
+
+### Changed
 - **Moved error-to-SERVFAIL policy from adapter to use-case layer**: `DnsUpstreamStage` and `ZoneForwardingStage` now return SERVFAIL responses directly on failure instead of propagating errors. This removes the business policy decision from `HickoryRequestHandler` (interface adapter) and keeps it in the use-case pipeline where it belongs per Clean Architecture.
 
 ## [2.2.0] - 2026-05-18
