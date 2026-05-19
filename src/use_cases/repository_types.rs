@@ -7,6 +7,7 @@ use serde::Serialize;
 
 /// A blocklist or allowlist entry stored in the database.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct FilterListRecord {
     pub id: String,
     pub name: String,
@@ -60,6 +61,7 @@ pub struct UpstreamServerRecord {
 
 /// A DNS zone forwarding/authority entry.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct ZoneRecord {
     pub id: String,
     pub zone: String,
@@ -72,6 +74,7 @@ pub struct ZoneRecord {
 
 /// A single server backing a zone.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct ZoneServerRecord {
     pub id: String,
     pub zone_id: String,
@@ -92,6 +95,7 @@ pub struct ZoneServerRecord {
 
 /// A zone-discovery endpoint entry.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct ZoneDiscoveryRecord {
     pub id: String,
     pub enabled: bool,

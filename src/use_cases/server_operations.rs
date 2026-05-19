@@ -758,6 +758,7 @@ impl ServerOperations {
 // --- Input types ---
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct CreateFilterListInput {
     pub name: String,
     pub url: String,
@@ -767,6 +768,7 @@ pub struct CreateFilterListInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct UpdateFilterListInput {
     pub url: Option<String>,
     pub interval: Option<String>,
@@ -775,6 +777,7 @@ pub struct UpdateFilterListInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct CreateZoneInput {
     pub zone: String,
     pub enabled: Option<bool>,
@@ -785,6 +788,7 @@ pub struct CreateZoneInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct UpdateZoneInput {
     pub enabled: Option<bool>,
     pub bypass_filter: Option<bool>,
@@ -794,6 +798,7 @@ pub struct UpdateZoneInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct CreateZoneServerInput {
     pub enabled: Option<bool>,
     pub protocol: String,
@@ -808,6 +813,7 @@ pub struct CreateZoneServerInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct CreateZoneDiscoveryInput {
     pub enabled: Option<bool>,
     pub address: String,
@@ -819,6 +825,7 @@ pub struct CreateZoneDiscoveryInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct UpdateZoneDiscoveryInput {
     pub enabled: Option<bool>,
     pub address: Option<String>,
@@ -830,6 +837,7 @@ pub struct UpdateZoneDiscoveryInput {
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct AuthenticationInput {
     pub token: Option<String>,
     pub username: Option<String>,
@@ -944,6 +952,7 @@ fn parse_interval_secs(interval: Option<&str>) -> i64 {
 // --- Result types ---
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct DeleteResult {
     pub deleted: String,
 }
@@ -956,17 +965,20 @@ pub struct DnsLookupResult {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct FilterStatusResult {
     pub filtering_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct FilterToggleResult {
     pub filtering_enabled: bool,
     pub message: String,
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct StatsResult {
     pub uptime_seconds: u64,
     pub filtering_enabled: bool,
@@ -978,13 +990,16 @@ pub struct StatsResult {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct QueryLogResult {
     pub total: usize,
     pub max_entries: usize,
+    #[cfg_attr(feature = "http-api", schema(value_type = Vec<QueryLogEntry>))]
     pub entries: VecDeque<QueryLogEntry>,
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct HealthResult {
     pub status: &'static str,
     pub version: &'static str,
@@ -993,23 +1008,27 @@ pub struct HealthResult {
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct ListActionResult {
     pub list: String,
     pub enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct RefreshResult {
     pub list: String,
     pub status: &'static str,
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct RefreshAllResult {
     pub lists_refreshing: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct ReloadResult {
     pub status: &'static str,
     pub message: &'static str,

@@ -5,6 +5,7 @@ use serde::Serialize;
 use crate::entities::filter::FilterDecision;
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct QueryLogEntry {
     pub timestamp: u64,
     pub domain: String,
@@ -15,6 +16,7 @@ pub struct QueryLogEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum QueryDecision {
     Allowed,

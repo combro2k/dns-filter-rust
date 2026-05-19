@@ -80,6 +80,7 @@ pub trait DomainFilter: Send + Sync {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct ListInfo {
     pub name: String,
     pub url: String,

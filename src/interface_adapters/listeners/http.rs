@@ -9,10 +9,15 @@ use axum::routing::{delete, get, post, put};
 use axum::{middleware, Json, Router};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
+use utoipa::OpenApi;
 
+use crate::use_cases::filtering::ListInfo;
+use crate::use_cases::repository_types::{FilterListRecord, ZoneDiscoveryRecord, ZoneRecord};
 use crate::use_cases::server_operations::{
-    CreateFilterListInput, CreateZoneDiscoveryInput, CreateZoneInput, ServerOperationError,
-    ServerOperations, UpdateFilterListInput, UpdateZoneDiscoveryInput, UpdateZoneInput,
+    CreateFilterListInput, CreateZoneDiscoveryInput, CreateZoneInput, DeleteResult,
+    FilterStatusResult, FilterToggleResult, HealthResult, ListActionResult, QueryLogResult,
+    RefreshAllResult, RefreshResult, ReloadResult, ServerOperationError, ServerOperations,
+    StatsResult, UpdateFilterListInput, UpdateZoneDiscoveryInput, UpdateZoneInput,
 };
 
 use super::auth::bearer_auth_middleware;
@@ -32,6 +37,19 @@ struct ApiResponse<T: Serialize> {
     data: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    timestamp: u64,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct StopResponse {
+    status: &'static str,
+    message: &'static str,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct ErrorResponse {
+    success: bool,
+    error: String,
     timestamp: u64,
 }
 
@@ -60,6 +78,83 @@ fn json_error(status: StatusCode, message: &str) -> Response {
         timestamp: now_unix(),
     };
     (status, Json(body)).into_response()
+}
+
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "dns-filter API",
+        version = env!("CARGO_PKG_VERSION"),
+        description = "DNS filter management API. All responses (except errors) are wrapped in an ApiResponse envelope with `success`, `data`, `error`, and `timestamp` fields.",
+    ),
+    paths(
+        handle_health,
+        handle_reload,
+        handle_stop,
+        handle_filtering_disable,
+        handle_filtering_enable,
+        handle_filtering_status,
+        handle_list_all,
+        handle_refresh_all,
+        handle_refresh_single,
+        handle_disable_list,
+        handle_enable_list,
+        handle_stats,
+        handle_query_log,
+        handle_list_blocklists,
+        handle_add_blocklist,
+        handle_update_blocklist,
+        handle_delete_blocklist,
+        handle_list_allowlists,
+        handle_add_allowlist,
+        handle_update_allowlist,
+        handle_delete_allowlist,
+        handle_list_zone_configs,
+        handle_add_zone,
+        handle_update_zone,
+        handle_delete_zone,
+        handle_list_zone_discovery,
+        handle_add_zone_discovery,
+        handle_update_zone_discovery,
+        handle_delete_zone_discovery,
+    ),
+    components(schemas(
+        StopResponse, ErrorResponse,
+        HealthResult, ReloadResult, StatsResult,
+        FilterStatusResult, FilterToggleResult,
+        QueryLogResult, ListActionResult,
+        RefreshResult, RefreshAllResult, DeleteResult,
+        ListInfo, FilterListRecord, ZoneRecord,
+        crate::use_cases::repository_types::ZoneServerRecord,
+        ZoneDiscoveryRecord,
+        CreateFilterListInput, UpdateFilterListInput,
+        CreateZoneInput, UpdateZoneInput,
+        crate::use_cases::server_operations::CreateZoneServerInput,
+        crate::use_cases::server_operations::AuthenticationInput,
+        CreateZoneDiscoveryInput, UpdateZoneDiscoveryInput,
+        crate::entities::query_log::QueryLogEntry,
+        crate::entities::query_log::QueryDecision,
+    )),
+    security(("bearer_auth" = [])),
+    modifiers(&SecurityAddon),
+)]
+struct ApiDoc;
+
+struct SecurityAddon;
+
+impl utoipa::Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        if let Some(components) = openapi.components.as_mut() {
+            components.add_security_scheme(
+                "bearer_auth",
+                utoipa::openapi::security::SecurityScheme::Http(
+                    utoipa::openapi::security::Http::new(
+                        utoipa::openapi::security::HttpAuthScheme::Bearer,
+                    ),
+                ),
+            );
+        }
+    }
 }
 
 /// Starts the HTTP API server. Returns when the server shuts down.
@@ -107,6 +202,8 @@ pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> anyhow:
             "/api/v1/zone-discovery/{id}",
             delete(handle_delete_zone_discovery),
         )
+        // OpenAPI spec
+        .route("/api/v1/openapi.json", get(handle_openapi))
         .layer(middleware::from_fn(move |req, next| {
             let token = Arc::clone(&token);
             bearer_auth_middleware(req, next, token)
@@ -144,11 +241,31 @@ pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> anyhow:
 
 // --- Handler implementations ---
 
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "System",
+    summary = "Health check",
+    responses(
+        (status = 200, description = "Server health information", body = HealthResult),
+    ),
+)]
 async fn handle_health(State(state): State<Arc<ApiState>>) -> Response {
     let result = state.ops.server_health();
     json_ok(result)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/reload",
+    tag = "System",
+    summary = "Trigger configuration reload",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Reload triggered", body = ReloadResult),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    ),
+)]
 async fn handle_reload(State(state): State<Arc<ApiState>>) -> Response {
     match state.ops.trigger_reload().await {
         Ok(result) => {
@@ -159,43 +276,97 @@ async fn handle_reload(State(state): State<Arc<ApiState>>) -> Response {
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/stop",
+    tag = "System",
+    summary = "Initiate server shutdown",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Shutdown initiated", body = StopResponse),
+    ),
+)]
 async fn handle_stop(State(state): State<Arc<ApiState>>) -> Response {
     tracing::info!(source = "api", "shutdown requested via API");
     state.shutdown.cancel();
-
-    #[derive(Serialize)]
-    struct StopResponse {
-        status: &'static str,
-        message: &'static str,
-    }
     json_ok(StopResponse {
         status: "ok",
         message: "shutdown initiated",
     })
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/filtering/disable",
+    tag = "Filtering",
+    summary = "Disable global filtering",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Filtering disabled", body = FilterToggleResult),
+    ),
+)]
 async fn handle_filtering_disable(State(state): State<Arc<ApiState>>) -> Response {
     let result = state.ops.set_filtering(false);
     tracing::info!(source = "api", "global filtering disabled via API");
     json_ok(result)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/filtering/enable",
+    tag = "Filtering",
+    summary = "Enable global filtering",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Filtering enabled", body = FilterToggleResult),
+    ),
+)]
 async fn handle_filtering_enable(State(state): State<Arc<ApiState>>) -> Response {
     let result = state.ops.set_filtering(true);
     tracing::info!(source = "api", "global filtering enabled via API");
     json_ok(result)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/filtering/status",
+    tag = "Filtering",
+    summary = "Get filtering status",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Current filtering status", body = FilterStatusResult),
+    ),
+)]
 async fn handle_filtering_status(State(state): State<Arc<ApiState>>) -> Response {
     let result = state.ops.filter_status();
     json_ok(result)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/lists",
+    tag = "Filter Lists",
+    summary = "List all filter lists",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "All filter lists", body = Vec<ListInfo>),
+    ),
+)]
 async fn handle_list_all(State(state): State<Arc<ApiState>>) -> Response {
     let lists = state.ops.list_filters();
     json_ok(lists)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/lists/refresh",
+    tag = "Filter Lists",
+    summary = "Refresh all filter lists",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Refresh triggered for all lists", body = RefreshAllResult),
+    ),
+)]
 async fn handle_refresh_all(State(state): State<Arc<ApiState>>) -> Response {
     let result = state.ops.refresh_all_lists();
     tracing::info!(
@@ -206,6 +377,18 @@ async fn handle_refresh_all(State(state): State<Arc<ApiState>>) -> Response {
     json_ok(result)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/lists/{name}/refresh",
+    tag = "Filter Lists",
+    summary = "Refresh a specific filter list",
+    security(("bearer_auth" = [])),
+    params(("name" = String, Path, description = "Filter list name")),
+    responses(
+        (status = 200, description = "Refresh triggered", body = RefreshResult),
+        (status = 404, description = "List not found", body = ErrorResponse),
+    ),
+)]
 async fn handle_refresh_single(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
@@ -219,6 +402,18 @@ async fn handle_refresh_single(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/lists/{name}/disable",
+    tag = "Filter Lists",
+    summary = "Disable a filter list",
+    security(("bearer_auth" = [])),
+    params(("name" = String, Path, description = "Filter list name")),
+    responses(
+        (status = 200, description = "List disabled", body = ListActionResult),
+        (status = 404, description = "List not found", body = ErrorResponse),
+    ),
+)]
 async fn handle_disable_list(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
@@ -229,6 +424,18 @@ async fn handle_disable_list(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/lists/{name}/enable",
+    tag = "Filter Lists",
+    summary = "Enable a filter list",
+    security(("bearer_auth" = [])),
+    params(("name" = String, Path, description = "Filter list name")),
+    responses(
+        (status = 200, description = "List enabled", body = ListActionResult),
+        (status = 404, description = "List not found", body = ErrorResponse),
+    ),
+)]
 async fn handle_enable_list(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
@@ -239,11 +446,32 @@ async fn handle_enable_list(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/stats",
+    tag = "System",
+    summary = "Get server statistics",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Server statistics", body = StatsResult),
+    ),
+)]
 async fn handle_stats(State(state): State<Arc<ApiState>>) -> Response {
     let result = state.ops.get_stats();
     json_ok(result)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/query-log",
+    tag = "System",
+    summary = "Get DNS query log",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Query log entries", body = QueryLogResult),
+        (status = 404, description = "Query log not enabled", body = ErrorResponse),
+    ),
+)]
 async fn handle_query_log(State(state): State<Arc<ApiState>>) -> Response {
     match state.ops.get_query_log() {
         Ok(result) => json_ok(result),
@@ -253,6 +481,17 @@ async fn handle_query_log(State(state): State<Arc<ApiState>>) -> Response {
 
 // --- Blocklist CRUD handlers ---
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/blocklists",
+    tag = "Blocklists",
+    summary = "List all blocklists",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "All blocklists", body = Vec<FilterListRecord>),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    ),
+)]
 async fn handle_list_blocklists(State(state): State<Arc<ApiState>>) -> Response {
     match state.ops.list_filter_lists("block").await {
         Ok(lists) => json_ok(lists),
@@ -260,6 +499,19 @@ async fn handle_list_blocklists(State(state): State<Arc<ApiState>>) -> Response 
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/blocklists",
+    tag = "Blocklists",
+    summary = "Add a blocklist",
+    security(("bearer_auth" = [])),
+    request_body = CreateFilterListInput,
+    responses(
+        (status = 201, description = "Blocklist created", body = FilterListRecord),
+        (status = 400, description = "Invalid input", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    ),
+)]
 async fn handle_add_blocklist(
     State(state): State<Arc<ApiState>>,
     Json(input): Json<CreateFilterListInput>,
@@ -282,6 +534,20 @@ async fn handle_add_blocklist(
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/v1/blocklists/{name}",
+    tag = "Blocklists",
+    summary = "Update a blocklist",
+    security(("bearer_auth" = [])),
+    params(("name" = String, Path, description = "Blocklist name")),
+    request_body = UpdateFilterListInput,
+    responses(
+        (status = 200, description = "Blocklist updated", body = FilterListRecord),
+        (status = 400, description = "Invalid input", body = ErrorResponse),
+        (status = 404, description = "Not found", body = ErrorResponse),
+    ),
+)]
 async fn handle_update_blocklist(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
@@ -296,6 +562,18 @@ async fn handle_update_blocklist(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/blocklists/{name}",
+    tag = "Blocklists",
+    summary = "Delete a blocklist",
+    security(("bearer_auth" = [])),
+    params(("name" = String, Path, description = "Blocklist name")),
+    responses(
+        (status = 200, description = "Blocklist deleted", body = DeleteResult),
+        (status = 404, description = "Not found", body = ErrorResponse),
+    ),
+)]
 async fn handle_delete_blocklist(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
@@ -311,6 +589,17 @@ async fn handle_delete_blocklist(
 
 // --- Allowlist CRUD handlers ---
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/allowlists",
+    tag = "Allowlists",
+    summary = "List all allowlists",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "All allowlists", body = Vec<FilterListRecord>),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    ),
+)]
 async fn handle_list_allowlists(State(state): State<Arc<ApiState>>) -> Response {
     match state.ops.list_filter_lists("allow").await {
         Ok(lists) => json_ok(lists),
@@ -318,6 +607,19 @@ async fn handle_list_allowlists(State(state): State<Arc<ApiState>>) -> Response 
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/allowlists",
+    tag = "Allowlists",
+    summary = "Add an allowlist",
+    security(("bearer_auth" = [])),
+    request_body = CreateFilterListInput,
+    responses(
+        (status = 201, description = "Allowlist created", body = FilterListRecord),
+        (status = 400, description = "Invalid input", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    ),
+)]
 async fn handle_add_allowlist(
     State(state): State<Arc<ApiState>>,
     Json(input): Json<CreateFilterListInput>,
@@ -340,6 +642,20 @@ async fn handle_add_allowlist(
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/v1/allowlists/{name}",
+    tag = "Allowlists",
+    summary = "Update an allowlist",
+    security(("bearer_auth" = [])),
+    params(("name" = String, Path, description = "Allowlist name")),
+    request_body = UpdateFilterListInput,
+    responses(
+        (status = 200, description = "Allowlist updated", body = FilterListRecord),
+        (status = 400, description = "Invalid input", body = ErrorResponse),
+        (status = 404, description = "Not found", body = ErrorResponse),
+    ),
+)]
 async fn handle_update_allowlist(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
@@ -354,6 +670,18 @@ async fn handle_update_allowlist(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/allowlists/{name}",
+    tag = "Allowlists",
+    summary = "Delete an allowlist",
+    security(("bearer_auth" = [])),
+    params(("name" = String, Path, description = "Allowlist name")),
+    responses(
+        (status = 200, description = "Allowlist deleted", body = DeleteResult),
+        (status = 404, description = "Not found", body = ErrorResponse),
+    ),
+)]
 async fn handle_delete_allowlist(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
@@ -369,6 +697,17 @@ async fn handle_delete_allowlist(
 
 // --- Zone CRUD handlers ---
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/zones",
+    tag = "Zones",
+    summary = "List all zone configurations",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "All zone configurations", body = Vec<ZoneRecord>),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    ),
+)]
 async fn handle_list_zone_configs(State(state): State<Arc<ApiState>>) -> Response {
     match state.ops.list_zone_configs().await {
         Ok(zones) => json_ok(zones),
@@ -376,6 +715,19 @@ async fn handle_list_zone_configs(State(state): State<Arc<ApiState>>) -> Respons
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/zones",
+    tag = "Zones",
+    summary = "Add a zone",
+    security(("bearer_auth" = [])),
+    request_body = CreateZoneInput,
+    responses(
+        (status = 201, description = "Zone created", body = ZoneRecord),
+        (status = 400, description = "Invalid input", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    ),
+)]
 async fn handle_add_zone(
     State(state): State<Arc<ApiState>>,
     Json(input): Json<CreateZoneInput>,
@@ -398,6 +750,20 @@ async fn handle_add_zone(
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/v1/zones/{zone}",
+    tag = "Zones",
+    summary = "Update a zone",
+    security(("bearer_auth" = [])),
+    params(("zone" = String, Path, description = "Zone FQDN")),
+    request_body = UpdateZoneInput,
+    responses(
+        (status = 200, description = "Zone updated", body = ZoneRecord),
+        (status = 400, description = "Invalid input", body = ErrorResponse),
+        (status = 404, description = "Not found", body = ErrorResponse),
+    ),
+)]
 async fn handle_update_zone(
     State(state): State<Arc<ApiState>>,
     Path(zone): Path<String>,
@@ -412,6 +778,18 @@ async fn handle_update_zone(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/zones/{zone}",
+    tag = "Zones",
+    summary = "Delete a zone",
+    security(("bearer_auth" = [])),
+    params(("zone" = String, Path, description = "Zone FQDN")),
+    responses(
+        (status = 200, description = "Zone deleted", body = DeleteResult),
+        (status = 404, description = "Not found", body = ErrorResponse),
+    ),
+)]
 async fn handle_delete_zone(
     State(state): State<Arc<ApiState>>,
     Path(zone): Path<String>,
@@ -427,6 +805,17 @@ async fn handle_delete_zone(
 
 // --- Zone discovery CRUD handlers ---
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/zone-discovery",
+    tag = "Zone Discovery",
+    summary = "List all zone discovery entries",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "All zone discovery entries", body = Vec<ZoneDiscoveryRecord>),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    ),
+)]
 async fn handle_list_zone_discovery(State(state): State<Arc<ApiState>>) -> Response {
     match state.ops.list_zone_discovery().await {
         Ok(entries) => json_ok(entries),
@@ -434,6 +823,19 @@ async fn handle_list_zone_discovery(State(state): State<Arc<ApiState>>) -> Respo
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/zone-discovery",
+    tag = "Zone Discovery",
+    summary = "Add a zone discovery entry",
+    security(("bearer_auth" = [])),
+    request_body = CreateZoneDiscoveryInput,
+    responses(
+        (status = 201, description = "Zone discovery entry created", body = ZoneDiscoveryRecord),
+        (status = 400, description = "Invalid input", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    ),
+)]
 async fn handle_add_zone_discovery(
     State(state): State<Arc<ApiState>>,
     Json(input): Json<CreateZoneDiscoveryInput>,
@@ -456,6 +858,20 @@ async fn handle_add_zone_discovery(
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/v1/zone-discovery/{id}",
+    tag = "Zone Discovery",
+    summary = "Update a zone discovery entry",
+    security(("bearer_auth" = [])),
+    params(("id" = String, Path, description = "Zone discovery entry ID")),
+    request_body = UpdateZoneDiscoveryInput,
+    responses(
+        (status = 200, description = "Zone discovery entry updated", body = ZoneDiscoveryRecord),
+        (status = 400, description = "Invalid input", body = ErrorResponse),
+        (status = 404, description = "Not found", body = ErrorResponse),
+    ),
+)]
 async fn handle_update_zone_discovery(
     State(state): State<Arc<ApiState>>,
     Path(id): Path<String>,
@@ -470,6 +886,18 @@ async fn handle_update_zone_discovery(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/v1/zone-discovery/{id}",
+    tag = "Zone Discovery",
+    summary = "Delete a zone discovery entry",
+    security(("bearer_auth" = [])),
+    params(("id" = String, Path, description = "Zone discovery entry ID")),
+    responses(
+        (status = 200, description = "Zone discovery entry deleted", body = DeleteResult),
+        (status = 404, description = "Not found", body = ErrorResponse),
+    ),
+)]
 async fn handle_delete_zone_discovery(
     State(state): State<Arc<ApiState>>,
     Path(id): Path<String>,
@@ -481,6 +909,13 @@ async fn handle_delete_zone_discovery(
         }
         Err(e) => op_error_to_response(e),
     }
+}
+
+// --- OpenAPI spec handler ---
+
+async fn handle_openapi() -> Response {
+    let spec = ApiDoc::openapi().to_json().unwrap_or_default();
+    (StatusCode::OK, [("content-type", "application/json")], spec).into_response()
 }
 
 fn op_error_to_response(e: ServerOperationError) -> Response {

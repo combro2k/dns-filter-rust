@@ -2,9 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
-## [2.3.0] - 2026-05-19
+## [Unreleased]
 
 ### Added
+- **OpenAPI documentation**: auto-generated OpenAPI 3.1 spec served at `GET /api/v1/openapi.json`, derived from endpoint annotations using `utoipa`. The endpoint is gated behind bearer token authentication when `api_token` is configured (same auth as all other `/api/v1` routes).
 - **CRUD management API**: full create/read/update/delete endpoints for blocklists, allowlists, zones, and zone discovery via both HTTP API and MCP.
   - **HTTP API endpoints** (all under `/api/v1/`, authenticated with bearer token):
     - `GET/POST /api/v1/blocklists`, `PUT/DELETE /api/v1/blocklists/{name}`
@@ -25,9 +26,9 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - **`ServerOperations` extended with repository access**: accepts an optional `Arc<Repositories>` via `.with_repositories()` builder method, enabling CRUD operations from any management interface (HTTP API, MCP, control socket).
 - **Repository record types now `Serialize`**: `FilterListRecord`, `ZoneRecord`, `ZoneServerRecord`, `ZoneDiscoveryRecord` derive `Serialize` for direct JSON responses.
-
-### Changed (previous)
 - **Optional blocklists/allowlists config**: `blocklists` and `allowlists` fields are now optional in the YAML config, defaulting to empty arrays when omitted.
+
+## [2.3.0] - 2026-05-19
 
 ### Added
 - **Database-backed operational config**: migrated blocklists, allowlists, filtering settings, upstream resolvers, zones, and zone discovery from static YAML to a database-backed configuration store using sqlx. Supports SQLite (default), MySQL, and PostgreSQL via compile-time feature flags (`db-sqlite`, `db-mysql`, `db-postgres`).
@@ -37,6 +38,9 @@ All notable changes to this project will be documented in this file.
 - **DB-to-config bridge**: `apply_db_config()` loads operational config from DB repositories and overwrites the corresponding fields of the in-memory config, keeping infrastructure settings (listen, logging, security) in YAML (`use_cases/config_from_db.rs`).
 - **Database config section**: new `database:` section in YAML config with `url` field (defaults to `sqlite:///var/lib/dns-filter/dns-filter.db`).
 - **DB-aware config reload**: SIGHUP reload now loads infrastructure from YAML and operational config from the database via `reload_config_from_db()`.
+
+### Fixed
+- **Suppress noisy hickory-server query logs at info level**: added `hickory_server=error` to the tracing `EnvFilter`, preventing per-query log lines (e.g. `query:example.com.:AAAA:IN`) from flooding syslog when running at info level.
 
 ### Changed
 - **Filter cache backend**: replaced rusqlite-based document cache with the `FilterCacheRepository` trait, using the same sqlx database pool as other operational config.
@@ -70,9 +74,6 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - **Moved error-to-SERVFAIL policy from adapter to use-case layer**: `DnsUpstreamStage` and `ZoneForwardingStage` now return SERVFAIL responses directly on failure instead of propagating errors. This removes the business policy decision from `HickoryRequestHandler` (interface adapter) and keeps it in the use-case pipeline where it belongs per Clean Architecture.
-
-### Fixed
-- **Suppress noisy hickory-server query logs at info level**: added `hickory_server=error` to the tracing `EnvFilter`, preventing per-query log lines (e.g. `query:example.com.:AAAA:IN`) from flooding syslog when running at info level.
 
 ## [2.2.0] - 2026-05-18
 
