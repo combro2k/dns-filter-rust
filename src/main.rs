@@ -677,7 +677,8 @@ async fn run_daemon(config_path: String, debug: bool) {
             reload_tx.clone(),
             start_time,
             Arc::clone(&shared_stats),
-        );
+        )
+        .with_repositories(Arc::clone(&repos));
         #[cfg(feature = "mcp")]
         let ops = ops.with_zone_registry(zone_registry);
         Arc::new(ops)

@@ -4,7 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [2.3.0] - 2026-05-19
 
+### Added
+- **CRUD management API**: full create/read/update/delete endpoints for blocklists, allowlists, zones, and zone discovery via both HTTP API and MCP.
+  - **HTTP API endpoints** (all under `/api/v1/`, authenticated with bearer token):
+    - `GET/POST /api/v1/blocklists`, `PUT/DELETE /api/v1/blocklists/{name}`
+    - `GET/POST /api/v1/allowlists`, `PUT/DELETE /api/v1/allowlists/{name}`
+    - `GET/POST /api/v1/zones`, `PUT/DELETE /api/v1/zones/{zone}`
+    - `GET/POST /api/v1/zone-discovery`, `PUT/DELETE /api/v1/zone-discovery/{id}`
+  - **MCP tools**: `add_blocklist`, `update_blocklist`, `delete_blocklist`, `list_blocklists`, `add_allowlist`, `update_allowlist`, `delete_allowlist`, `list_allowlists`, `add_zone`, `update_zone`, `delete_zone`, `list_zone_configs`, `add_zone_discovery`, `update_zone_discovery`, `delete_zone_discovery`, `list_zone_discovery`.
+  - All mutations write to the database and automatically trigger a config reload so changes take effect immediately.
+  - Input validation for list names, URLs, list types, zone FQDNs, protocols, and allowed discovery types.
+  - Optional authentication details (token, username, password) supported on zone servers and zone discovery endpoints.
+- **`InvalidInput` error variant**: new `ServerOperationError::InvalidInput` mapped to HTTP 400 Bad Request for validation failures.
+- **Extended repository traits**: added `get_by_zone`, `update_zone`, `delete_zone`, `delete_zone_servers` to `ZoneRepository`; added `get_by_id`, `update`, `delete` to `ZoneDiscoveryRepository`.
+
 ### Changed
+- **`ServerOperations` extended with repository access**: accepts an optional `Arc<Repositories>` via `.with_repositories()` builder method, enabling CRUD operations from any management interface (HTTP API, MCP, control socket).
+- **Repository record types now `Serialize`**: `FilterListRecord`, `ZoneRecord`, `ZoneServerRecord`, `ZoneDiscoveryRecord` derive `Serialize` for direct JSON responses.
+
+### Changed (previous)
 - **Optional blocklists/allowlists config**: `blocklists` and `allowlists` fields are now optional in the YAML config, defaulting to empty arrays when omitted.
 
 ### Added

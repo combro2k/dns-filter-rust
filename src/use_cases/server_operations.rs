@@ -3,13 +3,18 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use crate::entities::filter::FilterDecision;
 use crate::entities::query_log::{QueryLog, QueryLogEntry};
+use crate::use_cases::config_from_db::Repositories;
 use crate::use_cases::filtering::{DomainFilter, ListInfo};
+use crate::use_cases::repository_types::{
+    FilterListRecord, ZoneDiscoveryRecord, ZoneRecord, ZoneServerRecord,
+};
 use crate::use_cases::zone_registry::{ZoneInfo, ZoneRegistry, ZoneSearchResult};
 
 /// Atomic query counters shared across the application.
@@ -44,6 +49,8 @@ pub enum ServerOperationError {
     NotFound(String),
     #[error("unavailable: {0}")]
     Unavailable(String),
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
     #[error("internal error: {0}")]
     Internal(String),
     #[error("reload channel closed; reload handler not running")]
@@ -59,6 +66,7 @@ pub struct ServerOperations {
     pub(crate) start_time: u64,
     pub(crate) stats: Arc<QueryStats>,
     pub(crate) zone_registry: Option<Arc<ZoneRegistry>>,
+    pub(crate) repos: Option<Arc<Repositories>>,
 }
 
 const DEFAULT_SEARCH_LIMIT: usize = 50;
@@ -81,11 +89,17 @@ impl ServerOperations {
             start_time,
             stats,
             zone_registry: None,
+            repos: None,
         }
     }
 
     pub fn with_zone_registry(mut self, registry: Arc<ZoneRegistry>) -> Self {
         self.zone_registry = Some(registry);
+        self
+    }
+
+    pub fn with_repositories(mut self, repos: Arc<Repositories>) -> Self {
+        self.repos = Some(repos);
         self
     }
 
@@ -274,9 +288,665 @@ impl ServerOperations {
             limit,
         })
     }
+
+    // --- CRUD helpers ---
+
+    fn repos(&self) -> Result<&Repositories, ServerOperationError> {
+        self.repos
+            .as_deref()
+            .ok_or_else(|| ServerOperationError::Unavailable("database not configured".into()))
+    }
+
+    async fn reload_after_mutation(&self) {
+        if let Err(e) = self.trigger_reload().await {
+            tracing::warn!(error = %e, "failed to trigger reload after mutation");
+        }
+    }
+
+    // --- Filter list CRUD ---
+
+    pub async fn list_filter_lists(
+        &self,
+        kind: &str,
+    ) -> Result<Vec<FilterListRecord>, ServerOperationError> {
+        let repos = self.repos()?;
+        let all = repos
+            .filter_lists
+            .get_all()
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+        Ok(all.into_iter().filter(|r| r.kind == kind).collect())
+    }
+
+    pub async fn add_filter_list(
+        &self,
+        kind: &str,
+        input: CreateFilterListInput,
+    ) -> Result<FilterListRecord, ServerOperationError> {
+        validate_list_name(&input.name)?;
+        validate_url(&input.url)?;
+        let list_type = input.list_type.unwrap_or_else(|| "adguard".to_string());
+        validate_list_type(&list_type)?;
+        let interval = parse_interval_secs(input.interval.as_deref());
+
+        let repos = self.repos()?;
+
+        // Check name uniqueness
+        if repos
+            .filter_lists
+            .get_by_name(&input.name)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .is_some()
+        {
+            return Err(ServerOperationError::InvalidInput(format!(
+                "a filter list named '{}' already exists",
+                input.name
+            )));
+        }
+
+        let record = FilterListRecord {
+            id: Uuid::new_v4().to_string(),
+            name: input.name,
+            kind: kind.to_string(),
+            url: input.url,
+            interval_seconds: interval,
+            enabled: input.enabled.unwrap_or(true),
+            list_type,
+        };
+
+        repos
+            .filter_lists
+            .create(&record)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+
+        self.reload_after_mutation().await;
+        Ok(record)
+    }
+
+    pub async fn update_filter_list(
+        &self,
+        name: &str,
+        input: UpdateFilterListInput,
+    ) -> Result<FilterListRecord, ServerOperationError> {
+        let repos = self.repos()?;
+        let mut record = repos
+            .filter_lists
+            .get_by_name(name)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .ok_or_else(|| {
+                ServerOperationError::NotFound(format!("filter list '{name}' not found"))
+            })?;
+
+        if let Some(url) = input.url {
+            validate_url(&url)?;
+            record.url = url;
+        }
+        if let Some(interval) = input.interval {
+            record.interval_seconds = parse_interval_secs(Some(&interval));
+        }
+        if let Some(enabled) = input.enabled {
+            record.enabled = enabled;
+        }
+        if let Some(list_type) = input.list_type {
+            validate_list_type(&list_type)?;
+            record.list_type = list_type;
+        }
+
+        repos
+            .filter_lists
+            .update(&record)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+
+        self.reload_after_mutation().await;
+        Ok(record)
+    }
+
+    pub async fn delete_filter_list(
+        &self,
+        name: &str,
+    ) -> Result<DeleteResult, ServerOperationError> {
+        let repos = self.repos()?;
+        let record = repos
+            .filter_lists
+            .get_by_name(name)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .ok_or_else(|| {
+                ServerOperationError::NotFound(format!("filter list '{name}' not found"))
+            })?;
+
+        repos
+            .filter_lists
+            .delete(&record.id)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+
+        self.reload_after_mutation().await;
+        Ok(DeleteResult {
+            deleted: name.to_string(),
+        })
+    }
+
+    // --- Zone CRUD ---
+
+    pub async fn list_zone_configs(&self) -> Result<Vec<ZoneRecord>, ServerOperationError> {
+        let repos = self.repos()?;
+        repos
+            .zones
+            .get_all_with_servers()
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))
+    }
+
+    pub async fn add_zone(
+        &self,
+        input: CreateZoneInput,
+    ) -> Result<ZoneRecord, ServerOperationError> {
+        validate_zone_name(&input.zone)?;
+
+        let repos = self.repos()?;
+
+        // Check zone uniqueness
+        if repos
+            .zones
+            .get_by_zone(&input.zone)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .is_some()
+        {
+            return Err(ServerOperationError::InvalidInput(format!(
+                "zone '{}' already exists",
+                input.zone
+            )));
+        }
+
+        let zone_id = Uuid::new_v4().to_string();
+        let zone_record = ZoneRecord {
+            id: zone_id.clone(),
+            zone: input.zone,
+            enabled: input.enabled.unwrap_or(true),
+            bypass_filter: input.bypass_filter.unwrap_or(false),
+            fallback_to_default_resolvers: input.fallback_to_default_resolvers.unwrap_or(false),
+            strategy: input.strategy,
+            servers: Vec::new(),
+        };
+
+        repos
+            .zones
+            .create_zone(&zone_record)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+
+        let mut server_records = Vec::new();
+        for (i, server) in input.servers.unwrap_or_default().into_iter().enumerate() {
+            validate_protocol(&server.protocol)?;
+            let auth = server.authentication.as_ref();
+            let rec = ZoneServerRecord {
+                id: Uuid::new_v4().to_string(),
+                zone_id: zone_id.clone(),
+                enabled: server.enabled.unwrap_or(true),
+                protocol: server.protocol,
+                address: server.address,
+                auth_token: auth.and_then(|a| a.token.clone()),
+                auth_username: auth.and_then(|a| a.username.clone()),
+                auth_password: auth.and_then(|a| a.password.clone()),
+                check_interval: server.check_interval,
+                max_hops: server.max_hops.map(|v| v as i32),
+                nameserver_ip_family: server.nameserver_ip_family,
+                root_hints_path: server.root_hints_path,
+                root_key_path: server.root_key_path,
+                dnssec: server.dnssec.unwrap_or(true),
+                sort_order: i as i32,
+            };
+            repos
+                .zones
+                .create_zone_server(&rec)
+                .await
+                .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+            server_records.push(rec);
+        }
+
+        self.reload_after_mutation().await;
+        Ok(ZoneRecord {
+            servers: server_records,
+            ..zone_record
+        })
+    }
+
+    pub async fn update_zone(
+        &self,
+        zone_name: &str,
+        input: UpdateZoneInput,
+    ) -> Result<ZoneRecord, ServerOperationError> {
+        let repos = self.repos()?;
+        let mut record = repos
+            .zones
+            .get_by_zone(zone_name)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .ok_or_else(|| {
+                ServerOperationError::NotFound(format!("zone '{zone_name}' not found"))
+            })?;
+
+        if let Some(enabled) = input.enabled {
+            record.enabled = enabled;
+        }
+        if let Some(bypass_filter) = input.bypass_filter {
+            record.bypass_filter = bypass_filter;
+        }
+        if let Some(fallback) = input.fallback_to_default_resolvers {
+            record.fallback_to_default_resolvers = fallback;
+        }
+        if let Some(strategy) = input.strategy {
+            record.strategy = Some(strategy);
+        }
+
+        repos
+            .zones
+            .update_zone(&record)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+
+        // Replace servers if provided
+        if let Some(servers) = input.servers {
+            repos
+                .zones
+                .delete_zone_servers(&record.id)
+                .await
+                .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+
+            let mut server_records = Vec::new();
+            for (i, server) in servers.into_iter().enumerate() {
+                validate_protocol(&server.protocol)?;
+                let auth = server.authentication.as_ref();
+                let rec = ZoneServerRecord {
+                    id: Uuid::new_v4().to_string(),
+                    zone_id: record.id.clone(),
+                    enabled: server.enabled.unwrap_or(true),
+                    protocol: server.protocol,
+                    address: server.address,
+                    auth_token: auth.and_then(|a| a.token.clone()),
+                    auth_username: auth.and_then(|a| a.username.clone()),
+                    auth_password: auth.and_then(|a| a.password.clone()),
+                    check_interval: server.check_interval,
+                    max_hops: server.max_hops.map(|v| v as i32),
+                    nameserver_ip_family: server.nameserver_ip_family,
+                    root_hints_path: server.root_hints_path,
+                    root_key_path: server.root_key_path,
+                    dnssec: server.dnssec.unwrap_or(true),
+                    sort_order: i as i32,
+                };
+                repos
+                    .zones
+                    .create_zone_server(&rec)
+                    .await
+                    .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+                server_records.push(rec);
+            }
+            record.servers = server_records;
+        }
+
+        self.reload_after_mutation().await;
+        Ok(record)
+    }
+
+    pub async fn delete_zone(&self, zone_name: &str) -> Result<DeleteResult, ServerOperationError> {
+        let repos = self.repos()?;
+        let record = repos
+            .zones
+            .get_by_zone(zone_name)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .ok_or_else(|| {
+                ServerOperationError::NotFound(format!("zone '{zone_name}' not found"))
+            })?;
+
+        repos
+            .zones
+            .delete_zone(&record.id)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+
+        self.reload_after_mutation().await;
+        Ok(DeleteResult {
+            deleted: zone_name.to_string(),
+        })
+    }
+
+    // --- Zone discovery CRUD ---
+
+    pub async fn list_zone_discovery(
+        &self,
+    ) -> Result<Vec<ZoneDiscoveryRecord>, ServerOperationError> {
+        let repos = self.repos()?;
+        repos
+            .zone_discovery
+            .get_all()
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))
+    }
+
+    pub async fn add_zone_discovery(
+        &self,
+        input: CreateZoneDiscoveryInput,
+    ) -> Result<ZoneDiscoveryRecord, ServerOperationError> {
+        validate_url(&input.address)?;
+        if let Some(ref types) = input.allowed_types {
+            for t in types {
+                validate_allowed_type(t)?;
+            }
+        }
+
+        let allowed_types = input
+            .allowed_types
+            .unwrap_or_else(|| vec!["forward".into(), "reverse".into()]);
+        let allowed_types_json = serde_json::to_string(&allowed_types)
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+
+        let auth = input.authentication.as_ref();
+        let record = ZoneDiscoveryRecord {
+            id: Uuid::new_v4().to_string(),
+            enabled: input.enabled.unwrap_or(true),
+            address: input.address,
+            check_interval: input.check_interval,
+            allowed_types: allowed_types_json,
+            bypass_filter: input.bypass_filter.unwrap_or(false),
+            fallback_to_default_resolvers: input.fallback_to_default_resolvers.unwrap_or(false),
+            auth_token: auth.and_then(|a| a.token.clone()),
+            auth_username: auth.and_then(|a| a.username.clone()),
+            auth_password: auth.and_then(|a| a.password.clone()),
+        };
+
+        let repos = self.repos()?;
+        repos
+            .zone_discovery
+            .create(&record)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+
+        self.reload_after_mutation().await;
+        Ok(record)
+    }
+
+    pub async fn update_zone_discovery(
+        &self,
+        id: &str,
+        input: UpdateZoneDiscoveryInput,
+    ) -> Result<ZoneDiscoveryRecord, ServerOperationError> {
+        let repos = self.repos()?;
+        let mut record = repos
+            .zone_discovery
+            .get_by_id(id)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .ok_or_else(|| {
+                ServerOperationError::NotFound(format!("zone discovery '{id}' not found"))
+            })?;
+
+        if let Some(address) = input.address {
+            validate_url(&address)?;
+            record.address = address;
+        }
+        if let Some(enabled) = input.enabled {
+            record.enabled = enabled;
+        }
+        if let Some(check_interval) = input.check_interval {
+            record.check_interval = Some(check_interval);
+        }
+        if let Some(ref types) = input.allowed_types {
+            for t in types {
+                validate_allowed_type(t)?;
+            }
+            record.allowed_types = serde_json::to_string(types)
+                .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+        }
+        if let Some(bypass_filter) = input.bypass_filter {
+            record.bypass_filter = bypass_filter;
+        }
+        if let Some(fallback) = input.fallback_to_default_resolvers {
+            record.fallback_to_default_resolvers = fallback;
+        }
+        if let Some(ref auth) = input.authentication {
+            record.auth_token = auth.token.clone();
+            record.auth_username = auth.username.clone();
+            record.auth_password = auth.password.clone();
+        }
+
+        repos
+            .zone_discovery
+            .update(&record)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+
+        self.reload_after_mutation().await;
+        Ok(record)
+    }
+
+    pub async fn delete_zone_discovery(
+        &self,
+        id: &str,
+    ) -> Result<DeleteResult, ServerOperationError> {
+        let repos = self.repos()?;
+
+        // Verify it exists
+        repos
+            .zone_discovery
+            .get_by_id(id)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?
+            .ok_or_else(|| {
+                ServerOperationError::NotFound(format!("zone discovery '{id}' not found"))
+            })?;
+
+        repos
+            .zone_discovery
+            .delete(id)
+            .await
+            .map_err(|e| ServerOperationError::Internal(e.to_string()))?;
+
+        self.reload_after_mutation().await;
+        Ok(DeleteResult {
+            deleted: id.to_string(),
+        })
+    }
+}
+
+// --- Input types ---
+
+#[derive(Debug, Deserialize)]
+pub struct CreateFilterListInput {
+    pub name: String,
+    pub url: String,
+    pub interval: Option<String>,
+    pub enabled: Option<bool>,
+    pub list_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateFilterListInput {
+    pub url: Option<String>,
+    pub interval: Option<String>,
+    pub enabled: Option<bool>,
+    pub list_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateZoneInput {
+    pub zone: String,
+    pub enabled: Option<bool>,
+    pub bypass_filter: Option<bool>,
+    pub fallback_to_default_resolvers: Option<bool>,
+    pub strategy: Option<String>,
+    pub servers: Option<Vec<CreateZoneServerInput>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateZoneInput {
+    pub enabled: Option<bool>,
+    pub bypass_filter: Option<bool>,
+    pub fallback_to_default_resolvers: Option<bool>,
+    pub strategy: Option<String>,
+    pub servers: Option<Vec<CreateZoneServerInput>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateZoneServerInput {
+    pub enabled: Option<bool>,
+    pub protocol: String,
+    pub address: String,
+    pub authentication: Option<AuthenticationInput>,
+    pub check_interval: Option<String>,
+    pub max_hops: Option<u8>,
+    pub nameserver_ip_family: Option<String>,
+    pub root_hints_path: Option<String>,
+    pub root_key_path: Option<String>,
+    pub dnssec: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateZoneDiscoveryInput {
+    pub enabled: Option<bool>,
+    pub address: String,
+    pub check_interval: Option<String>,
+    pub allowed_types: Option<Vec<String>>,
+    pub bypass_filter: Option<bool>,
+    pub fallback_to_default_resolvers: Option<bool>,
+    pub authentication: Option<AuthenticationInput>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateZoneDiscoveryInput {
+    pub enabled: Option<bool>,
+    pub address: Option<String>,
+    pub check_interval: Option<String>,
+    pub allowed_types: Option<Vec<String>>,
+    pub bypass_filter: Option<bool>,
+    pub fallback_to_default_resolvers: Option<bool>,
+    pub authentication: Option<AuthenticationInput>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthenticationInput {
+    pub token: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+// --- Validation helpers ---
+
+const DEFAULT_INTERVAL_SECS: i64 = 12 * 60 * 60;
+
+fn validate_list_name(name: &str) -> Result<(), ServerOperationError> {
+    if name.is_empty() {
+        return Err(ServerOperationError::InvalidInput(
+            "name must not be empty".into(),
+        ));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(ServerOperationError::InvalidInput(
+            "name must contain only ASCII alphanumeric characters, hyphens, and underscores".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_url(url: &str) -> Result<(), ServerOperationError> {
+    if url.is_empty() {
+        return Err(ServerOperationError::InvalidInput(
+            "url must not be empty".into(),
+        ));
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") && !url.starts_with("file://") {
+        return Err(ServerOperationError::InvalidInput(
+            "url must start with http://, https://, or file://".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_list_type(list_type: &str) -> Result<(), ServerOperationError> {
+    match list_type {
+        "adguard" | "hosts" | "rpz" | "domains" | "wildcard" => Ok(()),
+        _ => Err(ServerOperationError::InvalidInput(format!(
+            "invalid list_type '{list_type}'; must be one of: adguard, hosts, rpz, domains, wildcard"
+        ))),
+    }
+}
+
+fn validate_zone_name(zone: &str) -> Result<(), ServerOperationError> {
+    if zone.is_empty() {
+        return Err(ServerOperationError::InvalidInput(
+            "zone name must not be empty".into(),
+        ));
+    }
+    if !zone
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        return Err(ServerOperationError::InvalidInput(
+            "zone name must contain only ASCII alphanumeric characters, dots, and hyphens".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_protocol(protocol: &str) -> Result<(), ServerOperationError> {
+    match protocol {
+        "dns" | "dot" | "doh" | "recursive" | "json" => Ok(()),
+        _ => Err(ServerOperationError::InvalidInput(format!(
+            "invalid protocol '{protocol}'; must be one of: dns, dot, doh, recursive, json"
+        ))),
+    }
+}
+
+fn validate_allowed_type(allowed_type: &str) -> Result<(), ServerOperationError> {
+    match allowed_type {
+        "forward" | "reverse" | "reverse-aggregate" => Ok(()),
+        _ => Err(ServerOperationError::InvalidInput(format!(
+            "invalid allowed_type '{allowed_type}'; must be one of: forward, reverse, reverse-aggregate"
+        ))),
+    }
+}
+
+fn parse_interval_secs(interval: Option<&str>) -> i64 {
+    let Some(s) = interval else {
+        return DEFAULT_INTERVAL_SECS;
+    };
+    let s = s.trim();
+    if s.is_empty() {
+        return DEFAULT_INTERVAL_SECS;
+    }
+    if let Some(hours) = s.strip_suffix('h') {
+        if let Ok(h) = hours.parse::<i64>() {
+            return h * 3600;
+        }
+    }
+    if let Some(mins) = s.strip_suffix('m') {
+        if let Ok(m) = mins.parse::<i64>() {
+            return m * 60;
+        }
+    }
+    if let Some(secs) = s.strip_suffix('s') {
+        if let Ok(sec) = secs.parse::<i64>() {
+            return sec;
+        }
+    }
+    s.parse::<i64>().unwrap_or(DEFAULT_INTERVAL_SECS)
 }
 
 // --- Result types ---
+
+#[derive(Debug, Serialize)]
+pub struct DeleteResult {
+    pub deleted: String,
+}
 
 #[derive(Debug, Serialize)]
 pub struct DnsLookupResult {

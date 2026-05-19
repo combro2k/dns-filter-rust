@@ -5,12 +5,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{middleware, Json, Router};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::use_cases::server_operations::{ServerOperationError, ServerOperations};
+use crate::use_cases::server_operations::{
+    CreateFilterListInput, CreateZoneDiscoveryInput, CreateZoneInput, ServerOperationError,
+    ServerOperations, UpdateFilterListInput, UpdateZoneDiscoveryInput, UpdateZoneInput,
+};
 
 use super::auth::bearer_auth_middleware;
 use super::bind_tcp;
@@ -78,6 +81,32 @@ pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> anyhow:
         .route("/api/v1/lists/{name}/enable", post(handle_enable_list))
         .route("/api/v1/stats", get(handle_stats))
         .route("/api/v1/query-log", get(handle_query_log))
+        // Blocklist CRUD
+        .route("/api/v1/blocklists", get(handle_list_blocklists))
+        .route("/api/v1/blocklists", post(handle_add_blocklist))
+        .route("/api/v1/blocklists/{name}", put(handle_update_blocklist))
+        .route("/api/v1/blocklists/{name}", delete(handle_delete_blocklist))
+        // Allowlist CRUD
+        .route("/api/v1/allowlists", get(handle_list_allowlists))
+        .route("/api/v1/allowlists", post(handle_add_allowlist))
+        .route("/api/v1/allowlists/{name}", put(handle_update_allowlist))
+        .route("/api/v1/allowlists/{name}", delete(handle_delete_allowlist))
+        // Zone CRUD
+        .route("/api/v1/zones", get(handle_list_zone_configs))
+        .route("/api/v1/zones", post(handle_add_zone))
+        .route("/api/v1/zones/{zone}", put(handle_update_zone))
+        .route("/api/v1/zones/{zone}", delete(handle_delete_zone))
+        // Zone discovery CRUD
+        .route("/api/v1/zone-discovery", get(handle_list_zone_discovery))
+        .route("/api/v1/zone-discovery", post(handle_add_zone_discovery))
+        .route(
+            "/api/v1/zone-discovery/{id}",
+            put(handle_update_zone_discovery),
+        )
+        .route(
+            "/api/v1/zone-discovery/{id}",
+            delete(handle_delete_zone_discovery),
+        )
         .layer(middleware::from_fn(move |req, next| {
             let token = Arc::clone(&token);
             bearer_auth_middleware(req, next, token)
@@ -222,10 +251,243 @@ async fn handle_query_log(State(state): State<Arc<ApiState>>) -> Response {
     }
 }
 
+// --- Blocklist CRUD handlers ---
+
+async fn handle_list_blocklists(State(state): State<Arc<ApiState>>) -> Response {
+    match state.ops.list_filter_lists("block").await {
+        Ok(lists) => json_ok(lists),
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+async fn handle_add_blocklist(
+    State(state): State<Arc<ApiState>>,
+    Json(input): Json<CreateFilterListInput>,
+) -> Response {
+    match state.ops.add_filter_list("block", input).await {
+        Ok(record) => {
+            tracing::info!(source = "api", name = %record.name, "blocklist added via API");
+            (
+                StatusCode::CREATED,
+                Json(ApiResponse {
+                    success: true,
+                    data: Some(record),
+                    error: None,
+                    timestamp: now_unix(),
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+async fn handle_update_blocklist(
+    State(state): State<Arc<ApiState>>,
+    Path(name): Path<String>,
+    Json(input): Json<UpdateFilterListInput>,
+) -> Response {
+    match state.ops.update_filter_list(&name, input).await {
+        Ok(record) => {
+            tracing::info!(source = "api", name = %record.name, "blocklist updated via API");
+            json_ok(record)
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+async fn handle_delete_blocklist(
+    State(state): State<Arc<ApiState>>,
+    Path(name): Path<String>,
+) -> Response {
+    match state.ops.delete_filter_list(&name).await {
+        Ok(result) => {
+            tracing::info!(source = "api", name = %name, "blocklist deleted via API");
+            json_ok(result)
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+// --- Allowlist CRUD handlers ---
+
+async fn handle_list_allowlists(State(state): State<Arc<ApiState>>) -> Response {
+    match state.ops.list_filter_lists("allow").await {
+        Ok(lists) => json_ok(lists),
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+async fn handle_add_allowlist(
+    State(state): State<Arc<ApiState>>,
+    Json(input): Json<CreateFilterListInput>,
+) -> Response {
+    match state.ops.add_filter_list("allow", input).await {
+        Ok(record) => {
+            tracing::info!(source = "api", name = %record.name, "allowlist added via API");
+            (
+                StatusCode::CREATED,
+                Json(ApiResponse {
+                    success: true,
+                    data: Some(record),
+                    error: None,
+                    timestamp: now_unix(),
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+async fn handle_update_allowlist(
+    State(state): State<Arc<ApiState>>,
+    Path(name): Path<String>,
+    Json(input): Json<UpdateFilterListInput>,
+) -> Response {
+    match state.ops.update_filter_list(&name, input).await {
+        Ok(record) => {
+            tracing::info!(source = "api", name = %record.name, "allowlist updated via API");
+            json_ok(record)
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+async fn handle_delete_allowlist(
+    State(state): State<Arc<ApiState>>,
+    Path(name): Path<String>,
+) -> Response {
+    match state.ops.delete_filter_list(&name).await {
+        Ok(result) => {
+            tracing::info!(source = "api", name = %name, "allowlist deleted via API");
+            json_ok(result)
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+// --- Zone CRUD handlers ---
+
+async fn handle_list_zone_configs(State(state): State<Arc<ApiState>>) -> Response {
+    match state.ops.list_zone_configs().await {
+        Ok(zones) => json_ok(zones),
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+async fn handle_add_zone(
+    State(state): State<Arc<ApiState>>,
+    Json(input): Json<CreateZoneInput>,
+) -> Response {
+    match state.ops.add_zone(input).await {
+        Ok(record) => {
+            tracing::info!(source = "api", zone = %record.zone, "zone added via API");
+            (
+                StatusCode::CREATED,
+                Json(ApiResponse {
+                    success: true,
+                    data: Some(record),
+                    error: None,
+                    timestamp: now_unix(),
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+async fn handle_update_zone(
+    State(state): State<Arc<ApiState>>,
+    Path(zone): Path<String>,
+    Json(input): Json<UpdateZoneInput>,
+) -> Response {
+    match state.ops.update_zone(&zone, input).await {
+        Ok(record) => {
+            tracing::info!(source = "api", zone = %record.zone, "zone updated via API");
+            json_ok(record)
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+async fn handle_delete_zone(
+    State(state): State<Arc<ApiState>>,
+    Path(zone): Path<String>,
+) -> Response {
+    match state.ops.delete_zone(&zone).await {
+        Ok(result) => {
+            tracing::info!(source = "api", zone = %zone, "zone deleted via API");
+            json_ok(result)
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+// --- Zone discovery CRUD handlers ---
+
+async fn handle_list_zone_discovery(State(state): State<Arc<ApiState>>) -> Response {
+    match state.ops.list_zone_discovery().await {
+        Ok(entries) => json_ok(entries),
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+async fn handle_add_zone_discovery(
+    State(state): State<Arc<ApiState>>,
+    Json(input): Json<CreateZoneDiscoveryInput>,
+) -> Response {
+    match state.ops.add_zone_discovery(input).await {
+        Ok(record) => {
+            tracing::info!(source = "api", id = %record.id, "zone discovery added via API");
+            (
+                StatusCode::CREATED,
+                Json(ApiResponse {
+                    success: true,
+                    data: Some(record),
+                    error: None,
+                    timestamp: now_unix(),
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+async fn handle_update_zone_discovery(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+    Json(input): Json<UpdateZoneDiscoveryInput>,
+) -> Response {
+    match state.ops.update_zone_discovery(&id, input).await {
+        Ok(record) => {
+            tracing::info!(source = "api", id = %record.id, "zone discovery updated via API");
+            json_ok(record)
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+async fn handle_delete_zone_discovery(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+) -> Response {
+    match state.ops.delete_zone_discovery(&id).await {
+        Ok(result) => {
+            tracing::info!(source = "api", id = %id, "zone discovery deleted via API");
+            json_ok(result)
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
 fn op_error_to_response(e: ServerOperationError) -> Response {
     let status = match &e {
         ServerOperationError::NotFound(_) => StatusCode::NOT_FOUND,
         ServerOperationError::Unavailable(_) => StatusCode::NOT_FOUND,
+        ServerOperationError::InvalidInput(_) => StatusCode::BAD_REQUEST,
         ServerOperationError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         ServerOperationError::ChannelClosed => StatusCode::INTERNAL_SERVER_ERROR,
     };

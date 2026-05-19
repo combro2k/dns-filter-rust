@@ -61,6 +61,44 @@ impl ZoneRepository for SqlxZoneRepository {
         Ok(zones)
     }
 
+    async fn get_by_zone(&self, zone: &str) -> Result<Option<ZoneRecord>> {
+        let zone_row = sqlx::query_as::<_, ZoneRow>(
+            "SELECT id, zone, enabled, bypass_filter, fallback_to_default_resolvers, strategy \
+             FROM zones WHERE zone = ?",
+        )
+        .bind(zone)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to fetch zone by name")?;
+
+        let Some(row) = zone_row else {
+            return Ok(None);
+        };
+
+        let server_rows = sqlx::query_as::<_, ZoneServerRow>(
+            "SELECT id, zone_id, enabled, protocol, address, auth_token, auth_username, auth_password, \
+             check_interval, max_hops, nameserver_ip_family, root_hints_path, root_key_path, dnssec, sort_order \
+             FROM zone_servers WHERE zone_id = ? ORDER BY sort_order, id",
+        )
+        .bind(&row.id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to fetch zone servers")?;
+
+        Ok(Some(ZoneRecord {
+            id: row.id,
+            zone: row.zone,
+            enabled: row.enabled,
+            bypass_filter: row.bypass_filter,
+            fallback_to_default_resolvers: row.fallback_to_default_resolvers,
+            strategy: row.strategy,
+            servers: server_rows
+                .into_iter()
+                .map(ZoneServerRecord::from)
+                .collect(),
+        }))
+    }
+
     async fn create_zone(&self, record: &ZoneRecord) -> Result<()> {
         sqlx::query(
             "INSERT INTO zones (id, zone, enabled, bypass_filter, fallback_to_default_resolvers, strategy) \
@@ -108,6 +146,45 @@ impl ZoneRepository for SqlxZoneRepository {
         Ok(())
     }
 
+    async fn update_zone(&self, record: &ZoneRecord) -> Result<()> {
+        sqlx::query(
+            "UPDATE zones SET zone = ?, enabled = ?, bypass_filter = ?, \
+             fallback_to_default_resolvers = ?, strategy = ? WHERE id = ?",
+        )
+        .bind(&record.zone)
+        .bind(record.enabled)
+        .bind(record.bypass_filter)
+        .bind(record.fallback_to_default_resolvers)
+        .bind(&record.strategy)
+        .bind(&record.id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("failed to update zone '{}'", record.zone))?;
+
+        Ok(())
+    }
+
+    async fn delete_zone(&self, id: &str) -> Result<()> {
+        // zone_servers cascade-deletes via FK
+        sqlx::query("DELETE FROM zones WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("failed to delete zone '{id}'"))?;
+
+        Ok(())
+    }
+
+    async fn delete_zone_servers(&self, zone_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM zone_servers WHERE zone_id = ?")
+            .bind(zone_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("failed to delete zone servers for zone '{zone_id}'"))?;
+
+        Ok(())
+    }
+
     async fn delete_all_zones(&self) -> Result<()> {
         // zone_servers cascade-deletes via FK
         sqlx::query("DELETE FROM zones")
@@ -148,6 +225,20 @@ impl ZoneDiscoveryRepository for SqlxZoneDiscoveryRepository {
         Ok(rows.into_iter().map(ZoneDiscoveryRecord::from).collect())
     }
 
+    async fn get_by_id(&self, id: &str) -> Result<Option<ZoneDiscoveryRecord>> {
+        let row = sqlx::query_as::<_, ZoneDiscoveryRow>(
+            "SELECT id, enabled, address, check_interval, allowed_types, bypass_filter, \
+             fallback_to_default_resolvers, auth_token, auth_username, auth_password \
+             FROM zone_discovery WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("failed to fetch zone discovery by id")?;
+
+        Ok(row.map(ZoneDiscoveryRecord::from))
+    }
+
     async fn create(&self, record: &ZoneDiscoveryRecord) -> Result<()> {
         sqlx::query(
             "INSERT INTO zone_discovery \
@@ -168,6 +259,39 @@ impl ZoneDiscoveryRepository for SqlxZoneDiscoveryRepository {
         .execute(&self.pool)
         .await
         .with_context(|| format!("failed to insert zone discovery '{}'", record.id))?;
+
+        Ok(())
+    }
+
+    async fn update(&self, record: &ZoneDiscoveryRecord) -> Result<()> {
+        sqlx::query(
+            "UPDATE zone_discovery SET enabled = ?, address = ?, check_interval = ?, \
+             allowed_types = ?, bypass_filter = ?, fallback_to_default_resolvers = ?, \
+             auth_token = ?, auth_username = ?, auth_password = ? WHERE id = ?",
+        )
+        .bind(record.enabled)
+        .bind(&record.address)
+        .bind(&record.check_interval)
+        .bind(&record.allowed_types)
+        .bind(record.bypass_filter)
+        .bind(record.fallback_to_default_resolvers)
+        .bind(&record.auth_token)
+        .bind(&record.auth_username)
+        .bind(&record.auth_password)
+        .bind(&record.id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("failed to update zone discovery '{}'", record.id))?;
+
+        Ok(())
+    }
+
+    async fn delete(&self, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM zone_discovery WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("failed to delete zone discovery '{id}'"))?;
 
         Ok(())
     }

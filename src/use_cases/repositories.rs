@@ -66,8 +66,12 @@ pub trait UpstreamConfigRepository: Send + Sync {
 #[async_trait]
 pub trait ZoneRepository: Send + Sync {
     async fn get_all_with_servers(&self) -> Result<Vec<ZoneRecord>>;
+    async fn get_by_zone(&self, zone: &str) -> Result<Option<ZoneRecord>>;
     async fn create_zone(&self, record: &ZoneRecord) -> Result<()>;
+    async fn update_zone(&self, record: &ZoneRecord) -> Result<()>;
     async fn create_zone_server(&self, record: &ZoneServerRecord) -> Result<()>;
+    async fn delete_zone(&self, id: &str) -> Result<()>;
+    async fn delete_zone_servers(&self, zone_id: &str) -> Result<()>;
     async fn delete_all_zones(&self) -> Result<()>;
 }
 
@@ -78,6 +82,9 @@ pub trait ZoneRepository: Send + Sync {
 #[async_trait]
 pub trait ZoneDiscoveryRepository: Send + Sync {
     async fn get_all(&self) -> Result<Vec<ZoneDiscoveryRecord>>;
+    async fn get_by_id(&self, id: &str) -> Result<Option<ZoneDiscoveryRecord>>;
     async fn create(&self, record: &ZoneDiscoveryRecord) -> Result<()>;
+    async fn update(&self, record: &ZoneDiscoveryRecord) -> Result<()>;
+    async fn delete(&self, id: &str) -> Result<()>;
     async fn delete_all(&self) -> Result<()>;
 }

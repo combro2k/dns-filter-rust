@@ -15,7 +15,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::frameworks::config::schema::McpConfig;
 use crate::interface_adapters::listeners::auth::bearer_auth_middleware;
-use crate::use_cases::server_operations::ServerOperations;
+use crate::use_cases::server_operations::{
+    AuthenticationInput, CreateFilterListInput, CreateZoneDiscoveryInput, CreateZoneInput,
+    CreateZoneServerInput, ServerOperations, UpdateFilterListInput, UpdateZoneDiscoveryInput,
+    UpdateZoneInput,
+};
 
 use super::{bind_tcp, parse_bind_addrs};
 
@@ -67,6 +71,158 @@ struct ZoneSearchParams {
     record_type: Option<String>,
     /// Maximum number of results to return (default: 50, max: 500)
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AddFilterListParams {
+    /// A unique name for the filter list (alphanumeric, hyphens, underscores)
+    name: String,
+    /// The URL of the filter list (http://, https://, or file://)
+    url: String,
+    /// Refresh interval (e.g. "12h", "30m", "3600s"). Default: 12h
+    interval: Option<String>,
+    /// Whether the list is enabled. Default: true
+    enabled: Option<bool>,
+    /// List format: adguard, hosts, rpz, domains, or wildcard. Default: adguard
+    list_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UpdateFilterListParams {
+    /// The name of the filter list to update
+    name: String,
+    /// New URL for the list
+    url: Option<String>,
+    /// New refresh interval
+    interval: Option<String>,
+    /// Enable or disable the list
+    enabled: Option<bool>,
+    /// New list format
+    list_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AddZoneParams {
+    /// The zone FQDN (e.g. "home.arpa", "example.com")
+    zone: String,
+    /// Whether the zone is enabled. Default: true
+    enabled: Option<bool>,
+    /// Skip blocklist/allowlist filtering for this zone. Default: false
+    bypass_filter: Option<bool>,
+    /// Fall back to default resolvers on failure. Default: false
+    fallback_to_default_resolvers: Option<bool>,
+    /// Multi-server strategy (e.g. "failover", "round_robin")
+    strategy: Option<String>,
+    /// Servers backing this zone (JSON array of server objects)
+    servers: Option<Vec<McpZoneServerInput>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpZoneServerInput {
+    /// Whether this server is enabled. Default: true
+    enabled: Option<bool>,
+    /// Protocol: dns, dot, doh, recursive, or json
+    protocol: String,
+    /// Server address (protocol-specific)
+    address: String,
+    /// Bearer token for authentication
+    auth_token: Option<String>,
+    /// Username for basic authentication
+    auth_username: Option<String>,
+    /// Password for basic authentication
+    auth_password: Option<String>,
+    /// Refresh interval for json protocol (e.g. "15m")
+    check_interval: Option<String>,
+    /// Max hops for recursive resolver
+    max_hops: Option<u8>,
+    /// IP family for nameserver resolution: ipv4 or ipv6
+    nameserver_ip_family: Option<String>,
+    /// Path to root hints file (recursive resolver)
+    root_hints_path: Option<String>,
+    /// Path to root key file (recursive resolver)
+    root_key_path: Option<String>,
+    /// Enable DNSSEC validation. Default: true
+    dnssec: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UpdateZoneParams {
+    /// The zone FQDN to update
+    zone: String,
+    /// Enable or disable the zone
+    enabled: Option<bool>,
+    /// Skip blocklist/allowlist filtering for this zone
+    bypass_filter: Option<bool>,
+    /// Fall back to default resolvers on failure
+    fallback_to_default_resolvers: Option<bool>,
+    /// Multi-server strategy
+    strategy: Option<String>,
+    /// Replace servers (JSON array of server objects). If provided, replaces all existing servers.
+    servers: Option<Vec<McpZoneServerInput>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DeleteByNameParams {
+    /// The name to delete
+    name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DeleteZoneParams {
+    /// The zone FQDN to delete
+    zone: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AddZoneDiscoveryParams {
+    /// The URL of the zone index endpoint (http:// or https://)
+    address: String,
+    /// Whether this discovery endpoint is enabled. Default: true
+    enabled: Option<bool>,
+    /// How often to re-check the index (e.g. "15m", "1h")
+    check_interval: Option<String>,
+    /// Allowed zone types: forward, reverse, reverse-aggregate. Default: ["forward", "reverse"]
+    allowed_types: Option<Vec<String>>,
+    /// Skip blocklist/allowlist filtering for discovered zones. Default: false
+    bypass_filter: Option<bool>,
+    /// Fall back to default resolvers on failure. Default: false
+    fallback_to_default_resolvers: Option<bool>,
+    /// Bearer token for authentication
+    auth_token: Option<String>,
+    /// Username for basic authentication
+    auth_username: Option<String>,
+    /// Password for basic authentication
+    auth_password: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UpdateZoneDiscoveryParams {
+    /// The ID of the zone discovery entry to update
+    id: String,
+    /// New URL for the zone index endpoint
+    address: Option<String>,
+    /// Enable or disable this discovery endpoint
+    enabled: Option<bool>,
+    /// New check interval
+    check_interval: Option<String>,
+    /// New allowed zone types
+    allowed_types: Option<Vec<String>>,
+    /// Skip blocklist/allowlist filtering for discovered zones
+    bypass_filter: Option<bool>,
+    /// Fall back to default resolvers on failure
+    fallback_to_default_resolvers: Option<bool>,
+    /// Bearer token for authentication
+    auth_token: Option<String>,
+    /// Username for basic authentication
+    auth_username: Option<String>,
+    /// Password for basic authentication
+    auth_password: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DeleteByIdParams {
+    /// The ID of the entry to delete
+    id: String,
 }
 
 // --- Tool implementations ---
@@ -226,6 +382,339 @@ impl McpHandler {
                 .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
             Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
         }
+    }
+
+    // --- Blocklist CRUD tools ---
+
+    #[tool(description = "List all configured blocklists with their database configuration")]
+    async fn list_blocklists(&self) -> String {
+        match self.state.ops.list_filter_lists("block").await {
+            Ok(lists) => serde_json::to_string(&lists)
+                .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Add a new blocklist. Requires a unique name and a URL. After adding, a config reload is triggered automatically."
+    )]
+    async fn add_blocklist(&self, Parameters(params): Parameters<AddFilterListParams>) -> String {
+        let input = CreateFilterListInput {
+            name: params.name,
+            url: params.url,
+            interval: params.interval,
+            enabled: params.enabled,
+            list_type: params.list_type,
+        };
+        match self.state.ops.add_filter_list("block", input).await {
+            Ok(record) => {
+                tracing::info!(source = "mcp", name = %record.name, "blocklist added via MCP");
+                serde_json::to_string(&record)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Update an existing blocklist by name. Only provided fields are changed. Triggers a config reload."
+    )]
+    async fn update_blocklist(
+        &self,
+        Parameters(params): Parameters<UpdateFilterListParams>,
+    ) -> String {
+        let input = UpdateFilterListInput {
+            url: params.url,
+            interval: params.interval,
+            enabled: params.enabled,
+            list_type: params.list_type,
+        };
+        match self.state.ops.update_filter_list(&params.name, input).await {
+            Ok(record) => {
+                tracing::info!(source = "mcp", name = %record.name, "blocklist updated via MCP");
+                serde_json::to_string(&record)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(description = "Delete a blocklist by name. Triggers a config reload.")]
+    async fn delete_blocklist(&self, Parameters(params): Parameters<DeleteByNameParams>) -> String {
+        match self.state.ops.delete_filter_list(&params.name).await {
+            Ok(result) => {
+                tracing::info!(source = "mcp", name = %params.name, "blocklist deleted via MCP");
+                serde_json::to_string(&result)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    // --- Allowlist CRUD tools ---
+
+    #[tool(description = "List all configured allowlists with their database configuration")]
+    async fn list_allowlists(&self) -> String {
+        match self.state.ops.list_filter_lists("allow").await {
+            Ok(lists) => serde_json::to_string(&lists)
+                .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Add a new allowlist. Requires a unique name and a URL. After adding, a config reload is triggered automatically."
+    )]
+    async fn add_allowlist(&self, Parameters(params): Parameters<AddFilterListParams>) -> String {
+        let input = CreateFilterListInput {
+            name: params.name,
+            url: params.url,
+            interval: params.interval,
+            enabled: params.enabled,
+            list_type: params.list_type,
+        };
+        match self.state.ops.add_filter_list("allow", input).await {
+            Ok(record) => {
+                tracing::info!(source = "mcp", name = %record.name, "allowlist added via MCP");
+                serde_json::to_string(&record)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Update an existing allowlist by name. Only provided fields are changed. Triggers a config reload."
+    )]
+    async fn update_allowlist(
+        &self,
+        Parameters(params): Parameters<UpdateFilterListParams>,
+    ) -> String {
+        let input = UpdateFilterListInput {
+            url: params.url,
+            interval: params.interval,
+            enabled: params.enabled,
+            list_type: params.list_type,
+        };
+        match self.state.ops.update_filter_list(&params.name, input).await {
+            Ok(record) => {
+                tracing::info!(source = "mcp", name = %record.name, "allowlist updated via MCP");
+                serde_json::to_string(&record)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(description = "Delete an allowlist by name. Triggers a config reload.")]
+    async fn delete_allowlist(&self, Parameters(params): Parameters<DeleteByNameParams>) -> String {
+        match self.state.ops.delete_filter_list(&params.name).await {
+            Ok(result) => {
+                tracing::info!(source = "mcp", name = %params.name, "allowlist deleted via MCP");
+                serde_json::to_string(&result)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    // --- Zone CRUD tools ---
+
+    #[tool(
+        description = "List all configured zones from the database with their servers and settings"
+    )]
+    async fn list_zone_configs(&self) -> String {
+        match self.state.ops.list_zone_configs().await {
+            Ok(zones) => serde_json::to_string(&zones)
+                .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(description = "Add a new DNS zone with optional servers. Triggers a config reload.")]
+    async fn add_zone(&self, Parameters(params): Parameters<AddZoneParams>) -> String {
+        let servers = params
+            .servers
+            .map(|svrs| svrs.into_iter().map(mcp_server_to_input).collect());
+        let input = CreateZoneInput {
+            zone: params.zone,
+            enabled: params.enabled,
+            bypass_filter: params.bypass_filter,
+            fallback_to_default_resolvers: params.fallback_to_default_resolvers,
+            strategy: params.strategy,
+            servers,
+        };
+        match self.state.ops.add_zone(input).await {
+            Ok(record) => {
+                tracing::info!(source = "mcp", zone = %record.zone, "zone added via MCP");
+                serde_json::to_string(&record)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Update an existing DNS zone by FQDN. Only provided fields are changed. If servers are provided, they replace all existing servers. Triggers a config reload."
+    )]
+    async fn update_zone(&self, Parameters(params): Parameters<UpdateZoneParams>) -> String {
+        let servers = params
+            .servers
+            .map(|svrs| svrs.into_iter().map(mcp_server_to_input).collect());
+        let input = UpdateZoneInput {
+            enabled: params.enabled,
+            bypass_filter: params.bypass_filter,
+            fallback_to_default_resolvers: params.fallback_to_default_resolvers,
+            strategy: params.strategy,
+            servers,
+        };
+        match self.state.ops.update_zone(&params.zone, input).await {
+            Ok(record) => {
+                tracing::info!(source = "mcp", zone = %record.zone, "zone updated via MCP");
+                serde_json::to_string(&record)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(description = "Delete a DNS zone by FQDN. Triggers a config reload.")]
+    async fn delete_zone(&self, Parameters(params): Parameters<DeleteZoneParams>) -> String {
+        match self.state.ops.delete_zone(&params.zone).await {
+            Ok(result) => {
+                tracing::info!(source = "mcp", zone = %params.zone, "zone deleted via MCP");
+                serde_json::to_string(&result)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    // --- Zone discovery CRUD tools ---
+
+    #[tool(description = "List all configured zone discovery endpoints from the database")]
+    async fn list_zone_discovery(&self) -> String {
+        match self.state.ops.list_zone_discovery().await {
+            Ok(entries) => serde_json::to_string(&entries)
+                .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Add a new zone discovery endpoint. Requires an address (URL). Triggers a config reload."
+    )]
+    async fn add_zone_discovery(
+        &self,
+        Parameters(params): Parameters<AddZoneDiscoveryParams>,
+    ) -> String {
+        let auth = build_mcp_auth(
+            params.auth_token,
+            params.auth_username,
+            params.auth_password,
+        );
+        let input = CreateZoneDiscoveryInput {
+            enabled: params.enabled,
+            address: params.address,
+            check_interval: params.check_interval,
+            allowed_types: params.allowed_types,
+            bypass_filter: params.bypass_filter,
+            fallback_to_default_resolvers: params.fallback_to_default_resolvers,
+            authentication: auth,
+        };
+        match self.state.ops.add_zone_discovery(input).await {
+            Ok(record) => {
+                tracing::info!(source = "mcp", id = %record.id, "zone discovery added via MCP");
+                serde_json::to_string(&record)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Update an existing zone discovery endpoint by ID. Only provided fields are changed. Triggers a config reload."
+    )]
+    async fn update_zone_discovery(
+        &self,
+        Parameters(params): Parameters<UpdateZoneDiscoveryParams>,
+    ) -> String {
+        let auth = build_mcp_auth(
+            params.auth_token,
+            params.auth_username,
+            params.auth_password,
+        );
+        let input = UpdateZoneDiscoveryInput {
+            enabled: params.enabled,
+            address: params.address,
+            check_interval: params.check_interval,
+            allowed_types: params.allowed_types,
+            bypass_filter: params.bypass_filter,
+            fallback_to_default_resolvers: params.fallback_to_default_resolvers,
+            authentication: auth,
+        };
+        match self
+            .state
+            .ops
+            .update_zone_discovery(&params.id, input)
+            .await
+        {
+            Ok(record) => {
+                tracing::info!(source = "mcp", id = %record.id, "zone discovery updated via MCP");
+                serde_json::to_string(&record)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(description = "Delete a zone discovery endpoint by ID. Triggers a config reload.")]
+    async fn delete_zone_discovery(
+        &self,
+        Parameters(params): Parameters<DeleteByIdParams>,
+    ) -> String {
+        match self.state.ops.delete_zone_discovery(&params.id).await {
+            Ok(result) => {
+                tracing::info!(source = "mcp", id = %params.id, "zone discovery deleted via MCP");
+                serde_json::to_string(&result)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+}
+
+/// Convert MCP zone server input to the use-case input type.
+fn mcp_server_to_input(s: McpZoneServerInput) -> CreateZoneServerInput {
+    let auth = build_mcp_auth(s.auth_token, s.auth_username, s.auth_password);
+    CreateZoneServerInput {
+        enabled: s.enabled,
+        protocol: s.protocol,
+        address: s.address,
+        authentication: auth,
+        check_interval: s.check_interval,
+        max_hops: s.max_hops,
+        nameserver_ip_family: s.nameserver_ip_family,
+        root_hints_path: s.root_hints_path,
+        root_key_path: s.root_key_path,
+        dnssec: s.dnssec,
+    }
+}
+
+/// Build an `AuthenticationInput` from flat MCP fields, returning `None` if all empty.
+fn build_mcp_auth(
+    token: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+) -> Option<AuthenticationInput> {
+    if token.is_some() || username.is_some() || password.is_some() {
+        Some(AuthenticationInput {
+            token,
+            username,
+            password,
+        })
+    } else {
+        None
     }
 }
 

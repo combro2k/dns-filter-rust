@@ -3,8 +3,10 @@
 //! These types map 1:1 to database rows and live in the use-case layer so that
 //! the repository traits stay independent of any specific database framework.
 
+use serde::Serialize;
+
 /// A blocklist or allowlist entry stored in the database.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FilterListRecord {
     pub id: String,
     pub name: String,
@@ -57,7 +59,7 @@ pub struct UpstreamServerRecord {
 }
 
 /// A DNS zone forwarding/authority entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ZoneRecord {
     pub id: String,
     pub zone: String,
@@ -69,7 +71,7 @@ pub struct ZoneRecord {
 }
 
 /// A single server backing a zone.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ZoneServerRecord {
     pub id: String,
     pub zone_id: String,
@@ -89,7 +91,7 @@ pub struct ZoneServerRecord {
 }
 
 /// A zone-discovery endpoint entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ZoneDiscoveryRecord {
     pub id: String,
     pub enabled: bool,
