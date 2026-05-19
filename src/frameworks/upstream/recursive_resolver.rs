@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use hickory_net::runtime::TokioRuntimeProvider;
 use hickory_proto::dnssec::TrustAnchors;
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::RecordType;
@@ -12,6 +11,7 @@ use hickory_resolver::recursor::{
 };
 use ipnet::IpNet;
 
+use super::runtime::{OutboundRouting, RoutedRuntimeProvider};
 use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
 
 /// Default maximum number of referral hops before the resolver gives up.
@@ -228,7 +228,7 @@ pub fn load_root_key(root_key_path: Option<&str>) -> Option<Arc<TrustAnchors>> {
 /// for domains with broken or missing DNSSEC signatures will return SERVFAIL.
 #[derive(Clone)]
 pub struct RecursiveResolver {
-    recursor: Arc<Recursor<TokioRuntimeProvider>>,
+    recursor: Arc<Recursor<RoutedRuntimeProvider>>,
 }
 
 impl std::fmt::Debug for RecursiveResolver {
@@ -250,6 +250,24 @@ impl RecursiveResolver {
         nameserver_ip_family: NameserverIpFamily,
         dnssec: bool,
         trust_anchor: Option<Arc<TrustAnchors>>,
+    ) -> Self {
+        Self::with_routing(
+            root_hints,
+            max_hops,
+            nameserver_ip_family,
+            dnssec,
+            trust_anchor,
+            OutboundRouting::new(None, None),
+        )
+    }
+
+    pub fn with_routing(
+        root_hints: Vec<SocketAddr>,
+        max_hops: u8,
+        nameserver_ip_family: NameserverIpFamily,
+        dnssec: bool,
+        trust_anchor: Option<Arc<TrustAnchors>>,
+        routing: OutboundRouting,
     ) -> Self {
         // Filter root hints to match the requested IP family.
         let filtered_ips: Vec<IpAddr> = root_hints
@@ -292,7 +310,7 @@ impl RecursiveResolver {
             dnssec_policy,
             None,
             options,
-            TokioRuntimeProvider::default(),
+            RoutedRuntimeProvider::new(routing),
         )
         .expect("failed to build recursive resolver");
 

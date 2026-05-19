@@ -7,7 +7,6 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use hickory_net::h2::HttpsClientStream;
 use hickory_net::http::SetHeaders as DohSetHeaders;
-use hickory_net::runtime::TokioRuntimeProvider;
 use hickory_net::tls::client_config;
 use hickory_net::xfer::{DnsRequestSender, FirstAnswer};
 use hickory_proto::op::{DnsRequest, DnsRequestOptions, Message, MessageType, OpCode, Query};
@@ -16,6 +15,7 @@ use http::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use tokio::sync::Mutex;
 use url::Url;
 
+use super::runtime::{OutboundRouting, RoutedRuntimeProvider};
 use crate::frameworks::upstream::DnsUdpTcpClient;
 use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
 use crate::use_cases::zone_authority::ZoneSourceAuth;
@@ -77,6 +77,7 @@ pub struct DnsHttpsClient {
     bootstrap_resolvers: Vec<SocketAddr>,
     auth_headers: Option<Arc<DohAuthHeaders>>,
     client_cache: ClientCache,
+    routing: OutboundRouting,
 }
 
 impl DnsHttpsClient {
@@ -97,6 +98,7 @@ impl DnsHttpsClient {
             bootstrap_resolvers: vec![SocketAddr::new(IpAddr::from([1, 1, 1, 1]), 53)],
             auth_headers,
             client_cache: ClientCache::default(),
+            routing: OutboundRouting::new(None, None),
         })
     }
 
@@ -104,6 +106,11 @@ impl DnsHttpsClient {
         if !resolvers.is_empty() {
             self.bootstrap_resolvers = resolvers;
         }
+        self
+    }
+
+    pub fn with_routing(mut self, routing: OutboundRouting) -> Self {
+        self.routing = routing;
         self
     }
 
@@ -177,7 +184,7 @@ impl DnsHttpsClient {
             client_config()
                 .map_err(|e| UpstreamResolveError::Protocol(format!("TLS config error: {e}")))?,
         );
-        let provider = TokioRuntimeProvider::default();
+        let provider = RoutedRuntimeProvider::new(self.routing.clone());
         let mut builder = HttpsClientStream::builder(tls_config, provider);
         if let Some(auth) = &self.auth_headers {
             builder.set_headers(Arc::clone(auth) as Arc<dyn DohSetHeaders>);

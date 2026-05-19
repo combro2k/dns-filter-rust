@@ -56,6 +56,8 @@ pub struct UpstreamServerRecord {
     pub root_key_path: Option<String>,
     pub dnssec: bool,
     pub sort_order: i32,
+    pub bind_address: Option<String>,
+    pub fwmark: Option<i32>,
 }
 
 /// A DNS zone forwarding/authority entry.

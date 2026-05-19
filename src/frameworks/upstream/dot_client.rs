@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use hickory_net::client::{ClientHandle, DnssecClient};
-use hickory_net::runtime::TokioRuntimeProvider;
 use hickory_net::tls::{client_config, tls_client_connect};
 use hickory_net::xfer::DnsMultiplexer;
 use hickory_proto::op::{Message, Query};
 use hickory_proto::rr::{DNSClass, Name, RData, RecordType};
 use tokio::sync::Mutex;
 
+use super::runtime::{OutboundRouting, RoutedRuntimeProvider};
 use crate::frameworks::upstream::DnsUdpTcpClient;
 use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
 
@@ -38,6 +38,7 @@ pub struct DnsTlsClient {
     server_name: String,
     bootstrap_resolvers: Vec<SocketAddr>,
     client_cache: ClientCache,
+    routing: OutboundRouting,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +54,7 @@ impl DnsTlsClient {
             server_name,
             bootstrap_resolvers: vec![SocketAddr::new(IpAddr::from([1, 1, 1, 1]), 53)],
             client_cache: ClientCache::default(),
+            routing: OutboundRouting::new(None, None),
         }
     }
 
@@ -63,6 +65,7 @@ impl DnsTlsClient {
             server_name,
             bootstrap_resolvers: vec![SocketAddr::new(IpAddr::from([1, 1, 1, 1]), 53)],
             client_cache: ClientCache::default(),
+            routing: OutboundRouting::new(None, None),
         }
     }
 
@@ -70,6 +73,11 @@ impl DnsTlsClient {
         if !resolvers.is_empty() {
             self.bootstrap_resolvers = resolvers;
         }
+        self
+    }
+
+    pub fn with_routing(mut self, routing: OutboundRouting) -> Self {
+        self.routing = routing;
         self
     }
 
@@ -199,7 +207,7 @@ impl DnsTlsClient {
 
         // Establish a fresh TLS connection.
         let address = self.resolve_address().await?;
-        let provider = TokioRuntimeProvider::default();
+        let provider = RoutedRuntimeProvider::new(self.routing.clone());
         let tls_config = Arc::new(
             client_config()
                 .map_err(|e| UpstreamResolveError::Protocol(format!("TLS config error: {e}")))?,

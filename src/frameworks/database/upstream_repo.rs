@@ -69,7 +69,8 @@ impl UpstreamConfigRepository for SqlxUpstreamConfigRepository {
     async fn get_all_servers(&self) -> Result<Vec<UpstreamServerRecord>> {
         let rows = sqlx::query_as::<_, UpstreamServerRow>(
             "SELECT id, enabled, protocol, address, auth_token, auth_username, auth_password, \
-             max_hops, nameserver_ip_family, root_hints_path, root_key_path, dnssec, sort_order \
+             max_hops, nameserver_ip_family, root_hints_path, root_key_path, dnssec, sort_order, \
+             bind_address, fwmark \
              FROM upstream_servers ORDER BY sort_order, id",
         )
         .fetch_all(&self.pool)
@@ -83,8 +84,9 @@ impl UpstreamConfigRepository for SqlxUpstreamConfigRepository {
         sqlx::query(
             "INSERT INTO upstream_servers \
              (id, enabled, protocol, address, auth_token, auth_username, auth_password, \
-              max_hops, nameserver_ip_family, root_hints_path, root_key_path, dnssec, sort_order) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              max_hops, nameserver_ip_family, root_hints_path, root_key_path, dnssec, sort_order, \
+              bind_address, fwmark) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&record.id)
         .bind(record.enabled)
@@ -99,6 +101,8 @@ impl UpstreamConfigRepository for SqlxUpstreamConfigRepository {
         .bind(&record.root_key_path)
         .bind(record.dnssec)
         .bind(record.sort_order)
+        .bind(&record.bind_address)
+        .bind(record.fwmark)
         .execute(&self.pool)
         .await
         .with_context(|| format!("failed to insert upstream server '{}'", record.id))?;
@@ -141,6 +145,8 @@ struct UpstreamServerRow {
     root_key_path: Option<String>,
     dnssec: bool,
     sort_order: i32,
+    bind_address: Option<String>,
+    fwmark: Option<i32>,
 }
 
 impl From<UpstreamServerRow> for UpstreamServerRecord {
@@ -159,6 +165,8 @@ impl From<UpstreamServerRow> for UpstreamServerRecord {
             root_key_path: row.root_key_path,
             dnssec: row.dnssec,
             sort_order: row.sort_order,
+            bind_address: row.bind_address,
+            fwmark: row.fwmark,
         }
     }
 }

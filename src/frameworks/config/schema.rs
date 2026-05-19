@@ -24,6 +24,20 @@ pub struct DnsFilterConfig {
     pub control: Option<ControlConfig>,
     pub mcp: Option<McpConfig>,
     pub database: Option<DatabaseConfig>,
+    pub outbound: Option<OutboundConfig>,
+}
+
+/// Global defaults for outbound upstream DNS connections.
+///
+/// These values apply to all upstream servers unless overridden per-server.
+/// Use `bind_address` to route traffic through a specific network interface
+/// (e.g. WireGuard) and `fwmark` for Linux policy-based routing via `SO_MARK`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OutboundConfig {
+    /// Source IP address to bind upstream sockets to (e.g. a WireGuard interface IP).
+    pub bind_address: Option<String>,
+    /// Linux `SO_MARK` value for policy routing. Requires `CAP_NET_ADMIN`.
+    pub fwmark: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -430,6 +444,11 @@ pub struct UpstreamServer {
     /// When enabled, the resolver validates the full chain of trust from the
     /// IANA root KSK.  Set to `false` to disable validation.
     pub dnssec: Option<bool>,
+    /// Source IP address to bind upstream sockets to. Overrides `outbound.bind_address`.
+    pub bind_address: Option<String>,
+    /// Linux `SO_MARK` value for policy routing. Overrides `outbound.fwmark`.
+    /// Requires `CAP_NET_ADMIN`.
+    pub fwmark: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]

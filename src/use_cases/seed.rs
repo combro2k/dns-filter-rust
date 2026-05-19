@@ -150,6 +150,8 @@ async fn seed_upstream_servers(config: &DnsFilterConfig, repos: &Repositories) -
                 root_key_path: server.root_key_path.clone(),
                 dnssec: server.dnssec.unwrap_or(true),
                 sort_order: i as i32,
+                bind_address: server.bind_address.clone(),
+                fwmark: server.fwmark.map(|v| v as i32),
             })
             .await
             .with_context(|| format!("seeding upstream server #{}", i))?;

@@ -107,6 +107,8 @@ pub async fn apply_db_config(config: &mut DnsFilterConfig, repos: &Repositories)
             root_hints_path: s.root_hints_path,
             root_key_path: s.root_key_path,
             dnssec: Some(s.dnssec),
+            bind_address: s.bind_address,
+            fwmark: s.fwmark.map(|v| v as u32),
         })
         .collect();
 

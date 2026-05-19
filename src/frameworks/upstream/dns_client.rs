@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use hickory_net::client::{ClientHandle, DnssecClient};
-use hickory_net::runtime::TokioRuntimeProvider;
 use hickory_net::tcp::TcpClientStream;
 use hickory_net::udp::UdpClientStream;
 use hickory_net::xfer::DnsMultiplexer;
@@ -14,6 +13,7 @@ use hickory_proto::rr::{DNSClass, Name, RecordType};
 
 use tokio::sync::Mutex;
 
+use super::runtime::{OutboundRouting, RoutedRuntimeProvider};
 use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
 
 const UDP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -38,6 +38,7 @@ impl fmt::Debug for TcpClientCache {
 pub struct DnsUdpTcpClient {
     address: SocketAddr,
     tcp_cache: TcpClientCache,
+    routing: OutboundRouting,
 }
 
 impl DnsUdpTcpClient {
@@ -45,7 +46,13 @@ impl DnsUdpTcpClient {
         Self {
             address,
             tcp_cache: TcpClientCache::default(),
+            routing: OutboundRouting::new(None, None),
         }
+    }
+
+    pub fn with_routing(mut self, routing: OutboundRouting) -> Self {
+        self.routing = routing;
+        self
     }
 
     fn extract_question(
@@ -67,7 +74,7 @@ impl DnsUdpTcpClient {
 
     async fn resolve_udp(&self, query: &[u8]) -> Result<Vec<u8>, UpstreamResolveError> {
         let (name, query_class, query_type) = Self::extract_question(query)?;
-        let provider = TokioRuntimeProvider::default();
+        let provider = RoutedRuntimeProvider::new(self.routing.clone());
         let conn = UdpClientStream::builder(self.address, provider)
             .with_timeout(Some(UDP_TIMEOUT))
             .build();
@@ -113,7 +120,7 @@ impl DnsUdpTcpClient {
         }
 
         // Establish a fresh TCP connection.
-        let provider = TokioRuntimeProvider::default();
+        let provider = RoutedRuntimeProvider::new(self.routing.clone());
         let (tcp_connect, sender) =
             TcpClientStream::new(self.address, None, Some(TCP_TIMEOUT), provider);
         let tcp_stream = tcp_connect

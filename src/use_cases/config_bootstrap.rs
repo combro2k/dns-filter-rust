@@ -12,6 +12,7 @@ use crate::frameworks::config::schema::{
 use crate::frameworks::upstream::recursive_resolver::{
     load_root_hints, load_root_key, NameserverIpFamily, DEFAULT_MAX_HOPS,
 };
+use crate::frameworks::upstream::runtime::OutboundRouting;
 use crate::frameworks::upstream::{
     DnsHttpsClient, DnsTlsClient, DnsUdpTcpClient, RecursiveResolver,
 };
@@ -34,10 +35,12 @@ pub fn validate_config(config: DnsFilterConfig) -> DnsFilterConfig {
 }
 
 pub fn build_upstream_resolver(config: &DnsFilterConfig) -> Result<Arc<dyn UpstreamResolver>> {
+    let global_outbound = config.outbound.as_ref();
     build_upstream_resolver_group(
         &config.resolvers.strategy,
         &config.resolvers.bootstrap_resolvers,
         &config.resolvers.servers,
+        global_outbound,
     )
 }
 
@@ -463,6 +466,7 @@ fn build_upstream_resolver_group(
     strategy: &str,
     bootstrap_resolvers: &[String],
     servers: &[UpstreamServer],
+    global_outbound: Option<&crate::frameworks::config::schema::OutboundConfig>,
 ) -> Result<Arc<dyn UpstreamResolver>> {
     let strategy = UpstreamStrategy::from_str(strategy)
         .map_err(|_| anyhow!("invalid upstream strategy: {strategy}"))?;
@@ -487,7 +491,7 @@ fn build_upstream_resolver_group(
 
     let resolvers = enabled_servers
         .into_iter()
-        .map(|server| build_single_upstream_resolver(server, &bootstrap_resolvers))
+        .map(|server| build_single_upstream_resolver(server, &bootstrap_resolvers, global_outbound))
         .collect::<Result<Vec<_>>>()?;
 
     Ok(Arc::new(StrategyUpstreamResolver::new(resolvers, strategy)))
@@ -496,17 +500,38 @@ fn build_upstream_resolver_group(
 fn build_single_upstream_resolver(
     server: &UpstreamServer,
     bootstrap_resolvers: &[SocketAddr],
+    global_outbound: Option<&crate::frameworks::config::schema::OutboundConfig>,
 ) -> Result<Arc<dyn UpstreamResolver>> {
+    // Resolve effective outbound routing: per-server overrides global defaults.
+    let bind_address = server
+        .bind_address
+        .as_deref()
+        .or(global_outbound.and_then(|o| o.bind_address.as_deref()))
+        .map(|s| s.parse::<IpAddr>())
+        .transpose()
+        .map_err(|e| {
+            anyhow!(
+                "invalid bind_address for upstream '{}': {e}",
+                server.address
+            )
+        })?;
+    let fwmark = server.fwmark.or(global_outbound.and_then(|o| o.fwmark));
+    let routing = OutboundRouting::new(bind_address, fwmark);
+
     match server.protocol.as_str() {
         "dns" => {
             let address = parse_dns_address(&server.address)?;
-            Ok(Arc::new(DnsUdpTcpClient::new(address)))
+            Ok(Arc::new(
+                DnsUdpTcpClient::new(address).with_routing(routing),
+            ))
         }
         "dot" => {
             let client = DnsTlsClient::parse_endpoint(&server.address)
                 .map_err(|e| anyhow!("invalid DoT upstream '{}': {e}", server.address))?;
             Ok(Arc::new(
-                client.with_bootstrap_resolvers(bootstrap_resolvers.to_vec()),
+                client
+                    .with_bootstrap_resolvers(bootstrap_resolvers.to_vec())
+                    .with_routing(routing),
             ))
         }
         "doh" => {
@@ -515,7 +540,9 @@ fn build_single_upstream_resolver(
             let client = DnsHttpsClient::new(server.address.clone(), auth)
                 .map_err(|e| anyhow!("invalid DoH upstream '{}': {e}", server.address))?;
             Ok(Arc::new(
-                client.with_bootstrap_resolvers(bootstrap_resolvers.to_vec()),
+                client
+                    .with_bootstrap_resolvers(bootstrap_resolvers.to_vec())
+                    .with_routing(routing),
             ))
         }
         "recursive" => {
@@ -532,12 +559,13 @@ fn build_single_upstream_resolver(
             } else {
                 None
             };
-            Ok(Arc::new(RecursiveResolver::new(
+            Ok(Arc::new(RecursiveResolver::with_routing(
                 root_hints,
                 max_hops,
                 nameserver_ip_family,
                 dnssec,
                 trust_anchor,
+                routing,
             )))
         }
         other => bail!(
@@ -637,6 +665,7 @@ mod tests {
             plugins: Vec::new(),
             mcp: None,
             database: None,
+            outbound: None,
         }
     }
 

@@ -150,6 +150,16 @@ filtering:
   any_query_policy: "notimp"
 
 # ---------------------------------------------------------------------------
+# Outbound routing (optional)
+# ---------------------------------------------------------------------------
+# Global defaults for upstream DNS connections. Use to route queries through
+# a specific interface (e.g. WireGuard) or apply policy routing via SO_MARK.
+# Per-server bind_address/fwmark overrides these defaults.
+#outbound:
+#  bind_address: "10.0.0.2"   # Source IP to bind upstream sockets to
+#  fwmark: 51820              # Linux SO_MARK for policy routing (needs CAP_NET_ADMIN)
+
+# ---------------------------------------------------------------------------
 # Upstream resolvers
 # ---------------------------------------------------------------------------
 resolvers:

@@ -48,6 +48,17 @@ mod tests {
             }
         }
 
+        let migration_003 = include_str!("../../../migrations/sqlite/003_add_outbound_routing.sql");
+        for statement in migration_003.split(';') {
+            let trimmed = statement.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed)
+                    .execute(&pool)
+                    .await
+                    .unwrap_or_else(|e| panic!("migration statement failed: {e}\nSQL: {trimmed}"));
+            }
+        }
+
         pool
     }
 
@@ -206,6 +217,8 @@ mod tests {
             root_key_path: None,
             dnssec: true,
             sort_order: 0,
+            bind_address: None,
+            fwmark: None,
         })
         .await
         .unwrap();

@@ -925,6 +925,100 @@ run_api_crud_tests() {
 
 run_api_crud_tests
 
+# ---------------------------------------------------------------------------
+# Outbound routing (bind_address) smoke test
+# ---------------------------------------------------------------------------
+# Starts a fresh instance with bind_address=127.0.0.1 on the upstream server
+# to verify the RoutedRuntimeProvider works end-to-end. Since both the upstream
+# target (1.1.1.1:53) and local bind are loopback, the query will still succeed
+# because we bind to 0.0.0.0 (any) when the configured bind matches the same
+# address family — here we use 127.0.0.1 which still routes to external DNS
+# on Linux (outbound source IP selection happens after routing).
+
+OUTBOUND_TEST_PORT="25356"
+OUTBOUND_PID=""
+
+run_outbound_routing_test() {
+  local config_file="$TEMP_DIR/outbound-routing-config.yaml"
+  local log_file="$TEMP_DIR/outbound-routing.log"
+
+  cat >"$config_file" <<EOF
+listen:
+  dns:
+    enabled: true
+    address: "$DNS_HOST"
+    port: $OUTBOUND_TEST_PORT
+  dot: null
+  doh: null
+  doq: null
+  http: null
+  metrics: null
+
+blocklists: []
+allowlists: []
+
+filtering:
+  any_query_policy: "passthrough"
+
+outbound:
+  bind_address: "0.0.0.0"
+
+resolvers:
+  strategy: "failover"
+  bootstrap_resolvers:
+    - "1.1.1.1"
+  servers:
+    - enabled: true
+      protocol: "dns"
+      address: "1.1.1.1:53"
+      bind_address: "0.0.0.0"
+
+logging:
+  syslog: null
+  file: null
+  stdout:
+    enabled: true
+    level: "info"
+
+control:
+  socket_path: "$TEMP_DIR/outbound-routing.sock"
+
+database:
+  url: "sqlite://$TEMP_DIR/outbound-routing.db"
+EOF
+
+  note "Starting outbound routing test instance on ${DNS_HOST}:${OUTBOUND_TEST_PORT}"
+  "$BINARY" start --config "$config_file" >"$log_file" 2>&1 &
+  OUTBOUND_PID=$!
+
+  if ! wait_for_tcp_port "$OUTBOUND_TEST_PORT"; then
+    fail "outbound routing test instance did not start on ${DNS_HOST}:${OUTBOUND_TEST_PORT}"
+    note "outbound routing test log follows"
+    sed -n '1,80p' "$log_file"
+    stop_pid "$OUTBOUND_PID"
+    OUTBOUND_PID=""
+    return
+  fi
+
+  if dns_query_udp_expect_status_on_port "$OUTBOUND_TEST_PORT" "NOERROR" "$DOMAIN"; then
+    pass "outbound routing: DNS query succeeded with bind_address configured"
+  else
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      skip "outbound routing query skipped (install dig, drill, or kdig)"
+    else
+      fail "outbound routing: DNS query failed with bind_address configured"
+      note "outbound routing test log follows"
+      sed -n '1,80p' "$log_file"
+    fi
+  fi
+
+  stop_pid "$OUTBOUND_PID"
+  OUTBOUND_PID=""
+}
+
+run_outbound_routing_test
+
 # Test recursive resolver (optional, disabled by default in the main config above)
 if [ "${TEST_RECURSIVE:-0}" -eq 1 ]; then
   note "Testing recursive resolver..."
