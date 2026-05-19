@@ -6,7 +6,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::frameworks::config::loader::load_config;
+use crate::frameworks::config::loader::{load_config, load_config_from_str};
 use crate::use_cases::config_bootstrap::{
     build_any_query_policy, build_domain_filter, build_domain_filter_with_cache,
     build_upstream_resolver, build_zone_entries, validate_config,
@@ -78,6 +78,34 @@ pub async fn reload_config_from_db(
     // discovery fetches). Running it on a blocking thread avoids the Tokio
     // panic that occurs when a blocking runtime is dropped inside an async
     // context.
+    let zone_entries = tokio::task::spawn_blocking(move || build_zone_entries(&config))
+        .await
+        .map_err(|e| anyhow::anyhow!("zone entry build task panicked: {e}"))??;
+
+    tracing::info!("configuration reloaded successfully (DB-backed)");
+
+    Ok((resolver, filter, any_query_policy, zone_entries))
+}
+
+/// Reloads configuration using cached YAML content and the database.
+///
+/// Identical to [`reload_config_from_db`] but uses an in-memory YAML string
+/// instead of reading the config file from disk.  This is required when the
+/// process has chrooted and the original config path is no longer accessible.
+pub async fn reload_config_from_db_cached(
+    cached_yaml: &str,
+    repos: &Repositories,
+) -> Result<ReloadedConfig> {
+    tracing::info!("reloading configuration (DB-backed, cached YAML)");
+
+    let config = load_config_from_str(cached_yaml)?;
+    let mut config = validate_config(config);
+    apply_db_config(&mut config, repos).await?;
+
+    let resolver = build_upstream_resolver(&config)?;
+    let filter = build_domain_filter_with_cache(&config, Some(Arc::clone(&repos.filter_cache)))?;
+    let any_query_policy = build_any_query_policy(&config)?;
+
     let zone_entries = tokio::task::spawn_blocking(move || build_zone_entries(&config))
         .await
         .map_err(|e| anyhow::anyhow!("zone entry build task panicked: {e}"))??;

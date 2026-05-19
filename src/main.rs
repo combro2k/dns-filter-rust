@@ -37,7 +37,7 @@ use dns_filter::use_cases::config_bootstrap::{
     build_upstream_resolver, build_zone_entries, validate_config,
 };
 use dns_filter::use_cases::config_from_db::{apply_db_config, Repositories};
-use dns_filter::use_cases::reload::reload_config_from_db;
+use dns_filter::use_cases::reload::reload_config_from_db_cached;
 use dns_filter::use_cases::seed;
 #[cfg(any(feature = "http-api", feature = "mcp"))]
 use dns_filter::use_cases::server_operations::{QueryStats, ServerOperations};
@@ -252,6 +252,16 @@ fn run_merge_config(config_path: &str, overwrite: bool) {
 
 /// Main daemon entry point.
 async fn run_daemon(config_path: String, debug: bool) {
+    // Read the raw YAML content before chroot — the file will be inaccessible
+    // after chroot, but we need it for reload (infrastructure settings).
+    let cached_yaml = match std::fs::read_to_string(&config_path) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("Could not read the config file.\n  File: {config_path}\n  Reason: {e}");
+            std::process::exit(1);
+        }
+    };
+
     let mut config = match load_config(&config_path) {
         Ok(cfg) => validate_config(cfg),
         Err(e) => {
@@ -592,7 +602,7 @@ async fn run_daemon(config_path: String, debug: bool) {
         }
     };
 
-    let config_path_for_reload = config_path.clone();
+    let cached_yaml_for_reload = cached_yaml.clone();
     let pipeline_slot_for_reload = Arc::clone(&request_pipeline_slot);
     let filtering_enabled_for_reload = Arc::clone(&filtering_enabled);
     let repos_for_reload = Arc::clone(&repos);
@@ -610,7 +620,7 @@ async fn run_daemon(config_path: String, debug: bool) {
 
     let reload_task = tokio::spawn(async move {
         while reload_rx.recv().await.is_some() {
-            match reload_config_from_db(&config_path_for_reload, &repos_for_reload).await {
+            match reload_config_from_db_cached(&cached_yaml_for_reload, &repos_for_reload).await {
                 Ok((new_resolver, new_filter, new_any_query_policy, new_zone_entries)) => {
                     new_filter.clone().start_background_refresh();
                     let new_pipeline = Arc::new(build_dns_request_pipeline_full(

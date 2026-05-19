@@ -14,6 +14,14 @@ pub fn load_config(path: &str) -> Result<DnsFilterConfig> {
     parse_config(path, &content)
 }
 
+/// Parses a `DnsFilterConfig` from an in-memory YAML string.
+///
+/// Used during reload when the original YAML content has been cached in memory
+/// (e.g. because the filesystem is no longer accessible after chroot).
+pub fn load_config_from_str(content: &str) -> Result<DnsFilterConfig> {
+    parse_config("<cached>", content)
+}
+
 fn parse_config(path: &str, content: &str) -> Result<DnsFilterConfig> {
     let deserializer = serde_yaml::Deserializer::from_str(content);
     serde_path_to_error::deserialize::<_, DnsFilterConfig>(deserializer).map_err(|error| {
