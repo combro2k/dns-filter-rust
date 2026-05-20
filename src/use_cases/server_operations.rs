@@ -547,11 +547,21 @@ impl ServerOperations {
             record.dnssec = dnssec;
         }
         if let Some(bind_address) = input.bind_address {
-            validate_bind_address(Some(&bind_address))?;
-            record.bind_address = Some(bind_address);
+            match bind_address {
+                Some(value) => {
+                    validate_bind_address(Some(&value))?;
+                    record.bind_address = Some(value);
+                }
+                None => {
+                    record.bind_address = None;
+                }
+            }
         }
         if let Some(fwmark) = input.fwmark {
-            record.fwmark = Some(parse_single_fwmark(fwmark)?);
+            record.fwmark = match fwmark {
+                Some(value) => Some(parse_single_fwmark(value)?),
+                None => None,
+            };
         }
         if let Some(sort_order) = input.sort_order {
             record.sort_order = validate_sort_order(sort_order)?;
@@ -964,8 +974,22 @@ pub struct UpdateUpstreamServerInput {
     pub root_hints_path: Option<String>,
     pub root_key_path: Option<String>,
     pub dnssec: Option<bool>,
-    pub bind_address: Option<String>,
-    pub fwmark: Option<u32>,
+    /// Source IP address to bind upstream sockets to. Pass JSON `null` to
+    /// clear any existing value; omit the field to leave it unchanged.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[cfg_attr(
+        feature = "http-api",
+        schema(value_type = Option<String>, nullable = true)
+    )]
+    pub bind_address: Option<Option<String>>,
+    /// Linux `SO_MARK` value for policy routing. Pass JSON `null` to clear
+    /// any existing value; omit the field to leave it unchanged.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[cfg_attr(
+        feature = "http-api",
+        schema(value_type = Option<u32>, nullable = true)
+    )]
+    pub fwmark: Option<Option<u32>>,
     pub sort_order: Option<i32>,
 }
 
@@ -1147,6 +1171,19 @@ fn validate_sort_order(sort_order: i32) -> Result<i32, ServerOperationError> {
 
 fn parse_fwmark(fwmark: Option<u32>) -> Result<Option<i32>, ServerOperationError> {
     fwmark.map(parse_single_fwmark).transpose()
+}
+
+/// Serde helper used to distinguish "field absent" from "field present and
+/// null" in JSON request bodies. Absence yields `None`; explicit `null`
+/// yields `Some(None)`; a value yields `Some(Some(value))`.
+pub(crate) fn deserialize_optional_field<'de, T, D>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 fn parse_single_fwmark(fwmark: u32) -> Result<i32, ServerOperationError> {
@@ -1532,5 +1569,28 @@ mod tests {
         );
         let result = ops.trigger_reload().await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_upstream_input_absent_fields_yield_none() {
+        let input: UpdateUpstreamServerInput = serde_json::from_str("{}").unwrap();
+        assert!(input.bind_address.is_none());
+        assert!(input.fwmark.is_none());
+    }
+
+    #[test]
+    fn update_upstream_input_null_fields_yield_some_none() {
+        let input: UpdateUpstreamServerInput =
+            serde_json::from_str(r#"{"bind_address": null, "fwmark": null}"#).unwrap();
+        assert_eq!(input.bind_address, Some(None));
+        assert_eq!(input.fwmark, Some(None));
+    }
+
+    #[test]
+    fn update_upstream_input_set_fields_yield_some_some() {
+        let input: UpdateUpstreamServerInput =
+            serde_json::from_str(r#"{"bind_address": "10.0.0.1", "fwmark": 42}"#).unwrap();
+        assert_eq!(input.bind_address, Some(Some("10.0.0.1".to_string())));
+        assert_eq!(input.fwmark, Some(Some(42)));
     }
 }

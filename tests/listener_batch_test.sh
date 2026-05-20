@@ -836,6 +836,42 @@ run_api_crud_tests() {
       fail "API update upstream returned $http_code (expected 200)"
     fi
 
+    # Clearing routing fields via JSON null
+    body="$(curl -sS -w '\n%{http_code}' -X PUT "$api_base/upstreams/$upstream_id" \
+      -H "$auth_header" -H "$content_type" \
+      -d '{"bind_address":null,"fwmark":null}' 2>/dev/null)"
+    http_code="$(echo "$body" | tail -1)"
+    response_body="$(echo "$body" | sed '$d')"
+    if [ "$http_code" = "200" ] && echo "$response_body" | grep -q '"bind_address":null' && echo "$response_body" | grep -q '"fwmark":null'; then
+      pass "API update upstream with null clears bind_address and fwmark"
+    else
+      fail "API update upstream with null did not clear routing fields (code=$http_code body=$response_body)"
+    fi
+
+    # Omitting routing fields leaves them unchanged (still null after clear)
+    body="$(curl -sS -w '\n%{http_code}' -X PUT "$api_base/upstreams/$upstream_id" \
+      -H "$auth_header" -H "$content_type" \
+      -d '{"max_hops":5}' 2>/dev/null)"
+    http_code="$(echo "$body" | tail -1)"
+    response_body="$(echo "$body" | sed '$d')"
+    if [ "$http_code" = "200" ] && echo "$response_body" | grep -q '"bind_address":null' && echo "$response_body" | grep -q '"fwmark":null'; then
+      pass "API update upstream omitting routing fields leaves them cleared"
+    else
+      fail "API update upstream omit leaked or changed routing fields (code=$http_code body=$response_body)"
+    fi
+
+    # Re-set routing fields to confirm round-trip after clear
+    body="$(curl -sS -w '\n%{http_code}' -X PUT "$api_base/upstreams/$upstream_id" \
+      -H "$auth_header" -H "$content_type" \
+      -d '{"bind_address":"127.0.0.2","fwmark":303}' 2>/dev/null)"
+    http_code="$(echo "$body" | tail -1)"
+    response_body="$(echo "$body" | sed '$d')"
+    if [ "$http_code" = "200" ] && echo "$response_body" | grep -q '"bind_address":"127.0.0.2"' && echo "$response_body" | grep -q '"fwmark":303'; then
+      pass "API update upstream re-sets routing fields after clear"
+    else
+      fail "API update upstream re-set after clear failed (code=$http_code body=$response_body)"
+    fi
+
     body="$(curl -sS -w '\n%{http_code}' -X DELETE "$api_base/upstreams/$upstream_id" \
       -H "$auth_header" 2>/dev/null)"
     http_code="$(echo "$body" | tail -1)"

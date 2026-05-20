@@ -16,9 +16,10 @@ use tokio_util::sync::CancellationToken;
 use crate::frameworks::config::schema::McpConfig;
 use crate::interface_adapters::listeners::auth::bearer_auth_middleware;
 use crate::use_cases::server_operations::{
-    AuthenticationInput, CreateFilterListInput, CreateUpstreamServerInput,
-    CreateZoneDiscoveryInput, CreateZoneInput, CreateZoneServerInput, ServerOperations,
-    UpdateFilterListInput, UpdateUpstreamServerInput, UpdateZoneDiscoveryInput, UpdateZoneInput,
+    deserialize_optional_field, AuthenticationInput, CreateFilterListInput,
+    CreateUpstreamServerInput, CreateZoneDiscoveryInput, CreateZoneInput, CreateZoneServerInput,
+    ServerOperations, UpdateFilterListInput, UpdateUpstreamServerInput, UpdateZoneDiscoveryInput,
+    UpdateZoneInput,
 };
 
 use super::{bind_tcp, parse_bind_addrs};
@@ -159,10 +160,14 @@ struct UpdateUpstreamServerParams {
     root_key_path: Option<String>,
     /// Enable or disable DNSSEC validation
     dnssec: Option<bool>,
-    /// Source IP address to bind upstream sockets to
-    bind_address: Option<String>,
-    /// Linux SO_MARK value for policy routing
-    fwmark: Option<u32>,
+    /// Source IP address to bind upstream sockets to. Pass JSON `null` to
+    /// clear the existing value; omit the field to leave it unchanged.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    bind_address: Option<Option<String>>,
+    /// Linux SO_MARK value for policy routing. Pass JSON `null` to clear the
+    /// existing value; omit the field to leave it unchanged.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    fwmark: Option<Option<u32>>,
     /// New sort order
     sort_order: Option<i32>,
 }
@@ -633,7 +638,7 @@ impl McpHandler {
     }
 
     #[tool(
-        description = "Update an existing upstream resolver server by ID. Supports bind_address and fwmark changes. Triggers a config reload."
+        description = "Update an existing upstream resolver server by ID. Supports bind_address and fwmark changes; pass null for either to clear the stored value. Triggers a config reload."
     )]
     async fn update_upstream(
         &self,

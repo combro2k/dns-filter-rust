@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-05-20
+
+### Changed
+- **Clear `bind_address` / `fwmark` on upstream servers via API and MCP**: PATCHing an upstream server with `{"bind_address": null}` or `{"fwmark": null}` (HTTP API) — or passing `null` to the equivalent fields of the MCP `update_upstream` tool — now clears the stored value. Omitting the field continues to leave the existing value unchanged. Previously there was no way to remove these once set without editing the database directly.
+
 ## [2.5.0] - 2026-05-20
 
 ### Added
