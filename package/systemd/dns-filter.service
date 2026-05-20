@@ -5,9 +5,9 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/dns-filter start --config /etc/dns-filter/config.yaml
+ExecStart=/usr/bin/dns-filter start --direct --config /etc/dns-filter/config.yaml
 ExecReload=/usr/bin/dns-filter reload --config /etc/dns-filter/config.yaml
-ExecStop=/usr/bin/dns-filter stop --config /etc/dns-filter/config.yaml
+ExecStop=/usr/bin/dns-filter stop --direct --config /etc/dns-filter/config.yaml
 Restart=on-failure
 RestartSec=2s
 StateDirectory=dns-filter

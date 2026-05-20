@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Changed
+- **Init-system wiring for `start`/`stop`**: `dns-filter start` and `dns-filter stop` now delegate to systemd (`systemctl`) or OpenRC (`rc-service`) when run with default settings, so service-managed installs use the init system by default. Added `--direct` to both commands to force direct daemon/control-socket behavior. Packaged systemd/OpenRC service definitions now use `--direct` internally to avoid recursion.
 - **Control socket CLI enhancements**: added `dns-filter status` to query daemon runtime statistics via the control socket, and added `--socket <path>` override support to `dns-filter stop`, `dns-filter reload`, and `dns-filter status`. When `--socket` is not provided, these commands now consistently default to the socket path resolved from the selected config file (`control.socket_path`) with existing chroot-aware path handling.
 - **Chroot-scoped runtime paths for DB/TLS/control socket**: startup now validates that SQLite database file paths, enabled listener TLS `cert_path`/`key_path`, and `control.socket_path` resolve inside `security.chroot_dir`; startup fails fast if any path escapes chroot. Relative paths are supported and resolved from chroot root.
 - **Database initialization moved after chroot**: SQLite is now opened after privilege drop/chroot, preventing post-chroot pool connections from targeting host filesystem paths.

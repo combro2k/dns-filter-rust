@@ -2,7 +2,7 @@
 
 description="dns-filter DNS filtering service"
 command="/usr/bin/dns-filter"
-command_args="start --config /etc/dns-filter/config.yaml"
+command_args="start --direct --config /etc/dns-filter/config.yaml"
 command_background="yes"
 pidfile="/run/${RC_SVCNAME}.pid"
 directory="/var/lib/dns-filter"

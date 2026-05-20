@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
 use nix::unistd;
 use serde::Deserialize;
+use std::io::ErrorKind;
 use std::path::Path;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -58,10 +60,12 @@ enum CliAction {
     Start {
         config_path: String,
         debug: bool,
+        direct: bool,
     },
     Stop {
         config_path: String,
         socket_path: Option<String>,
+        direct: bool,
     },
     Reload {
         config_path: String,
@@ -101,6 +105,10 @@ enum Commands {
 
         #[arg(long = "debug")]
         debug: bool,
+
+        /// Run the daemon directly instead of delegating to systemd/OpenRC.
+        #[arg(long = "direct")]
+        direct: bool,
     },
     /// Stop the running daemon via control socket
     Stop {
@@ -113,6 +121,10 @@ enum Commands {
 
         #[arg(long = "socket", value_name = "path")]
         socket_path: Option<String>,
+
+        /// Send stop directly to the control socket instead of delegating to systemd/OpenRC.
+        #[arg(long = "direct")]
+        direct: bool,
     },
     /// Reload the running daemon's configuration via control socket
     Reload {
@@ -165,13 +177,23 @@ where
     }
 
     match parsed.command {
-        Some(Commands::Start { config_path, debug }) => Ok(CliAction::Start { config_path, debug }),
+        Some(Commands::Start {
+            config_path,
+            debug,
+            direct,
+        }) => Ok(CliAction::Start {
+            config_path,
+            debug,
+            direct,
+        }),
         Some(Commands::Stop {
             config_path,
             socket_path,
+            direct,
         }) => Ok(CliAction::Stop {
             config_path,
             socket_path,
+            direct,
         }),
         Some(Commands::Reload {
             config_path,
@@ -215,14 +237,19 @@ async fn main() {
         CliAction::Version => {
             println!("dns-filter {}", env!("CARGO_PKG_VERSION"));
         }
-        CliAction::Start { config_path, debug } => {
-            run_daemon(config_path, debug).await;
+        CliAction::Start {
+            config_path,
+            debug,
+            direct,
+        } => {
+            run_start_command(config_path, debug, direct).await;
         }
         CliAction::Stop {
             config_path,
             socket_path,
+            direct,
         } => {
-            run_control_command(&config_path, socket_path.as_deref(), "stop");
+            run_stop_command(&config_path, socket_path.as_deref(), direct);
         }
         CliAction::Reload {
             config_path,
@@ -243,6 +270,79 @@ async fn main() {
             run_merge_config(&config_path, overwrite);
         }
     }
+}
+
+fn should_delegate_start(config_path: &str, debug: bool, direct: bool) -> bool {
+    !direct && !debug && config_path == DEFAULT_CONFIG_PATH
+}
+
+fn should_delegate_stop(config_path: &str, socket_override: Option<&str>, direct: bool) -> bool {
+    !direct && socket_override.is_none() && config_path == DEFAULT_CONFIG_PATH
+}
+
+fn run_service_command(bin: &str, args: &[&str]) -> Result<bool, String> {
+    let status = match Command::new(bin).args(args).status() {
+        Ok(status) => status,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("failed to execute {bin}: {e}")),
+    };
+
+    if status.success() {
+        Ok(true)
+    } else {
+        Err(format!(
+            "{} {} failed with status {}",
+            bin,
+            args.join(" "),
+            status
+        ))
+    }
+}
+
+fn try_delegate_to_init(action: &str) -> Result<bool, String> {
+    if Path::new("/run/systemd/system").exists()
+        && run_service_command("systemctl", &[action, "dns-filter"])?
+    {
+        return Ok(true);
+    }
+
+    if (Path::new("/run/openrc/softlevel").exists() || Path::new("/sbin/openrc-run").exists())
+        && run_service_command("rc-service", &["dns-filter", action])?
+    {
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+async fn run_start_command(config_path: String, debug: bool, direct: bool) {
+    if should_delegate_start(&config_path, debug, direct) {
+        match try_delegate_to_init("start") {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("failed to start service via init manager: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    run_daemon(config_path, debug).await;
+}
+
+fn run_stop_command(config_path: &str, socket_override: Option<&str>, direct: bool) {
+    if should_delegate_stop(config_path, socket_override, direct) {
+        match try_delegate_to_init("stop") {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("failed to stop service via init manager: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    run_control_command(config_path, socket_override, "stop");
 }
 
 fn resolve_control_socket_path(config_path: &str, socket_override: Option<&str>) -> String {
@@ -1095,6 +1195,7 @@ mod tests {
             CliAction::Start {
                 config_path: "/tmp/test.yaml".to_string(),
                 debug: true,
+                direct: false,
             }
         );
     }
@@ -1107,6 +1208,21 @@ mod tests {
             CliAction::Start {
                 config_path: DEFAULT_CONFIG_PATH.to_string(),
                 debug: false,
+                direct: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_start_with_direct_flag() {
+        let parsed =
+            parse_cli_args(["dns-filter", "start", "--direct"]).expect("parse should succeed");
+        assert_eq!(
+            parsed,
+            CliAction::Start {
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
+                debug: false,
+                direct: true,
             }
         );
     }
@@ -1120,6 +1236,7 @@ mod tests {
             CliAction::Stop {
                 config_path: "/tmp/test.yaml".to_string(),
                 socket_path: None,
+                direct: false,
             }
         );
     }
@@ -1133,6 +1250,21 @@ mod tests {
             CliAction::Stop {
                 config_path: DEFAULT_CONFIG_PATH.to_string(),
                 socket_path: Some("/tmp/custom.sock".to_string()),
+                direct: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_stop_with_direct_flag() {
+        let parsed =
+            parse_cli_args(["dns-filter", "stop", "--direct"]).expect("parse should succeed");
+        assert_eq!(
+            parsed,
+            CliAction::Stop {
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
+                socket_path: None,
+                direct: true,
             }
         );
     }
@@ -1243,5 +1375,53 @@ mod tests {
         let err =
             parse_cli_args(["dns-filter", "start", "--config"]).expect_err("parse should fail");
         assert!(err.contains("--config"));
+    }
+
+    #[test]
+    fn delegates_start_only_for_default_non_debug_non_direct() {
+        assert!(super::should_delegate_start(
+            DEFAULT_CONFIG_PATH,
+            false,
+            false
+        ));
+        assert!(!super::should_delegate_start(
+            DEFAULT_CONFIG_PATH,
+            true,
+            false
+        ));
+        assert!(!super::should_delegate_start(
+            DEFAULT_CONFIG_PATH,
+            false,
+            true
+        ));
+        assert!(!super::should_delegate_start(
+            "/tmp/config.yaml",
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn delegates_stop_only_for_default_without_socket_or_direct() {
+        assert!(super::should_delegate_stop(
+            DEFAULT_CONFIG_PATH,
+            None,
+            false
+        ));
+        assert!(!super::should_delegate_stop(
+            DEFAULT_CONFIG_PATH,
+            Some("/tmp/custom.sock"),
+            false
+        ));
+        assert!(!super::should_delegate_stop(
+            DEFAULT_CONFIG_PATH,
+            None,
+            true
+        ));
+        assert!(!super::should_delegate_stop(
+            "/tmp/config.yaml",
+            None,
+            false
+        ));
     }
 }
