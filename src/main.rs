@@ -28,7 +28,7 @@ use dns_filter::frameworks::database::{
     SqlxUpstreamConfigRepository, SqlxZoneDiscoveryRepository, SqlxZoneRepository,
 };
 use dns_filter::frameworks::logging;
-use dns_filter::frameworks::metrics::init_prometheus_metrics;
+use dns_filter::frameworks::metrics::{init_prometheus_metrics, snapshot as metrics_snapshot};
 use dns_filter::frameworks::privileges::{
     drop_privileges, PrivilegeDropConfig, DEFAULT_CHROOT_DIR, DEFAULT_GROUP, DEFAULT_USER,
 };
@@ -51,7 +51,6 @@ use dns_filter::use_cases::reload::reload_config_from_db_cached;
 use dns_filter::use_cases::seed;
 #[cfg(any(feature = "http-api", feature = "mcp"))]
 use dns_filter::use_cases::server_operations::ServerOperations;
-use dns_filter::use_cases::server_operations::{init_query_stats_recorder, QueryStats};
 #[cfg(feature = "http-api")]
 use std::net::SocketAddr;
 #[cfg(feature = "http-api")]
@@ -1002,13 +1001,11 @@ async fn run_daemon(config_path: String, debug: bool) {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let shared_stats = Arc::new(QueryStats::new());
-    init_query_stats_recorder(Arc::clone(&shared_stats));
 
-    let status_stats = Arc::clone(&shared_stats);
     let status_filtering_enabled = Arc::clone(&filtering_enabled);
     let status_domain_filter = Arc::clone(&domain_filter);
     let status_provider = Arc::new(move || {
+        let snapshot = metrics_snapshot();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -1016,10 +1013,14 @@ async fn run_daemon(config_path: String, debug: bool) {
         serde_json::json!({
             "uptime_seconds": now.saturating_sub(start_time),
             "filtering_enabled": status_filtering_enabled.load(Ordering::Relaxed),
-            "queries_total": status_stats.queries_total.load(Ordering::Relaxed),
-            "queries_blocked": status_stats.queries_blocked.load(Ordering::Relaxed),
-            "queries_allowed": status_stats.queries_allowed.load(Ordering::Relaxed),
-            "queries_passthrough": status_stats.queries_passthrough.load(Ordering::Relaxed),
+            "queries_total": snapshot.queries_total,
+            "queries_blocked": snapshot.queries_blocked,
+            "queries_allowed": snapshot.queries_allowed,
+            "queries_passthrough": snapshot.queries_passthrough,
+            "blocklist_hits_total": snapshot.blocklist_hits_total,
+            "cache_hits_total": snapshot.cache_hits_total,
+            "cache_misses_total": snapshot.cache_misses_total,
+            "upstreams": snapshot.upstreams,
             "lists": status_domain_filter.list_names(),
         })
     });
@@ -1061,7 +1062,6 @@ async fn run_daemon(config_path: String, debug: bool) {
             query_log,
             reload_tx.clone(),
             start_time,
-            Arc::clone(&shared_stats),
         )
         .with_repositories(Arc::clone(&repos));
         #[cfg(feature = "mcp")]
@@ -1074,16 +1074,17 @@ async fn run_daemon(config_path: String, debug: bool) {
     #[cfg(not(feature = "http-api"))]
     let api_task: Option<tokio::task::JoinHandle<()>> = None;
 
+    if let Err(error) = init_prometheus_metrics() {
+        eprintln!("failed to initialize metrics: {error:#}");
+        std::process::exit(1);
+    }
+
     if config
         .listen
         .metrics
         .as_ref()
         .is_some_and(|cfg| cfg.enabled)
     {
-        if let Err(error) = init_prometheus_metrics() {
-            eprintln!("failed to initialize metrics: {error:#}");
-            std::process::exit(1);
-        }
         spawn_metrics_servers(&config.listen.metrics);
     }
 

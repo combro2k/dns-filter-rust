@@ -1199,7 +1199,7 @@ The MCP server exposes the following tools to connected AI agents:
 | `filter_toggle` | Enable or disable global DNS filtering |
 | `list_filters` | List all configured blocklists and allowlists with their status |
 | `refresh_lists` | Trigger a reload of all filter lists from their sources |
-| `get_stats` | Get server statistics (queries, blocked, uptime, cache) |
+| `get_stats` | Get server statistics (queries, blocklist/cache totals, per-upstream request/error/latency aggregates, uptime) |
 | `get_query_log` | Get the recent DNS query log (requires query logging enabled) |
 | `reload_config` | Trigger a configuration reload from disk |
 | `server_health` | Get server health status including version and uptime |
@@ -2384,6 +2384,35 @@ filtering:
 # Query Prometheus metrics endpoint
 curl http://127.0.0.1:9100/metrics | grep dns
 
+# Query API stats endpoint (same in-memory source as /metrics)
+curl -H "Authorization: Bearer <api_token>" \
+  http://127.0.0.1:8080/api/v1/stats
+
+# Example /api/v1/stats response fields
+# {
+#   "uptime_seconds": 12345,
+#   "filtering_enabled": true,
+#   "queries_total": 1000,
+#   "queries_blocked": 120,
+#   "queries_allowed": 80,
+#   "queries_passthrough": 800,
+#   "blocklist_hits_total": 120,
+#   "cache_hits_total": 500,
+#   "cache_misses_total": 150,
+#   "upstreams": [
+#     {
+#       "upstream": "dns://1.1.1.1:53",
+#       "requests_total": 650,
+#       "errors_total": 3,
+#       "latency_count": 650,
+#       "latency_sum_seconds": 1.27
+#     }
+#   ],
+#   "lists": [
+#     { "name": "adguard", "enabled": true, "kind": "block", "url": "...", "list_type": "adguard", "interval_secs": 3600, "domain_count": 1000, "exception_count": 20 }
+#   ]
+# }
+
 # Key metrics to monitor
 # dns_queries_total - total queries handled
 # dns_queries_blocked - total queries blocked
@@ -2392,8 +2421,8 @@ curl http://127.0.0.1:9100/metrics | grep dns
 # blocklist_hits_total - total blocklist matches
 # cache_hits_total - filter-document cache restore hits
 # cache_misses_total - filter-document cache restore misses
-# upstream_request_duration_seconds - upstream resolver latency histogram
-# upstream_errors_total - total upstream resolver errors
+# upstream_request_duration_seconds{upstream="..."} - per-upstream latency histogram
+# upstream_errors_total{upstream="...",error="..."} - per-upstream error totals by class
 ```
 
 ### Optimization Tips

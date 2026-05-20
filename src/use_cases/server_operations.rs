@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,74 +12,13 @@ use uuid::Uuid;
 
 use crate::entities::filter::FilterDecision;
 use crate::entities::query_log::{QueryLog, QueryLogEntry};
+use crate::frameworks::metrics;
 use crate::use_cases::config_from_db::Repositories;
 use crate::use_cases::filtering::{DomainFilter, ListInfo};
 use crate::use_cases::repository_types::{
     FilterListRecord, UpstreamServerRecord, ZoneDiscoveryRecord, ZoneRecord, ZoneServerRecord,
 };
 use crate::use_cases::zone_registry::{ZoneInfo, ZoneRegistry, ZoneSearchResult};
-
-/// Atomic query counters shared across the application.
-pub struct QueryStats {
-    pub queries_total: AtomicU64,
-    pub queries_blocked: AtomicU64,
-    pub queries_allowed: AtomicU64,
-    pub queries_passthrough: AtomicU64,
-}
-
-impl Default for QueryStats {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl QueryStats {
-    pub fn new() -> Self {
-        Self {
-            queries_total: AtomicU64::new(0),
-            queries_blocked: AtomicU64::new(0),
-            queries_allowed: AtomicU64::new(0),
-            queries_passthrough: AtomicU64::new(0),
-        }
-    }
-}
-
-static QUERY_STATS: OnceLock<Arc<QueryStats>> = OnceLock::new();
-
-/// Registers the shared query stats recorder used by request processing stages.
-///
-/// Safe to call multiple times; only the first call is retained.
-pub fn init_query_stats_recorder(stats: Arc<QueryStats>) {
-    let _ = QUERY_STATS.set(stats);
-}
-
-/// Decision outcomes used to update query counters for `/api/v1/stats`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueryStatsDecision {
-    Blocked,
-    Allowed,
-    Passthrough,
-}
-
-/// Records query outcome counters when the shared recorder has been initialized.
-pub fn record_query_stats(decision: QueryStatsDecision) {
-    let Some(stats) = QUERY_STATS.get() else {
-        return;
-    };
-
-    stats.queries_total.fetch_add(1, Ordering::Relaxed);
-    match decision {
-        QueryStatsDecision::Blocked => {
-            stats.queries_blocked.fetch_add(1, Ordering::Relaxed);
-        }
-        QueryStatsDecision::Allowed => {
-            stats.queries_allowed.fetch_add(1, Ordering::Relaxed);
-        }
-        QueryStatsDecision::Passthrough => {
-            stats.queries_passthrough.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-}
 
 /// Errors from server operation calls.
 #[derive(Debug, Error)]
@@ -110,7 +48,6 @@ pub struct ServerOperations {
     pub(crate) query_log: Option<Arc<Mutex<QueryLog>>>,
     pub(crate) reload_tx: mpsc::Sender<()>,
     pub(crate) start_time: u64,
-    pub(crate) stats: Arc<QueryStats>,
     pub(crate) zone_registry: Option<Arc<ZoneRegistry>>,
     pub(crate) repos: Option<Arc<Repositories>>,
 }
@@ -125,7 +62,6 @@ impl ServerOperations {
         query_log: Option<Arc<Mutex<QueryLog>>>,
         reload_tx: mpsc::Sender<()>,
         start_time: u64,
-        stats: Arc<QueryStats>,
     ) -> Self {
         Self {
             domain_filter,
@@ -133,7 +69,6 @@ impl ServerOperations {
             query_log,
             reload_tx,
             start_time,
-            stats,
             zone_registry: None,
             repos: None,
         }
@@ -147,10 +82,6 @@ impl ServerOperations {
     pub fn with_repositories(mut self, repos: Arc<Repositories>) -> Self {
         self.repos = Some(repos);
         self
-    }
-
-    pub fn stats(&self) -> &Arc<QueryStats> {
-        &self.stats
     }
 
     pub fn domain_filter(&self) -> &Arc<dyn DomainFilter> {
@@ -227,13 +158,28 @@ impl ServerOperations {
     }
 
     pub fn get_stats(&self) -> StatsResult {
+        let snapshot = metrics::snapshot();
         StatsResult {
             uptime_seconds: self.uptime_secs(),
             filtering_enabled: self.filtering_enabled.load(Ordering::Relaxed),
-            queries_total: self.stats.queries_total.load(Ordering::Relaxed),
-            queries_blocked: self.stats.queries_blocked.load(Ordering::Relaxed),
-            queries_allowed: self.stats.queries_allowed.load(Ordering::Relaxed),
-            queries_passthrough: self.stats.queries_passthrough.load(Ordering::Relaxed),
+            queries_total: snapshot.queries_total,
+            queries_blocked: snapshot.queries_blocked,
+            queries_allowed: snapshot.queries_allowed,
+            queries_passthrough: snapshot.queries_passthrough,
+            blocklist_hits_total: snapshot.blocklist_hits_total,
+            cache_hits_total: snapshot.cache_hits_total,
+            cache_misses_total: snapshot.cache_misses_total,
+            upstreams: snapshot
+                .upstreams
+                .into_iter()
+                .map(|upstream| UpstreamStatsEntry {
+                    upstream: upstream.upstream,
+                    requests_total: upstream.requests_total,
+                    errors_total: upstream.errors_total,
+                    latency_count: upstream.latency_count,
+                    latency_sum_seconds: upstream.latency_sum_seconds,
+                })
+                .collect(),
             lists: self.domain_filter.list_names(),
         }
     }
@@ -1327,7 +1273,21 @@ pub struct StatsResult {
     pub queries_blocked: u64,
     pub queries_allowed: u64,
     pub queries_passthrough: u64,
+    pub blocklist_hits_total: u64,
+    pub cache_hits_total: u64,
+    pub cache_misses_total: u64,
+    pub upstreams: Vec<UpstreamStatsEntry>,
     pub lists: Vec<ListInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
+pub struct UpstreamStatsEntry {
+    pub upstream: String,
+    pub requests_total: u64,
+    pub errors_total: u64,
+    pub latency_count: u64,
+    pub latency_sum_seconds: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1392,6 +1352,9 @@ pub struct ZoneSearchResultList {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frameworks::metrics::{
+        init_prometheus_metrics, record_dns_query, snapshot as metrics_snapshot, QueryDecision,
+    };
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     struct MockFilter;
@@ -1447,7 +1410,6 @@ mod tests {
             None,
             tx,
             1000,
-            Arc::new(QueryStats::new()),
         )
     }
 
@@ -1526,11 +1488,20 @@ mod tests {
     #[test]
     fn get_stats_returns_counters() {
         let ops = make_ops();
-        ops.stats.queries_total.store(42, Ordering::Relaxed);
-        ops.stats.queries_blocked.store(10, Ordering::Relaxed);
+
+        init_prometheus_metrics().expect("metrics init should succeed");
+        let before = metrics_snapshot();
+        for _ in 0..42 {
+            record_dns_query("dns", QueryDecision::Passthrough);
+        }
+        for _ in 0..10 {
+            record_dns_query("dns", QueryDecision::Blocked);
+        }
+
         let result = ops.get_stats();
-        assert_eq!(result.queries_total, 42);
-        assert_eq!(result.queries_blocked, 10);
+        assert_eq!(result.queries_total, before.queries_total + 52);
+        assert_eq!(result.queries_blocked, before.queries_blocked + 10);
+        assert_eq!(result.queries_passthrough, before.queries_passthrough + 42);
         assert!(result.filtering_enabled);
     }
 
@@ -1550,7 +1521,6 @@ mod tests {
             Some(Arc::new(Mutex::new(QueryLog::new(100)))),
             tx,
             1000,
-            Arc::new(QueryStats::new()),
         );
         let result = ops.get_query_log();
         assert!(result.is_ok());
@@ -1606,7 +1576,6 @@ mod tests {
             None,
             tx,
             1000,
-            Arc::new(QueryStats::new()),
         );
         let result = ops.trigger_reload().await;
         assert!(result.is_ok());
@@ -1625,7 +1594,6 @@ mod tests {
             None,
             tx,
             1000,
-            Arc::new(QueryStats::new()),
         );
         let result = ops.trigger_reload().await;
         assert!(result.is_err());

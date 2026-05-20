@@ -212,7 +212,7 @@ pub fn metrics_enabled() -> bool {
 
 /// In-memory snapshot of all counters, used to serve both `/metrics` and
 /// `/api/v1/stats` from a single source of truth.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct MetricsSnapshot {
     pub queries_total: u64,
     pub queries_blocked: u64,
@@ -226,7 +226,7 @@ pub struct MetricsSnapshot {
 
 /// Per-upstream counters and latency aggregates derived from the same
 /// in-memory prometheus primitives that back `/metrics`.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct UpstreamSnapshot {
     pub upstream: String,
     pub requests_total: u64,
@@ -298,6 +298,21 @@ pub fn snapshot() -> MetricsSnapshot {
 mod tests {
     use super::*;
 
+    fn metric_value(output: &str, metric_prefix: &str) -> f64 {
+        output
+            .lines()
+            .find_map(|line| {
+                if !line.starts_with(metric_prefix) {
+                    return None;
+                }
+                if line.starts_with('#') {
+                    return None;
+                }
+                line.split_whitespace().nth(1)?.parse::<f64>().ok()
+            })
+            .expect("metric must exist in exposition output")
+    }
+
     #[test]
     fn test_query_decision_enum() {
         assert_eq!(QueryDecision::Blocked, QueryDecision::Blocked);
@@ -321,5 +336,69 @@ mod tests {
         assert!(output.contains("cache_hits_total"));
         assert!(output.contains("upstream_request_duration_seconds"));
         assert!(output.contains("upstream=\"udp://1.1.1.1:53\""));
+    }
+
+    #[test]
+    fn snapshot_matches_prometheus_output() {
+        init_prometheus_metrics().expect("metrics init should succeed");
+
+        record_dns_query("dns", QueryDecision::Passthrough);
+        record_dns_query("dns", QueryDecision::Blocked);
+        record_blocklist_hit(None);
+        record_cache_operation(true);
+        record_cache_operation(false);
+        record_upstream_request("udp://9.9.9.9:53", 0.01, Some("timeout"));
+
+        let snapshot = snapshot();
+        let output = collect_metrics().expect("metrics collection should succeed");
+
+        assert_eq!(
+            snapshot.queries_total as f64,
+            metric_value(&output, "dns_queries_total ")
+        );
+        assert_eq!(
+            snapshot.queries_blocked as f64,
+            metric_value(&output, "dns_queries_blocked ")
+        );
+        assert_eq!(
+            snapshot.blocklist_hits_total as f64,
+            metric_value(&output, "blocklist_hits_total ")
+        );
+        assert_eq!(
+            snapshot.cache_hits_total as f64,
+            metric_value(&output, "cache_hits_total ")
+        );
+        assert_eq!(
+            snapshot.cache_misses_total as f64,
+            metric_value(&output, "cache_misses_total ")
+        );
+
+        let upstream = snapshot
+            .upstreams
+            .iter()
+            .find(|u| u.upstream == "udp://9.9.9.9:53")
+            .expect("snapshot upstream must exist");
+
+        assert_eq!(
+            upstream.latency_count as f64,
+            metric_value(
+                &output,
+                "upstream_request_duration_seconds_count{upstream=\"udp://9.9.9.9:53\"}"
+            )
+        );
+        assert_eq!(
+            upstream.latency_sum_seconds,
+            metric_value(
+                &output,
+                "upstream_request_duration_seconds_sum{upstream=\"udp://9.9.9.9:53\"}"
+            )
+        );
+        assert_eq!(
+            upstream.errors_total as f64,
+            metric_value(
+                &output,
+                "upstream_errors_total{error=\"timeout\",upstream=\"udp://9.9.9.9:53\"}"
+            )
+        );
     }
 }

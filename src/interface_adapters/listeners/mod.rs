@@ -143,7 +143,3 @@ fn configure_socket(socket: &Socket, addr: SocketAddr) -> io::Result<()> {
     }
     Ok(())
 }
-
-/// Re-export of [`QueryStats`] for backward compatibility.
-#[cfg(any(feature = "http-api", feature = "mcp"))]
-pub use crate::use_cases::server_operations::QueryStats as ApiStats;
