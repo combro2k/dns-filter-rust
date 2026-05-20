@@ -13,14 +13,14 @@ use utoipa::OpenApi;
 
 use crate::use_cases::filtering::ListInfo;
 use crate::use_cases::repository_types::{
-    FilterListRecord, UpstreamServerRecord, ZoneDiscoveryRecord, ZoneRecord,
+    FilterListRecord, ResolverConfigRecord, UpstreamServerRecord, ZoneDiscoveryRecord, ZoneRecord,
 };
 use crate::use_cases::server_operations::{
     CreateFilterListInput, CreateUpstreamServerInput, CreateZoneDiscoveryInput, CreateZoneInput,
     DeleteResult, FilterStatusResult, FilterToggleResult, HealthResult, ListActionResult,
     QueryLogResult, RefreshAllResult, RefreshResult, ReloadResult, ServerOperationError,
-    ServerOperations, StatsResult, UpdateFilterListInput, UpdateUpstreamServerInput,
-    UpdateZoneDiscoveryInput, UpdateZoneInput,
+    ServerOperations, StatsResult, UpdateFilterListInput, UpdateResolverConfigInput,
+    UpdateUpstreamServerInput, UpdateZoneDiscoveryInput, UpdateZoneInput,
 };
 
 use super::auth::bearer_auth_middleware;
@@ -112,6 +112,8 @@ fn json_error(status: StatusCode, message: &str) -> Response {
         handle_add_allowlist,
         handle_update_allowlist,
         handle_delete_allowlist,
+        handle_get_resolver_config,
+        handle_update_resolver_config,
         handle_list_upstreams,
         handle_add_upstream,
         handle_update_upstream,
@@ -132,9 +134,11 @@ fn json_error(status: StatusCode, message: &str) -> Response {
         QueryLogResult, ListActionResult,
         RefreshResult, RefreshAllResult, DeleteResult,
         ListInfo, FilterListRecord, UpstreamServerRecord, ZoneRecord,
+        ResolverConfigRecord,
         crate::use_cases::repository_types::ZoneServerRecord,
         ZoneDiscoveryRecord,
         CreateFilterListInput, UpdateFilterListInput,
+        UpdateResolverConfigInput,
         CreateUpstreamServerInput, UpdateUpstreamServerInput,
         CreateZoneInput, UpdateZoneInput,
         crate::use_cases::server_operations::CreateZoneServerInput,
@@ -195,6 +199,11 @@ pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> anyhow:
         .route("/api/v1/allowlists/{name}", put(handle_update_allowlist))
         .route("/api/v1/allowlists/{name}", delete(handle_delete_allowlist))
         // Upstream server CRUD
+        .route("/api/v1/resolver-config", get(handle_get_resolver_config))
+        .route(
+            "/api/v1/resolver-config",
+            put(handle_update_resolver_config),
+        )
         .route("/api/v1/upstreams", get(handle_list_upstreams))
         .route("/api/v1/upstreams", post(handle_add_upstream))
         .route("/api/v1/upstreams/{id}", put(handle_update_upstream))
@@ -712,6 +721,50 @@ async fn handle_delete_allowlist(
 
 #[utoipa::path(
     get,
+    path = "/api/v1/resolver-config",
+    tag = "Upstreams",
+    summary = "Get global resolver configuration",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Resolver config", body = ResolverConfigRecord),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    ),
+)]
+async fn handle_get_resolver_config(State(state): State<Arc<ApiState>>) -> Response {
+    match state.ops.get_resolver_config().await {
+        Ok(config) => json_ok(config),
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/resolver-config",
+    tag = "Upstreams",
+    summary = "Update global resolver configuration",
+    security(("bearer_auth" = [])),
+    request_body = UpdateResolverConfigInput,
+    responses(
+        (status = 200, description = "Resolver config updated", body = ResolverConfigRecord),
+        (status = 400, description = "Invalid input", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    ),
+)]
+async fn handle_update_resolver_config(
+    State(state): State<Arc<ApiState>>,
+    Json(input): Json<UpdateResolverConfigInput>,
+) -> Response {
+    match state.ops.update_resolver_config(input).await {
+        Ok(config) => {
+            tracing::info!(source = "api", "resolver config updated via API");
+            json_ok(config)
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+#[utoipa::path(
+    get,
     path = "/api/v1/upstreams",
     tag = "Upstreams",
     summary = "List all upstream servers",
@@ -1080,5 +1133,13 @@ mod tests {
     fn op_error_channel_closed_maps_to_500() {
         let resp = op_error_to_response(ServerOperationError::ChannelClosed);
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn openapi_includes_resolver_config_paths_and_schema() {
+        let spec = ApiDoc::openapi().to_json().unwrap();
+        assert!(spec.contains("/api/v1/resolver-config"));
+        assert!(spec.contains("UpdateResolverConfigInput"));
+        assert!(spec.contains("ResolverConfigRecord"));
     }
 }

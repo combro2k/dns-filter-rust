@@ -39,6 +39,9 @@ pub struct FilteringConfigRecord {
 pub struct ResolverConfigRecord {
     pub strategy: String,
     pub bootstrap_resolvers: Vec<String>,
+    pub dns_cache_enabled: bool,
+    pub dns_cache_min_ttl_seconds: Option<i64>,
+    pub dns_cache_max_ttl_seconds: Option<i64>,
 }
 
 /// An upstream DNS server entry.

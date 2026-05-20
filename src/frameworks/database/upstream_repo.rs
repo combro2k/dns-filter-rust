@@ -19,7 +19,7 @@ impl SqlxUpstreamConfigRepository {
 impl UpstreamConfigRepository for SqlxUpstreamConfigRepository {
     async fn get_resolver_config(&self) -> Result<ResolverConfigRecord> {
         let row = sqlx::query_as::<_, ResolverConfigRow>(
-            "SELECT strategy FROM resolver_config WHERE id = 1",
+            "SELECT strategy, dns_cache_enabled, dns_cache_min_ttl_seconds, dns_cache_max_ttl_seconds FROM resolver_config WHERE id = 1",
         )
         .fetch_one(&self.pool)
         .await
@@ -35,12 +35,20 @@ impl UpstreamConfigRepository for SqlxUpstreamConfigRepository {
         Ok(ResolverConfigRecord {
             strategy: row.strategy,
             bootstrap_resolvers: bootstrap_rows.into_iter().map(|r| r.address).collect(),
+            dns_cache_enabled: row.dns_cache_enabled,
+            dns_cache_min_ttl_seconds: row.dns_cache_min_ttl_seconds,
+            dns_cache_max_ttl_seconds: row.dns_cache_max_ttl_seconds,
         })
     }
 
     async fn update_resolver_config(&self, record: &ResolverConfigRecord) -> Result<()> {
-        sqlx::query("UPDATE resolver_config SET strategy = ? WHERE id = 1")
+        sqlx::query(
+            "UPDATE resolver_config SET strategy = ?, dns_cache_enabled = ?, dns_cache_min_ttl_seconds = ?, dns_cache_max_ttl_seconds = ? WHERE id = 1",
+        )
             .bind(&record.strategy)
+            .bind(record.dns_cache_enabled)
+            .bind(record.dns_cache_min_ttl_seconds)
+            .bind(record.dns_cache_max_ttl_seconds)
             .execute(&self.pool)
             .await
             .context("failed to update resolver config")?;
@@ -177,6 +185,9 @@ impl UpstreamConfigRepository for SqlxUpstreamConfigRepository {
 #[derive(sqlx::FromRow)]
 struct ResolverConfigRow {
     strategy: String,
+    dns_cache_enabled: bool,
+    dns_cache_min_ttl_seconds: Option<i64>,
+    dns_cache_max_ttl_seconds: Option<i64>,
 }
 
 #[derive(sqlx::FromRow)]

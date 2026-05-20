@@ -119,11 +119,23 @@ async fn seed_filtering_config(config: &DnsFilterConfig, repos: &Repositories) -
 }
 
 async fn seed_resolver_config(config: &DnsFilterConfig, repos: &Repositories) -> Result<()> {
+    let cache = config.resolvers.cache.as_ref();
     repos
         .upstream_config
         .update_resolver_config(&ResolverConfigRecord {
             strategy: config.resolvers.strategy.clone(),
             bootstrap_resolvers: config.resolvers.bootstrap_resolvers.clone(),
+            dns_cache_enabled: cache.map(|cache| cache.enabled).unwrap_or(true),
+            dns_cache_min_ttl_seconds: cache
+                .and_then(|cache| cache.min_ttl.as_deref())
+                .map(crate::use_cases::filtering::parse_interval)
+                .transpose()?
+                .map(|duration| duration.as_secs() as i64),
+            dns_cache_max_ttl_seconds: cache
+                .and_then(|cache| cache.max_ttl.as_deref())
+                .map(crate::use_cases::filtering::parse_interval)
+                .transpose()?
+                .map(|duration| duration.as_secs() as i64),
         })
         .await
         .context("seeding resolver config")?;

@@ -4,7 +4,7 @@
     not(feature = "db-mysql"),
     not(feature = "db-postgres")
 ))]
-mod tests {
+mod repository_tests {
     use crate::frameworks::database::{
         SqlxFilterCacheRepository, SqlxFilterListRepository, SqlxFilteringConfigRepository,
         SqlxUpstreamConfigRepository, SqlxZoneDiscoveryRepository, SqlxZoneRepository,
@@ -50,6 +50,18 @@ mod tests {
 
         let migration_003 = include_str!("../../../migrations/sqlite/003_add_outbound_routing.sql");
         for statement in migration_003.split(';') {
+            let trimmed = statement.trim();
+            if !trimmed.is_empty() {
+                sqlx::query(trimmed)
+                    .execute(&pool)
+                    .await
+                    .unwrap_or_else(|e| panic!("migration statement failed: {e}\nSQL: {trimmed}"));
+            }
+        }
+
+        let migration_004 =
+            include_str!("../../../migrations/sqlite/004_add_dns_response_cache.sql");
+        for statement in migration_004.split(';') {
             let trimmed = statement.trim();
             if !trimmed.is_empty() {
                 sqlx::query(trimmed)
@@ -191,16 +203,23 @@ mod tests {
         // Default resolver config
         let config = repo.get_resolver_config().await.unwrap();
         assert_eq!(config.strategy, "round_robin");
+        assert!(config.dns_cache_enabled);
 
         // Update resolver config
         repo.update_resolver_config(&ResolverConfigRecord {
             strategy: "failover".to_string(),
             bootstrap_resolvers: vec!["8.8.8.8".to_string()],
+            dns_cache_enabled: false,
+            dns_cache_min_ttl_seconds: Some(15),
+            dns_cache_max_ttl_seconds: Some(300),
         })
         .await
         .unwrap();
         let config = repo.get_resolver_config().await.unwrap();
         assert_eq!(config.strategy, "failover");
+        assert!(!config.dns_cache_enabled);
+        assert_eq!(config.dns_cache_min_ttl_seconds, Some(15));
+        assert_eq!(config.dns_cache_max_ttl_seconds, Some(300));
 
         // Create server
         repo.create_server(&UpstreamServerRecord {

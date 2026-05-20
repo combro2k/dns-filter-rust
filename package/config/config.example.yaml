@@ -167,6 +167,14 @@ resolvers:
   # Load-balancing strategy: "round_robin", "random", or "failover"
   strategy: "round_robin"
 
+  # DNS response cache. Enabled by default; set enabled: false to disable.
+  # Positive and negative responses are cached using upstream TTLs,
+  # optionally bounded by min/max TTL caps.
+  # cache:
+  #   enabled: false
+  #   min_ttl: "5s"
+  #   max_ttl: "1h"
+
   # Resolvers used to look up upstream hostnames (e.g. DoH/DoT server names)
   bootstrap_resolvers:
     - "1.1.1.1"

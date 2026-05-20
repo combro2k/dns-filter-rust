@@ -14,9 +14,10 @@ use crate::entities::filter::FilterDecision;
 use crate::entities::query_log::{QueryLog, QueryLogEntry};
 use crate::frameworks::metrics;
 use crate::use_cases::config_from_db::Repositories;
-use crate::use_cases::filtering::{DomainFilter, ListInfo};
+use crate::use_cases::filtering::{parse_interval, DomainFilter, ListInfo};
 use crate::use_cases::repository_types::{
-    FilterListRecord, UpstreamServerRecord, ZoneDiscoveryRecord, ZoneRecord, ZoneServerRecord,
+    FilterListRecord, ResolverConfigRecord, UpstreamServerRecord, ZoneDiscoveryRecord, ZoneRecord,
+    ZoneServerRecord,
 };
 use crate::use_cases::zone_registry::{ZoneInfo, ZoneRegistry, ZoneSearchResult};
 
@@ -434,6 +435,59 @@ impl ServerOperations {
             .get_all_servers()
             .await
             .map_err(ServerOperationError::from)
+    }
+
+    pub async fn get_resolver_config(&self) -> Result<ResolverConfigRecord, ServerOperationError> {
+        let repos = self.repos()?;
+        repos
+            .upstream_config
+            .get_resolver_config()
+            .await
+            .map_err(ServerOperationError::from)
+    }
+
+    pub async fn update_resolver_config(
+        &self,
+        input: UpdateResolverConfigInput,
+    ) -> Result<ResolverConfigRecord, ServerOperationError> {
+        let repos = self.repos()?;
+        let mut record = repos
+            .upstream_config
+            .get_resolver_config()
+            .await
+            .map_err(ServerOperationError::from)?;
+
+        if let Some(strategy) = input.strategy {
+            validate_upstream_strategy(&strategy)?;
+            record.strategy = strategy;
+        }
+        if let Some(bootstrap_resolvers) = input.bootstrap_resolvers {
+            validate_bootstrap_resolvers(&bootstrap_resolvers)?;
+            record.bootstrap_resolvers = bootstrap_resolvers;
+        }
+        if let Some(enabled) = input.dns_cache_enabled {
+            record.dns_cache_enabled = enabled;
+        }
+        if let Some(min_ttl) = input.dns_cache_min_ttl {
+            record.dns_cache_min_ttl_seconds = parse_cache_ttl_secs(min_ttl, "dns_cache_min_ttl")?;
+        }
+        if let Some(max_ttl) = input.dns_cache_max_ttl {
+            record.dns_cache_max_ttl_seconds = parse_cache_ttl_secs(max_ttl, "dns_cache_max_ttl")?;
+        }
+
+        validate_resolver_cache_bounds(
+            record.dns_cache_min_ttl_seconds,
+            record.dns_cache_max_ttl_seconds,
+        )?;
+
+        repos
+            .upstream_config
+            .update_resolver_config(&record)
+            .await
+            .map_err(ServerOperationError::from)?;
+
+        self.reload_after_mutation().await;
+        Ok(record)
     }
 
     pub async fn add_upstream_server(
@@ -981,6 +1035,31 @@ pub struct UpdateUpstreamServerInput {
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
+pub struct UpdateResolverConfigInput {
+    /// Resolver strategy: round_robin, random, or failover
+    pub strategy: Option<String>,
+    /// Bootstrap resolvers as IP or IP:port entries
+    pub bootstrap_resolvers: Option<Vec<String>>,
+    /// Enable/disable DNS response cache
+    pub dns_cache_enabled: Option<bool>,
+    /// Cache min TTL. Pass JSON null to clear; omit to keep unchanged.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[cfg_attr(
+        feature = "http-api",
+        schema(value_type = Option<String>, nullable = true)
+    )]
+    pub dns_cache_min_ttl: Option<Option<String>>,
+    /// Cache max TTL. Pass JSON null to clear; omit to keep unchanged.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[cfg_attr(
+        feature = "http-api",
+        schema(value_type = Option<String>, nullable = true)
+    )]
+    pub dns_cache_max_ttl: Option<Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct CreateZoneInput {
     pub zone: String,
     pub enabled: Option<bool>,
@@ -1124,6 +1203,83 @@ fn validate_upstream_protocol(protocol: &str) -> Result<(), ServerOperationError
             "invalid upstream protocol '{protocol}'; must be one of: dns, dot, doh, doq, recursive"
         ))),
     }
+}
+
+fn validate_upstream_strategy(strategy: &str) -> Result<(), ServerOperationError> {
+    match strategy {
+        "round_robin" | "random" | "failover" => Ok(()),
+        _ => Err(ServerOperationError::InvalidInput(format!(
+            "invalid strategy '{strategy}'; must be one of: round_robin, random, failover"
+        ))),
+    }
+}
+
+fn validate_bootstrap_resolvers(values: &[String]) -> Result<(), ServerOperationError> {
+    if values.is_empty() {
+        return Err(ServerOperationError::InvalidInput(
+            "bootstrap_resolvers must contain at least one entry".into(),
+        ));
+    }
+
+    for value in values {
+        validate_bootstrap_resolver_address(value)?;
+    }
+
+    Ok(())
+}
+
+fn validate_bootstrap_resolver_address(value: &str) -> Result<(), ServerOperationError> {
+    if value.parse::<std::net::SocketAddr>().is_ok() || value.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+
+    Err(ServerOperationError::InvalidInput(format!(
+        "invalid bootstrap resolver address '{value}'; expected <ip> or <ip>:port"
+    )))
+}
+
+fn parse_cache_ttl_secs(
+    value: Option<String>,
+    field_name: &str,
+) -> Result<Option<i64>, ServerOperationError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ServerOperationError::InvalidInput(format!(
+            "{field_name} must not be empty"
+        )));
+    }
+
+    let duration = parse_interval(trimmed).map_err(|error| {
+        ServerOperationError::InvalidInput(format!("invalid {field_name}: {trimmed} ({error})"))
+    })?;
+
+    let seconds = i64::try_from(duration.as_secs()).map_err(|_| {
+        ServerOperationError::InvalidInput(format!(
+            "{field_name} is too large; maximum supported value is {} seconds",
+            i64::MAX
+        ))
+    })?;
+
+    Ok(Some(seconds))
+}
+
+fn validate_resolver_cache_bounds(
+    min_ttl_seconds: Option<i64>,
+    max_ttl_seconds: Option<i64>,
+) -> Result<(), ServerOperationError> {
+    if let (Some(min), Some(max)) = (min_ttl_seconds, max_ttl_seconds) {
+        if min > max {
+            return Err(ServerOperationError::InvalidInput(
+                "dns_cache_min_ttl must be less than or equal to dns_cache_max_ttl".into(),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_upstream_address(protocol: &str, address: &str) -> Result<(), ServerOperationError> {
@@ -1620,6 +1776,29 @@ mod tests {
             serde_json::from_str(r#"{"bind_address": "10.0.0.1", "fwmark": 42}"#).unwrap();
         assert_eq!(input.bind_address, Some(Some("10.0.0.1".to_string())));
         assert_eq!(input.fwmark, Some(Some(42)));
+    }
+
+    #[test]
+    fn update_resolver_config_input_absent_fields_yield_none() {
+        let input: UpdateResolverConfigInput = serde_json::from_str("{}").unwrap();
+        assert!(input.dns_cache_min_ttl.is_none());
+        assert!(input.dns_cache_max_ttl.is_none());
+    }
+
+    #[test]
+    fn update_resolver_config_input_null_ttls_yield_some_none() {
+        let input: UpdateResolverConfigInput =
+            serde_json::from_str(r#"{"dns_cache_min_ttl": null, "dns_cache_max_ttl": null}"#)
+                .unwrap();
+        assert_eq!(input.dns_cache_min_ttl, Some(None));
+        assert_eq!(input.dns_cache_max_ttl, Some(None));
+    }
+
+    #[test]
+    fn validate_bootstrap_resolver_addresses() {
+        assert!(validate_bootstrap_resolver_address("1.1.1.1").is_ok());
+        assert!(validate_bootstrap_resolver_address("1.1.1.1:53").is_ok());
+        assert!(validate_bootstrap_resolver_address("bad-hostname").is_err());
     }
 
     #[test]

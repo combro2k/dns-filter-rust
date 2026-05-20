@@ -11,8 +11,9 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::frameworks::config::schema::{
-    DnsFilterConfig, FilteringConfig, NamedList, ResolverZoneConfig, ResolversConfig,
-    UpstreamServer, ZoneDiscoveryConfig, ZoneServerAuthenticationConfig, ZoneServerConfig,
+    DnsFilterConfig, FilteringConfig, NamedList, ResolverCacheConfig, ResolverZoneConfig,
+    ResolversConfig, UpstreamServer, ZoneDiscoveryConfig, ZoneServerAuthenticationConfig,
+    ZoneServerConfig,
 };
 use crate::use_cases::repositories::{
     FilterCacheRepository, FilterListRepository, FilteringConfigRepository,
@@ -169,6 +170,15 @@ pub async fn apply_db_config(config: &mut DnsFilterConfig, repos: &Repositories)
     config.resolvers = ResolversConfig {
         strategy: resolver_record.strategy,
         bootstrap_resolvers,
+        cache: Some(ResolverCacheConfig {
+            enabled: resolver_record.dns_cache_enabled,
+            min_ttl: resolver_record
+                .dns_cache_min_ttl_seconds
+                .map(|seconds| format!("{seconds}s")),
+            max_ttl: resolver_record
+                .dns_cache_max_ttl_seconds
+                .map(|seconds| format!("{seconds}s")),
+        }),
         servers,
         zones,
         zone_discovery,

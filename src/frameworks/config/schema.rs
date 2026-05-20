@@ -322,11 +322,20 @@ pub struct ResolversConfig {
     pub strategy: String,
     #[serde(default = "default_bootstrap_resolvers")]
     pub bootstrap_resolvers: Vec<String>,
+    pub cache: Option<ResolverCacheConfig>,
     #[serde(default)]
     pub zones: Vec<ResolverZoneConfig>,
     #[serde(default)]
     pub zone_discovery: Vec<ZoneDiscoveryConfig>,
     pub servers: Vec<UpstreamServer>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResolverCacheConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub min_ttl: Option<String>,
+    pub max_ttl: Option<String>,
 }
 
 /// Configuration for automatic zone discovery from a JSON index endpoint.

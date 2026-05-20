@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Opt-out DNS response cache settings**: added global `resolvers.cache` configuration plumbing with database-backed persistence for `enabled`, `min_ttl`, and `max_ttl`. DNS response caching is on by default and can be disabled explicitly with `resolvers.cache.enabled: false`.
+- **Runtime resolver-config management (API + MCP)**: added DB-backed global resolver configuration endpoints/tools to read and update `strategy`, `bootstrap_resolvers`, and DNS cache settings (`dns_cache_enabled`, `dns_cache_min_ttl`, `dns_cache_max_ttl`) with validation and reload-on-change behavior.
 - **Outbound and zone-forwarded DoQ support**: added a DNS-over-QUIC upstream client with hostname parsing, bootstrap A/AAAA resolution, QUIC/TLS connection reuse, and outbound routing support including source-IP binding and Linux `SO_MARK` for fwmark-based policy routing. Global upstream resolvers and zone-forwarding servers now accept `protocol: doq`.
 - **Prometheus metrics listener and instrumentation**: implemented `listen.metrics` as a dedicated HTTP listener exposing `/metrics` in Prometheus text format. Added counters and histogram for DNS query outcomes (blocked/allowed/passthrough), blocklist hits, filter-document cache restore hits/misses, upstream request latency, and upstream errors.
 

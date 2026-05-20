@@ -27,7 +27,8 @@ use crate::use_cases::request_pipeline::{
     DnsServfailFallbackStage, DnsUpstreamStage,
 };
 use crate::use_cases::upstream_resolver::{
-    InstrumentedUpstreamResolver, StrategyUpstreamResolver, UpstreamResolver,
+    CachedUpstreamResolver, InstrumentedUpstreamResolver, ResolverCacheSettings,
+    StrategyUpstreamResolver, UpstreamResolver,
 };
 use crate::use_cases::zone_authority::{ZoneAuthorityResolver, ZoneSourceAuth};
 use crate::use_cases::zone_discovery::build_zone_discovery_entries;
@@ -251,21 +252,24 @@ fn normalize_lexical(path: &Path) -> PathBuf {
 
 pub fn build_upstream_resolver(config: &DnsFilterConfig) -> Result<Arc<dyn UpstreamResolver>> {
     let global_outbound = config.outbound.as_ref();
+    let cache_settings = build_resolver_cache_settings(config)?;
     build_upstream_resolver_group(
         &config.resolvers.strategy,
         &config.resolvers.bootstrap_resolvers,
         &config.resolvers.servers,
         global_outbound,
+        &cache_settings,
     )
 }
 
 pub fn build_zone_entries(config: &DnsFilterConfig) -> Result<Vec<ZoneEntry>> {
+    let cache_settings = build_resolver_cache_settings(config)?;
     let mut entries: Vec<ZoneEntry> = config
         .resolvers
         .zones
         .iter()
         .filter(|zone| zone.enabled)
-        .map(|zone| build_zone_entry(zone, &config.resolvers.bootstrap_resolvers))
+        .map(|zone| build_zone_entry(zone, &config.resolvers.bootstrap_resolvers, &cache_settings))
         .collect::<Result<Vec<_>>>()?;
 
     // Collect zone names from manual config (used to skip conflicts in discovery)
@@ -336,6 +340,31 @@ pub fn build_domain_filter_with_cache(
     Ok(Arc::new(engine))
 }
 
+fn build_resolver_cache_settings(config: &DnsFilterConfig) -> Result<ResolverCacheSettings> {
+    let cache = config.resolvers.cache.as_ref();
+    let settings = ResolverCacheSettings {
+        enabled: cache.map(|cache| cache.enabled).unwrap_or(true),
+        min_ttl: cache
+            .and_then(|cache| cache.min_ttl.as_deref())
+            .map(|value| {
+                parse_interval(value).map_err(|error| {
+                    anyhow!("invalid resolvers.cache.min_ttl: {} ({error})", value)
+                })
+            })
+            .transpose()?,
+        max_ttl: cache
+            .and_then(|cache| cache.max_ttl.as_deref())
+            .map(|value| {
+                parse_interval(value).map_err(|error| {
+                    anyhow!("invalid resolvers.cache.max_ttl: {} ({error})", value)
+                })
+            })
+            .transpose()?,
+    };
+    settings.validate().map_err(anyhow::Error::msg)?;
+    Ok(settings)
+}
+
 pub fn build_any_query_policy(config: &DnsFilterConfig) -> Result<AnyQueryPolicy> {
     let Some(policy) = config
         .filtering
@@ -400,6 +429,7 @@ pub fn build_dns_request_pipeline_full(
 fn build_zone_entry(
     zone: &ResolverZoneConfig,
     bootstrap_resolvers: &[String],
+    cache_settings: &ResolverCacheSettings,
 ) -> Result<ZoneEntry> {
     let enabled_servers: Vec<&ZoneServerConfig> =
         zone.servers.iter().filter(|s| s.enabled).collect();
@@ -453,6 +483,7 @@ fn build_zone_entry(
                 strategy,
                 bootstrap_resolvers,
                 &upstream_servers,
+                cache_settings,
             )
             .map_err(|error| anyhow!("invalid resolver zone '{}': {error}", zone.zone))?;
             ZoneEntry::new(
@@ -594,6 +625,7 @@ fn build_zone_upstream_resolver_group(
     strategy: &str,
     bootstrap_resolvers: &[String],
     servers: &[&ZoneServerConfig],
+    cache_settings: &ResolverCacheSettings,
 ) -> Result<Arc<dyn UpstreamResolver>> {
     let strategy = UpstreamStrategy::from_str(strategy)
         .map_err(|_| anyhow!("invalid upstream strategy: {strategy}"))?;
@@ -616,7 +648,16 @@ fn build_zone_upstream_resolver_group(
         .map(|server| build_single_zone_upstream_resolver(server, &bootstrap_addrs))
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(Arc::new(StrategyUpstreamResolver::new(resolvers, strategy)))
+    let resolver: Arc<dyn UpstreamResolver> =
+        Arc::new(StrategyUpstreamResolver::new(resolvers, strategy));
+    if cache_settings.enabled {
+        Ok(Arc::new(CachedUpstreamResolver::new(
+            resolver,
+            cache_settings.clone(),
+        )))
+    } else {
+        Ok(resolver)
+    }
 }
 
 fn build_single_zone_upstream_resolver(
@@ -690,6 +731,7 @@ fn build_upstream_resolver_group(
     bootstrap_resolvers: &[String],
     servers: &[UpstreamServer],
     global_outbound: Option<&crate::frameworks::config::schema::OutboundConfig>,
+    cache_settings: &ResolverCacheSettings,
 ) -> Result<Arc<dyn UpstreamResolver>> {
     let strategy = UpstreamStrategy::from_str(strategy)
         .map_err(|_| anyhow!("invalid upstream strategy: {strategy}"))?;
@@ -717,7 +759,16 @@ fn build_upstream_resolver_group(
         .map(|server| build_single_upstream_resolver(server, &bootstrap_resolvers, global_outbound))
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(Arc::new(StrategyUpstreamResolver::new(resolvers, strategy)))
+    let resolver: Arc<dyn UpstreamResolver> =
+        Arc::new(StrategyUpstreamResolver::new(resolvers, strategy));
+    if cache_settings.enabled {
+        Ok(Arc::new(CachedUpstreamResolver::new(
+            resolver,
+            cache_settings.clone(),
+        )))
+    } else {
+        Ok(resolver)
+    }
 }
 
 fn build_single_upstream_resolver(
@@ -844,9 +895,9 @@ mod tests {
 
     use crate::frameworks::config::schema::{
         ControlConfig, DnsFilterConfig, FilteringConfig, ListenConfig, LoggingConfig, NamedList,
-        ResolverZoneConfig, ResolversConfig, SecurityConfig, SocketConfig, StdoutLogConfig,
-        TlsConfig, TlsSocketConfig, UpstreamServer, ZoneServerAuthenticationConfig,
-        ZoneServerConfig,
+        ResolverCacheConfig, ResolverZoneConfig, ResolversConfig, SecurityConfig, SocketConfig,
+        StdoutLogConfig, TlsConfig, TlsSocketConfig, UpstreamServer,
+        ZoneServerAuthenticationConfig, ZoneServerConfig,
     };
 
     use super::*;
@@ -882,6 +933,11 @@ mod tests {
             resolvers: ResolversConfig {
                 strategy: "round_robin".into(),
                 bootstrap_resolvers: vec!["1.1.1.1".into()],
+                cache: Some(ResolverCacheConfig {
+                    enabled: true,
+                    min_ttl: None,
+                    max_ttl: None,
+                }),
                 zones: Vec::new(),
                 zone_discovery: Vec::new(),
                 servers,

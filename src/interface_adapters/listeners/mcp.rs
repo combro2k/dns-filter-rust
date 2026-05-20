@@ -19,8 +19,8 @@ use crate::interface_adapters::listeners::auth::bearer_auth_middleware;
 use crate::use_cases::server_operations::{
     deserialize_optional_field, AuthenticationInput, CreateFilterListInput,
     CreateUpstreamServerInput, CreateZoneDiscoveryInput, CreateZoneInput, CreateZoneServerInput,
-    ServerOperations, UpdateFilterListInput, UpdateUpstreamServerInput, UpdateZoneDiscoveryInput,
-    UpdateZoneInput,
+    ServerOperations, UpdateFilterListInput, UpdateResolverConfigInput, UpdateUpstreamServerInput,
+    UpdateZoneDiscoveryInput, UpdateZoneInput,
 };
 
 use super::{bind_tcp, parse_bind_addrs};
@@ -180,6 +180,22 @@ struct UpdateUpstreamServerParams {
     fwmark: Option<Option<u32>>,
     /// New sort order
     sort_order: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UpdateResolverConfigParams {
+    /// Resolver strategy: round_robin, random, or failover
+    strategy: Option<String>,
+    /// Bootstrap resolvers as IP or IP:port entries
+    bootstrap_resolvers: Option<Vec<String>>,
+    /// Enable or disable DNS response cache
+    dns_cache_enabled: Option<bool>,
+    /// DNS cache min TTL (e.g. "5s", "1m"). Pass null to clear.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    dns_cache_min_ttl: Option<Option<String>>,
+    /// DNS cache max TTL (e.g. "1h"). Pass null to clear.
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    dns_cache_max_ttl: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -869,6 +885,39 @@ impl McpHandler {
     // --- Upstream server CRUD tools ---
 
     #[tool(
+        description = "Get global resolver configuration (strategy, bootstrap resolvers, DNS cache settings)"
+    )]
+    async fn get_resolver_config(&self) -> String {
+        match self.state.ops.get_resolver_config().await {
+            Ok(config) => mcp_json(&config),
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Update global resolver configuration. Supports strategy, bootstrap_resolvers, and DNS cache settings. Triggers a config reload."
+    )]
+    async fn update_resolver_config(
+        &self,
+        Parameters(params): Parameters<UpdateResolverConfigParams>,
+    ) -> String {
+        let input = UpdateResolverConfigInput {
+            strategy: params.strategy,
+            bootstrap_resolvers: params.bootstrap_resolvers,
+            dns_cache_enabled: params.dns_cache_enabled,
+            dns_cache_min_ttl: params.dns_cache_min_ttl,
+            dns_cache_max_ttl: params.dns_cache_max_ttl,
+        };
+        match self.state.ops.update_resolver_config(input).await {
+            Ok(config) => {
+                tracing::info!(source = "mcp", "resolver config updated via MCP");
+                mcp_json(&config)
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
         description = "List all configured upstream resolver servers with their database configuration"
     )]
     async fn list_upstreams(&self) -> String {
@@ -1336,6 +1385,36 @@ mod tests {
         let input: UpdateUpstreamServerParams =
             serde_json::from_str(r#"{"id":"u1","fwmark":null}"#).unwrap();
         assert_eq!(input.fwmark, Some(None));
+    }
+
+    #[test]
+    fn mcp_update_resolver_config_ttls_absent_yield_none() {
+        let input: UpdateResolverConfigParams = serde_json::from_str("{}").unwrap();
+        assert!(input.dns_cache_min_ttl.is_none());
+        assert!(input.dns_cache_max_ttl.is_none());
+    }
+
+    #[test]
+    fn mcp_update_resolver_config_ttls_null_clear_values() {
+        let input: UpdateResolverConfigParams =
+            serde_json::from_str(r#"{"dns_cache_min_ttl":null,"dns_cache_max_ttl":null}"#).unwrap();
+        assert_eq!(input.dns_cache_min_ttl, Some(None));
+        assert_eq!(input.dns_cache_max_ttl, Some(None));
+    }
+
+    #[test]
+    fn mcp_update_resolver_config_parses_strategy_and_bootstrap_resolvers() {
+        let input: UpdateResolverConfigParams = serde_json::from_str(
+            r#"{"strategy":"failover","bootstrap_resolvers":["1.1.1.1","8.8.8.8:53"],"dns_cache_enabled":false}"#,
+        )
+        .unwrap();
+
+        assert_eq!(input.strategy.as_deref(), Some("failover"));
+        assert_eq!(
+            input.bootstrap_resolvers,
+            Some(vec!["1.1.1.1".to_string(), "8.8.8.8:53".to_string()])
+        );
+        assert_eq!(input.dns_cache_enabled, Some(false));
     }
 
     #[test]
