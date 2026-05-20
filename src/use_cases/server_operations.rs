@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,7 +14,7 @@ use crate::entities::query_log::{QueryLog, QueryLogEntry};
 use crate::use_cases::config_from_db::Repositories;
 use crate::use_cases::filtering::{DomainFilter, ListInfo};
 use crate::use_cases::repository_types::{
-    FilterListRecord, ZoneDiscoveryRecord, ZoneRecord, ZoneServerRecord,
+    FilterListRecord, UpstreamServerRecord, ZoneDiscoveryRecord, ZoneRecord, ZoneServerRecord,
 };
 use crate::use_cases::zone_registry::{ZoneInfo, ZoneRegistry, ZoneSearchResult};
 
@@ -437,6 +438,161 @@ impl ServerOperations {
         })
     }
 
+    // --- Upstream server CRUD ---
+
+    pub async fn list_upstream_servers(
+        &self,
+    ) -> Result<Vec<UpstreamServerRecord>, ServerOperationError> {
+        let repos = self.repos()?;
+        repos
+            .upstream_config
+            .get_all_servers()
+            .await
+            .map_err(ServerOperationError::from)
+    }
+
+    pub async fn add_upstream_server(
+        &self,
+        input: CreateUpstreamServerInput,
+    ) -> Result<UpstreamServerRecord, ServerOperationError> {
+        validate_upstream_protocol(&input.protocol)?;
+        validate_upstream_address(&input.address)?;
+        validate_bind_address(input.bind_address.as_deref())?;
+        let fwmark = parse_fwmark(input.fwmark)?;
+
+        let repos = self.repos()?;
+        let sort_order = match input.sort_order {
+            Some(value) => validate_sort_order(value)?,
+            None => repos
+                .upstream_config
+                .get_all_servers()
+                .await
+                .map_err(ServerOperationError::from)?
+                .len() as i32,
+        };
+
+        let auth = input.authentication.as_ref();
+        let record = UpstreamServerRecord {
+            id: Uuid::new_v4().to_string(),
+            enabled: input.enabled.unwrap_or(true),
+            protocol: input.protocol,
+            address: input.address,
+            auth_token: auth.and_then(|a| a.token.clone()),
+            auth_username: auth.and_then(|a| a.username.clone()),
+            auth_password: auth.and_then(|a| a.password.clone()),
+            max_hops: input.max_hops.map(i32::from),
+            nameserver_ip_family: input.nameserver_ip_family,
+            root_hints_path: input.root_hints_path,
+            root_key_path: input.root_key_path,
+            dnssec: input.dnssec.unwrap_or(true),
+            sort_order,
+            bind_address: input.bind_address,
+            fwmark,
+        };
+
+        repos
+            .upstream_config
+            .create_server(&record)
+            .await
+            .map_err(ServerOperationError::from)?;
+
+        self.reload_after_mutation().await;
+        Ok(record)
+    }
+
+    pub async fn update_upstream_server(
+        &self,
+        id: &str,
+        input: UpdateUpstreamServerInput,
+    ) -> Result<UpstreamServerRecord, ServerOperationError> {
+        let repos = self.repos()?;
+        let mut record = repos
+            .upstream_config
+            .get_server_by_id(id)
+            .await
+            .map_err(ServerOperationError::from)?
+            .ok_or_else(|| {
+                ServerOperationError::NotFound(format!("upstream server '{id}' not found"))
+            })?;
+
+        if let Some(enabled) = input.enabled {
+            record.enabled = enabled;
+        }
+        if let Some(protocol) = input.protocol {
+            validate_upstream_protocol(&protocol)?;
+            record.protocol = protocol;
+        }
+        if let Some(address) = input.address {
+            validate_upstream_address(&address)?;
+            record.address = address;
+        }
+        if let Some(authentication) = input.authentication {
+            record.auth_token = authentication.token;
+            record.auth_username = authentication.username;
+            record.auth_password = authentication.password;
+        }
+        if let Some(max_hops) = input.max_hops {
+            record.max_hops = Some(i32::from(max_hops));
+        }
+        if let Some(nameserver_ip_family) = input.nameserver_ip_family {
+            record.nameserver_ip_family = Some(nameserver_ip_family);
+        }
+        if let Some(root_hints_path) = input.root_hints_path {
+            record.root_hints_path = Some(root_hints_path);
+        }
+        if let Some(root_key_path) = input.root_key_path {
+            record.root_key_path = Some(root_key_path);
+        }
+        if let Some(dnssec) = input.dnssec {
+            record.dnssec = dnssec;
+        }
+        if let Some(bind_address) = input.bind_address {
+            validate_bind_address(Some(&bind_address))?;
+            record.bind_address = Some(bind_address);
+        }
+        if let Some(fwmark) = input.fwmark {
+            record.fwmark = Some(parse_single_fwmark(fwmark)?);
+        }
+        if let Some(sort_order) = input.sort_order {
+            record.sort_order = validate_sort_order(sort_order)?;
+        }
+
+        repos
+            .upstream_config
+            .update_server(&record)
+            .await
+            .map_err(ServerOperationError::from)?;
+
+        self.reload_after_mutation().await;
+        Ok(record)
+    }
+
+    pub async fn delete_upstream_server(
+        &self,
+        id: &str,
+    ) -> Result<DeleteResult, ServerOperationError> {
+        let repos = self.repos()?;
+        repos
+            .upstream_config
+            .get_server_by_id(id)
+            .await
+            .map_err(ServerOperationError::from)?
+            .ok_or_else(|| {
+                ServerOperationError::NotFound(format!("upstream server '{id}' not found"))
+            })?;
+
+        repos
+            .upstream_config
+            .delete_server(id)
+            .await
+            .map_err(ServerOperationError::from)?;
+
+        self.reload_after_mutation().await;
+        Ok(DeleteResult {
+            deleted: id.to_string(),
+        })
+    }
+
     // --- Zone CRUD ---
 
     pub async fn list_zone_configs(&self) -> Result<Vec<ZoneRecord>, ServerOperationError> {
@@ -781,6 +937,40 @@ pub struct UpdateFilterListInput {
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
+pub struct CreateUpstreamServerInput {
+    pub enabled: Option<bool>,
+    pub protocol: String,
+    pub address: String,
+    pub authentication: Option<AuthenticationInput>,
+    pub max_hops: Option<u8>,
+    pub nameserver_ip_family: Option<String>,
+    pub root_hints_path: Option<String>,
+    pub root_key_path: Option<String>,
+    pub dnssec: Option<bool>,
+    pub bind_address: Option<String>,
+    pub fwmark: Option<u32>,
+    pub sort_order: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
+pub struct UpdateUpstreamServerInput {
+    pub enabled: Option<bool>,
+    pub protocol: Option<String>,
+    pub address: Option<String>,
+    pub authentication: Option<AuthenticationInput>,
+    pub max_hops: Option<u8>,
+    pub nameserver_ip_family: Option<String>,
+    pub root_hints_path: Option<String>,
+    pub root_key_path: Option<String>,
+    pub dnssec: Option<bool>,
+    pub bind_address: Option<String>,
+    pub fwmark: Option<u32>,
+    pub sort_order: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct CreateZoneInput {
     pub zone: String,
     pub enabled: Option<bool>,
@@ -915,6 +1105,57 @@ fn validate_protocol(protocol: &str) -> Result<(), ServerOperationError> {
             "invalid protocol '{protocol}'; must be one of: dns, dot, doh, recursive, json"
         ))),
     }
+}
+
+fn validate_upstream_protocol(protocol: &str) -> Result<(), ServerOperationError> {
+    match protocol {
+        "dns" | "dot" | "doh" | "recursive" => Ok(()),
+        _ => Err(ServerOperationError::InvalidInput(format!(
+            "invalid upstream protocol '{protocol}'; must be one of: dns, dot, doh, recursive"
+        ))),
+    }
+}
+
+fn validate_upstream_address(address: &str) -> Result<(), ServerOperationError> {
+    if address.trim().is_empty() {
+        return Err(ServerOperationError::InvalidInput(
+            "upstream address must not be empty".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_bind_address(bind_address: Option<&str>) -> Result<(), ServerOperationError> {
+    let Some(bind_address) = bind_address else {
+        return Ok(());
+    };
+    bind_address.parse::<IpAddr>().map(|_| ()).map_err(|_| {
+        ServerOperationError::InvalidInput(format!(
+            "invalid bind_address '{bind_address}'; must be an IPv4 or IPv6 address"
+        ))
+    })
+}
+
+fn validate_sort_order(sort_order: i32) -> Result<i32, ServerOperationError> {
+    if sort_order < 0 {
+        return Err(ServerOperationError::InvalidInput(
+            "sort_order must be zero or greater".into(),
+        ));
+    }
+    Ok(sort_order)
+}
+
+fn parse_fwmark(fwmark: Option<u32>) -> Result<Option<i32>, ServerOperationError> {
+    fwmark.map(parse_single_fwmark).transpose()
+}
+
+fn parse_single_fwmark(fwmark: u32) -> Result<i32, ServerOperationError> {
+    i32::try_from(fwmark).map_err(|_| {
+        ServerOperationError::InvalidInput(format!(
+            "invalid fwmark '{fwmark}'; must be <= {}",
+            i32::MAX
+        ))
+    })
 }
 
 fn validate_allowed_type(allowed_type: &str) -> Result<(), ServerOperationError> {

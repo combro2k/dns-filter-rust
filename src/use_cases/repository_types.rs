@@ -34,14 +34,16 @@ pub struct FilteringConfigRecord {
 }
 
 /// Singleton global resolver configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct ResolverConfigRecord {
     pub strategy: String,
     pub bootstrap_resolvers: Vec<String>,
 }
 
 /// An upstream DNS server entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "http-api", derive(utoipa::ToSchema))]
 pub struct UpstreamServerRecord {
     pub id: String,
     pub enabled: bool,

@@ -227,6 +227,37 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].address, "1.1.1.1:53");
 
+        let server = repo.get_server_by_id("srv-1").await.unwrap().unwrap();
+        assert_eq!(server.id, "srv-1");
+
+        repo.update_server(&UpstreamServerRecord {
+            id: "srv-1".to_string(),
+            enabled: false,
+            protocol: "doh".to_string(),
+            address: "https://dns.example/dns-query".to_string(),
+            auth_token: Some("token".to_string()),
+            auth_username: None,
+            auth_password: None,
+            max_hops: Some(4),
+            nameserver_ip_family: Some("ipv4".to_string()),
+            root_hints_path: Some("/tmp/root.hints".to_string()),
+            root_key_path: Some("/tmp/root.key".to_string()),
+            dnssec: false,
+            sort_order: 3,
+            bind_address: Some("192.0.2.10".to_string()),
+            fwmark: Some(123),
+        })
+        .await
+        .unwrap();
+
+        let server = repo.get_server_by_id("srv-1").await.unwrap().unwrap();
+        assert_eq!(server.protocol, "doh");
+        assert_eq!(server.bind_address.as_deref(), Some("192.0.2.10"));
+        assert_eq!(server.fwmark, Some(123));
+
+        repo.delete_server("srv-1").await.unwrap();
+        assert!(repo.get_server_by_id("srv-1").await.unwrap().is_none());
+
         // Delete all
         repo.delete_all_servers().await.unwrap();
         assert!(repo.get_all_servers().await.unwrap().is_empty());

@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Upstream server management via HTTP API and MCP**: added list/add/update/delete operations for DB-backed upstream resolver servers. Both surfaces now expose the full per-server routing fields `bind_address` and `fwmark`, along with protocol, address, authentication, recursive resolver settings, DNSSEC, and sort order. Mutations trigger a config reload so changes take effect without YAML edits.
 - **Outbound routing for upstream DNS connections**: per-server `bind_address` and `fwmark` (Linux `SO_MARK`) support for policy-based routing of upstream queries through specific network interfaces (e.g. WireGuard). Includes global defaults via a new `outbound` config section, with per-server overrides. Requires `CAP_NET_ADMIN` for fwmark usage.
 - **`RoutedRuntimeProvider`**: custom hickory-net `RuntimeProvider` that applies bind address and fwmark to UDP and TCP sockets used for upstream resolution.
 - **Database migration 003**: adds `bind_address` and `fwmark` columns to `upstream_servers` table (SQLite, MySQL, PostgreSQL).

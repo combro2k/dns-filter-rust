@@ -12,12 +12,15 @@ use tokio_util::sync::CancellationToken;
 use utoipa::OpenApi;
 
 use crate::use_cases::filtering::ListInfo;
-use crate::use_cases::repository_types::{FilterListRecord, ZoneDiscoveryRecord, ZoneRecord};
+use crate::use_cases::repository_types::{
+    FilterListRecord, UpstreamServerRecord, ZoneDiscoveryRecord, ZoneRecord,
+};
 use crate::use_cases::server_operations::{
-    CreateFilterListInput, CreateZoneDiscoveryInput, CreateZoneInput, DeleteResult,
-    FilterStatusResult, FilterToggleResult, HealthResult, ListActionResult, QueryLogResult,
-    RefreshAllResult, RefreshResult, ReloadResult, ServerOperationError, ServerOperations,
-    StatsResult, UpdateFilterListInput, UpdateZoneDiscoveryInput, UpdateZoneInput,
+    CreateFilterListInput, CreateUpstreamServerInput, CreateZoneDiscoveryInput, CreateZoneInput,
+    DeleteResult, FilterStatusResult, FilterToggleResult, HealthResult, ListActionResult,
+    QueryLogResult, RefreshAllResult, RefreshResult, ReloadResult, ServerOperationError,
+    ServerOperations, StatsResult, UpdateFilterListInput, UpdateUpstreamServerInput,
+    UpdateZoneDiscoveryInput, UpdateZoneInput,
 };
 
 use super::auth::bearer_auth_middleware;
@@ -109,6 +112,10 @@ fn json_error(status: StatusCode, message: &str) -> Response {
         handle_add_allowlist,
         handle_update_allowlist,
         handle_delete_allowlist,
+        handle_list_upstreams,
+        handle_add_upstream,
+        handle_update_upstream,
+        handle_delete_upstream,
         handle_list_zone_configs,
         handle_add_zone,
         handle_update_zone,
@@ -124,10 +131,11 @@ fn json_error(status: StatusCode, message: &str) -> Response {
         FilterStatusResult, FilterToggleResult,
         QueryLogResult, ListActionResult,
         RefreshResult, RefreshAllResult, DeleteResult,
-        ListInfo, FilterListRecord, ZoneRecord,
+        ListInfo, FilterListRecord, UpstreamServerRecord, ZoneRecord,
         crate::use_cases::repository_types::ZoneServerRecord,
         ZoneDiscoveryRecord,
         CreateFilterListInput, UpdateFilterListInput,
+        CreateUpstreamServerInput, UpdateUpstreamServerInput,
         CreateZoneInput, UpdateZoneInput,
         crate::use_cases::server_operations::CreateZoneServerInput,
         crate::use_cases::server_operations::AuthenticationInput,
@@ -186,6 +194,11 @@ pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> anyhow:
         .route("/api/v1/allowlists", post(handle_add_allowlist))
         .route("/api/v1/allowlists/{name}", put(handle_update_allowlist))
         .route("/api/v1/allowlists/{name}", delete(handle_delete_allowlist))
+        // Upstream server CRUD
+        .route("/api/v1/upstreams", get(handle_list_upstreams))
+        .route("/api/v1/upstreams", post(handle_add_upstream))
+        .route("/api/v1/upstreams/{id}", put(handle_update_upstream))
+        .route("/api/v1/upstreams/{id}", delete(handle_delete_upstream))
         // Zone CRUD
         .route("/api/v1/zones", get(handle_list_zone_configs))
         .route("/api/v1/zones", post(handle_add_zone))
@@ -689,6 +702,114 @@ async fn handle_delete_allowlist(
     match state.ops.delete_filter_list(&name).await {
         Ok(result) => {
             tracing::info!(source = "api", name = %name, "allowlist deleted via API");
+            json_ok(result)
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+// --- Upstream server CRUD handlers ---
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/upstreams",
+    tag = "Upstreams",
+    summary = "List all upstream servers",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "All upstream servers", body = Vec<UpstreamServerRecord>),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    ),
+)]
+async fn handle_list_upstreams(State(state): State<Arc<ApiState>>) -> Response {
+    match state.ops.list_upstream_servers().await {
+        Ok(servers) => json_ok(servers),
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/upstreams",
+    tag = "Upstreams",
+    summary = "Add an upstream server",
+    security(("bearer_auth" = [])),
+    request_body = CreateUpstreamServerInput,
+    responses(
+        (status = 201, description = "Upstream server created", body = UpstreamServerRecord),
+        (status = 400, description = "Invalid input", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse),
+    ),
+)]
+async fn handle_add_upstream(
+    State(state): State<Arc<ApiState>>,
+    Json(input): Json<CreateUpstreamServerInput>,
+) -> Response {
+    match state.ops.add_upstream_server(input).await {
+        Ok(record) => {
+            tracing::info!(source = "api", id = %record.id, "upstream server added via API");
+            (
+                StatusCode::CREATED,
+                Json(ApiResponse {
+                    success: true,
+                    data: Some(record),
+                    error: None,
+                    timestamp: now_unix(),
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/upstreams/{id}",
+    tag = "Upstreams",
+    summary = "Update an upstream server",
+    security(("bearer_auth" = [])),
+    params(("id" = String, Path, description = "Upstream server ID")),
+    request_body = UpdateUpstreamServerInput,
+    responses(
+        (status = 200, description = "Upstream server updated", body = UpstreamServerRecord),
+        (status = 400, description = "Invalid input", body = ErrorResponse),
+        (status = 404, description = "Not found", body = ErrorResponse),
+    ),
+)]
+async fn handle_update_upstream(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+    Json(input): Json<UpdateUpstreamServerInput>,
+) -> Response {
+    match state.ops.update_upstream_server(&id, input).await {
+        Ok(record) => {
+            tracing::info!(source = "api", id = %record.id, "upstream server updated via API");
+            json_ok(record)
+        }
+        Err(e) => op_error_to_response(e),
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/upstreams/{id}",
+    tag = "Upstreams",
+    summary = "Delete an upstream server",
+    security(("bearer_auth" = [])),
+    params(("id" = String, Path, description = "Upstream server ID")),
+    responses(
+        (status = 200, description = "Upstream server deleted", body = DeleteResult),
+        (status = 404, description = "Not found", body = ErrorResponse),
+    ),
+)]
+async fn handle_delete_upstream(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+) -> Response {
+    match state.ops.delete_upstream_server(&id).await {
+        Ok(result) => {
+            tracing::info!(source = "api", id = %id, "upstream server deleted via API");
             json_ok(result)
         }
         Err(e) => op_error_to_response(e),

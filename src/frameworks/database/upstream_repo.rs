@@ -80,6 +80,21 @@ impl UpstreamConfigRepository for SqlxUpstreamConfigRepository {
         Ok(rows.into_iter().map(UpstreamServerRecord::from).collect())
     }
 
+    async fn get_server_by_id(&self, id: &str) -> Result<Option<UpstreamServerRecord>> {
+        let row = sqlx::query_as::<_, UpstreamServerRow>(
+            "SELECT id, enabled, protocol, address, auth_token, auth_username, auth_password, \
+             max_hops, nameserver_ip_family, root_hints_path, root_key_path, dnssec, sort_order, \
+             bind_address, fwmark \
+             FROM upstream_servers WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("failed to fetch upstream server '{id}'"))?;
+
+        Ok(row.map(UpstreamServerRecord::from))
+    }
+
     async fn create_server(&self, record: &UpstreamServerRecord) -> Result<()> {
         sqlx::query(
             "INSERT INTO upstream_servers \
@@ -106,6 +121,45 @@ impl UpstreamConfigRepository for SqlxUpstreamConfigRepository {
         .execute(&self.pool)
         .await
         .with_context(|| format!("failed to insert upstream server '{}'", record.id))?;
+
+        Ok(())
+    }
+
+    async fn update_server(&self, record: &UpstreamServerRecord) -> Result<()> {
+        sqlx::query(
+            "UPDATE upstream_servers SET enabled = ?, protocol = ?, address = ?, auth_token = ?, \
+             auth_username = ?, auth_password = ?, max_hops = ?, nameserver_ip_family = ?, \
+             root_hints_path = ?, root_key_path = ?, dnssec = ?, sort_order = ?, bind_address = ?, \
+             fwmark = ? WHERE id = ?",
+        )
+        .bind(record.enabled)
+        .bind(&record.protocol)
+        .bind(&record.address)
+        .bind(&record.auth_token)
+        .bind(&record.auth_username)
+        .bind(&record.auth_password)
+        .bind(record.max_hops)
+        .bind(&record.nameserver_ip_family)
+        .bind(&record.root_hints_path)
+        .bind(&record.root_key_path)
+        .bind(record.dnssec)
+        .bind(record.sort_order)
+        .bind(&record.bind_address)
+        .bind(record.fwmark)
+        .bind(&record.id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("failed to update upstream server '{}'", record.id))?;
+
+        Ok(())
+    }
+
+    async fn delete_server(&self, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM upstream_servers WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("failed to delete upstream server '{id}'"))?;
 
         Ok(())
     }

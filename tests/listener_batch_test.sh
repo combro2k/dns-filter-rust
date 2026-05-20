@@ -668,7 +668,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# API CRUD tests (blocklists, allowlists, zones, zone-discovery)
+# API CRUD tests (blocklists, allowlists, upstreams, zones, zone-discovery)
 # ---------------------------------------------------------------------------
 
 run_api_crud_tests() {
@@ -799,6 +799,55 @@ run_api_crud_tests() {
     fail "API delete allowlist returned $http_code (expected 200)"
   fi
 
+  # --- Upstream CRUD ---
+  body="$(curl -sS -w '\n%{http_code}' -X POST "$api_base/upstreams" \
+    -H "$auth_header" -H "$content_type" \
+    -d '{"enabled":true,"protocol":"doh","address":"https://dns.example.test/dns-query","authentication":{"token":"secret-token"},"bind_address":"127.0.0.1","fwmark":101}' 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  response_body="$(echo "$body" | sed '$d')"
+  if [ "$http_code" = "201" ] && echo "$response_body" | grep -q '"bind_address":"127.0.0.1"' && echo "$response_body" | grep -q '"fwmark":101'; then
+    pass "API create upstream returned 201 with routing fields"
+  else
+    fail "API create upstream returned $http_code (expected 201)"
+  fi
+
+  local upstream_id
+  upstream_id="$(echo "$response_body" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)"
+
+  body="$(curl -sS -w '\n%{http_code}' "$api_base/upstreams" \
+    -H "$auth_header" 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  response_body="$(echo "$body" | sed '$d')"
+  if [ "$http_code" = "200" ] && echo "$response_body" | grep -q "$upstream_id"; then
+    pass "API list upstreams contains created entry"
+  else
+    fail "API list upstreams failed (code=$http_code)"
+  fi
+
+  if [ -n "$upstream_id" ]; then
+    body="$(curl -sS -w '\n%{http_code}' -X PUT "$api_base/upstreams/$upstream_id" \
+      -H "$auth_header" -H "$content_type" \
+      -d '{"protocol":"recursive","max_hops":7,"bind_address":"::1","fwmark":202}' 2>/dev/null)"
+    http_code="$(echo "$body" | tail -1)"
+    response_body="$(echo "$body" | sed '$d')"
+    if [ "$http_code" = "200" ] && echo "$response_body" | grep -q '"protocol":"recursive"' && echo "$response_body" | grep -q '"bind_address":"::1"' && echo "$response_body" | grep -q '"fwmark":202'; then
+      pass "API update upstream returned 200 with updated routing fields"
+    else
+      fail "API update upstream returned $http_code (expected 200)"
+    fi
+
+    body="$(curl -sS -w '\n%{http_code}' -X DELETE "$api_base/upstreams/$upstream_id" \
+      -H "$auth_header" 2>/dev/null)"
+    http_code="$(echo "$body" | tail -1)"
+    if [ "$http_code" = "200" ]; then
+      pass "API delete upstream returned 200"
+    else
+      fail "API delete upstream returned $http_code (expected 200)"
+    fi
+  else
+    fail "API could not extract upstream ID from create response"
+  fi
+
   # --- Zone CRUD ---
   body="$(curl -sS -w '\n%{http_code}' -X POST "$api_base/zones" \
     -H "$auth_header" -H "$content_type" \
@@ -920,6 +969,28 @@ run_api_crud_tests() {
     pass "API rejects invalid list_type with 400"
   else
     fail "API invalid list_type returned $http_code (expected 400)"
+  fi
+
+  # Invalid bind_address
+  body="$(curl -sS -w '\n%{http_code}' -X POST "$api_base/upstreams" \
+    -H "$auth_header" -H "$content_type" \
+    -d '{"protocol":"dns","address":"1.1.1.1:53","bind_address":"not-an-ip"}' 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  if [ "$http_code" = "400" ]; then
+    pass "API rejects invalid upstream bind_address with 400"
+  else
+    fail "API invalid upstream bind_address returned $http_code (expected 400)"
+  fi
+
+  # Invalid upstream protocol
+  body="$(curl -sS -w '\n%{http_code}' -X POST "$api_base/upstreams" \
+    -H "$auth_header" -H "$content_type" \
+    -d '{"protocol":"json","address":"https://example.com/upstream"}' 2>/dev/null)"
+  http_code="$(echo "$body" | tail -1)"
+  if [ "$http_code" = "400" ]; then
+    pass "API rejects invalid upstream protocol with 400"
+  else
+    fail "API invalid upstream protocol returned $http_code (expected 400)"
   fi
 }
 

@@ -16,9 +16,9 @@ use tokio_util::sync::CancellationToken;
 use crate::frameworks::config::schema::McpConfig;
 use crate::interface_adapters::listeners::auth::bearer_auth_middleware;
 use crate::use_cases::server_operations::{
-    AuthenticationInput, CreateFilterListInput, CreateZoneDiscoveryInput, CreateZoneInput,
-    CreateZoneServerInput, ServerOperations, UpdateFilterListInput, UpdateZoneDiscoveryInput,
-    UpdateZoneInput,
+    AuthenticationInput, CreateFilterListInput, CreateUpstreamServerInput,
+    CreateZoneDiscoveryInput, CreateZoneInput, CreateZoneServerInput, ServerOperations,
+    UpdateFilterListInput, UpdateUpstreamServerInput, UpdateZoneDiscoveryInput, UpdateZoneInput,
 };
 
 use super::{bind_tcp, parse_bind_addrs};
@@ -99,6 +99,72 @@ struct UpdateFilterListParams {
     enabled: Option<bool>,
     /// New list format
     list_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct AddUpstreamServerParams {
+    /// Whether the upstream server is enabled. Default: true
+    enabled: Option<bool>,
+    /// Protocol: dns, dot, doh, or recursive
+    protocol: String,
+    /// Server address (protocol-specific)
+    address: String,
+    /// Bearer token for DoH authentication
+    auth_token: Option<String>,
+    /// Username for basic authentication
+    auth_username: Option<String>,
+    /// Password for basic authentication
+    auth_password: Option<String>,
+    /// Max hops for recursive resolver
+    max_hops: Option<u8>,
+    /// IP family for nameserver resolution: ipv4 or ipv6
+    nameserver_ip_family: Option<String>,
+    /// Path to root hints file (recursive resolver)
+    root_hints_path: Option<String>,
+    /// Path to root key file (recursive resolver)
+    root_key_path: Option<String>,
+    /// Enable DNSSEC validation. Default: true
+    dnssec: Option<bool>,
+    /// Source IP address to bind upstream sockets to
+    bind_address: Option<String>,
+    /// Linux SO_MARK value for policy routing
+    fwmark: Option<u32>,
+    /// Optional sort order. If omitted, appends to the end.
+    sort_order: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UpdateUpstreamServerParams {
+    /// The ID of the upstream server to update
+    id: String,
+    /// Enable or disable the upstream server
+    enabled: Option<bool>,
+    /// New protocol
+    protocol: Option<String>,
+    /// New server address
+    address: Option<String>,
+    /// Bearer token for DoH authentication
+    auth_token: Option<String>,
+    /// Username for basic authentication
+    auth_username: Option<String>,
+    /// Password for basic authentication
+    auth_password: Option<String>,
+    /// Max hops for recursive resolver
+    max_hops: Option<u8>,
+    /// IP family for nameserver resolution: ipv4 or ipv6
+    nameserver_ip_family: Option<String>,
+    /// Path to root hints file (recursive resolver)
+    root_hints_path: Option<String>,
+    /// Path to root key file (recursive resolver)
+    root_key_path: Option<String>,
+    /// Enable or disable DNSSEC validation
+    dnssec: Option<bool>,
+    /// Source IP address to bind upstream sockets to
+    bind_address: Option<String>,
+    /// Linux SO_MARK value for policy routing
+    fwmark: Option<u32>,
+    /// New sort order
+    sort_order: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -511,6 +577,106 @@ impl McpHandler {
         match self.state.ops.delete_filter_list(&params.name).await {
             Ok(result) => {
                 tracing::info!(source = "mcp", name = %params.name, "allowlist deleted via MCP");
+                serde_json::to_string(&result)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    // --- Upstream server CRUD tools ---
+
+    #[tool(
+        description = "List all configured upstream resolver servers with their database configuration"
+    )]
+    async fn list_upstreams(&self) -> String {
+        match self.state.ops.list_upstream_servers().await {
+            Ok(servers) => serde_json::to_string(&servers)
+                .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Add a new upstream resolver server. Supports bind_address and fwmark for outbound routing. Triggers a config reload."
+    )]
+    async fn add_upstream(
+        &self,
+        Parameters(params): Parameters<AddUpstreamServerParams>,
+    ) -> String {
+        let input = CreateUpstreamServerInput {
+            enabled: params.enabled,
+            protocol: params.protocol,
+            address: params.address,
+            authentication: build_mcp_auth(
+                params.auth_token,
+                params.auth_username,
+                params.auth_password,
+            ),
+            max_hops: params.max_hops,
+            nameserver_ip_family: params.nameserver_ip_family,
+            root_hints_path: params.root_hints_path,
+            root_key_path: params.root_key_path,
+            dnssec: params.dnssec,
+            bind_address: params.bind_address,
+            fwmark: params.fwmark,
+            sort_order: params.sort_order,
+        };
+        match self.state.ops.add_upstream_server(input).await {
+            Ok(record) => {
+                tracing::info!(source = "mcp", id = %record.id, "upstream server added via MCP");
+                serde_json::to_string(&record)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "Update an existing upstream resolver server by ID. Supports bind_address and fwmark changes. Triggers a config reload."
+    )]
+    async fn update_upstream(
+        &self,
+        Parameters(params): Parameters<UpdateUpstreamServerParams>,
+    ) -> String {
+        let input = UpdateUpstreamServerInput {
+            enabled: params.enabled,
+            protocol: params.protocol,
+            address: params.address,
+            authentication: build_mcp_auth(
+                params.auth_token,
+                params.auth_username,
+                params.auth_password,
+            ),
+            max_hops: params.max_hops,
+            nameserver_ip_family: params.nameserver_ip_family,
+            root_hints_path: params.root_hints_path,
+            root_key_path: params.root_key_path,
+            dnssec: params.dnssec,
+            bind_address: params.bind_address,
+            fwmark: params.fwmark,
+            sort_order: params.sort_order,
+        };
+        match self
+            .state
+            .ops
+            .update_upstream_server(&params.id, input)
+            .await
+        {
+            Ok(record) => {
+                tracing::info!(source = "mcp", id = %record.id, "upstream server updated via MCP");
+                serde_json::to_string(&record)
+                    .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+            }
+            Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(description = "Delete an upstream resolver server by ID. Triggers a config reload.")]
+    async fn delete_upstream(&self, Parameters(params): Parameters<DeleteByIdParams>) -> String {
+        match self.state.ops.delete_upstream_server(&params.id).await {
+            Ok(result) => {
+                tracing::info!(source = "mcp", id = %params.id, "upstream server deleted via MCP");
                 serde_json::to_string(&result)
                     .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
             }

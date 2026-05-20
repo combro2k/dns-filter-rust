@@ -55,7 +55,10 @@ pub trait UpstreamConfigRepository: Send + Sync {
     async fn get_resolver_config(&self) -> Result<ResolverConfigRecord>;
     async fn update_resolver_config(&self, record: &ResolverConfigRecord) -> Result<()>;
     async fn get_all_servers(&self) -> Result<Vec<UpstreamServerRecord>>;
+    async fn get_server_by_id(&self, id: &str) -> Result<Option<UpstreamServerRecord>>;
     async fn create_server(&self, record: &UpstreamServerRecord) -> Result<()>;
+    async fn update_server(&self, record: &UpstreamServerRecord) -> Result<()>;
+    async fn delete_server(&self, id: &str) -> Result<()>;
     async fn delete_all_servers(&self) -> Result<()>;
 }
 
