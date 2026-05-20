@@ -74,6 +74,7 @@ enum CliAction {
     Status {
         config_path: String,
         socket_path: Option<String>,
+        direct: bool,
     },
     MergeConfig {
         config_path: String,
@@ -149,6 +150,10 @@ enum Commands {
 
         #[arg(long = "socket", value_name = "path")]
         socket_path: Option<String>,
+
+        /// Query status directly via control socket instead of delegating to systemd/OpenRC.
+        #[arg(long = "direct")]
+        direct: bool,
     },
     /// Merge config with built-in defaults (missing sections filled from example)
     MergeConfig {
@@ -205,9 +210,11 @@ where
         Some(Commands::Status {
             config_path,
             socket_path,
+            direct,
         }) => Ok(CliAction::Status {
             config_path,
             socket_path,
+            direct,
         }),
         Some(Commands::MergeConfig {
             config_path,
@@ -260,8 +267,9 @@ async fn main() {
         CliAction::Status {
             config_path,
             socket_path,
+            direct,
         } => {
-            run_status_command(&config_path, socket_path.as_deref());
+            run_status_command(&config_path, socket_path.as_deref(), direct);
         }
         CliAction::MergeConfig {
             config_path,
@@ -277,6 +285,10 @@ fn should_delegate_start(config_path: &str, debug: bool, direct: bool) -> bool {
 }
 
 fn should_delegate_stop(config_path: &str, socket_override: Option<&str>, direct: bool) -> bool {
+    !direct && socket_override.is_none() && config_path == DEFAULT_CONFIG_PATH
+}
+
+fn should_delegate_status(config_path: &str, socket_override: Option<&str>, direct: bool) -> bool {
     !direct && socket_override.is_none() && config_path == DEFAULT_CONFIG_PATH
 }
 
@@ -417,7 +429,18 @@ struct StatusPayload {
     lists: Vec<StatusListInfo>,
 }
 
-fn run_status_command(config_path: &str, socket_override: Option<&str>) {
+fn run_status_command(config_path: &str, socket_override: Option<&str>, direct: bool) {
+    if should_delegate_status(config_path, socket_override, direct) {
+        match try_delegate_to_init("status") {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("failed to query service status via init manager: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let socket_path = resolve_control_socket_path(config_path, socket_override);
 
     let resp = match control_client::send_command(&socket_path, "status") {
@@ -1302,6 +1325,7 @@ mod tests {
             CliAction::Status {
                 config_path: DEFAULT_CONFIG_PATH.to_string(),
                 socket_path: None,
+                direct: false,
             }
         );
     }
@@ -1322,6 +1346,21 @@ mod tests {
             CliAction::Status {
                 config_path: "/tmp/test.yaml".to_string(),
                 socket_path: Some("/tmp/custom.sock".to_string()),
+                direct: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_status_with_direct_flag() {
+        let parsed =
+            parse_cli_args(["dns-filter", "status", "--direct"]).expect("parse should succeed");
+        assert_eq!(
+            parsed,
+            CliAction::Status {
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
+                socket_path: None,
+                direct: true,
             }
         );
     }
@@ -1419,6 +1458,30 @@ mod tests {
             true
         ));
         assert!(!super::should_delegate_stop(
+            "/tmp/config.yaml",
+            None,
+            false
+        ));
+    }
+
+    #[test]
+    fn delegates_status_only_for_default_without_socket_or_direct() {
+        assert!(super::should_delegate_status(
+            DEFAULT_CONFIG_PATH,
+            None,
+            false
+        ));
+        assert!(!super::should_delegate_status(
+            DEFAULT_CONFIG_PATH,
+            Some("/tmp/custom.sock"),
+            false
+        ));
+        assert!(!super::should_delegate_status(
+            DEFAULT_CONFIG_PATH,
+            None,
+            true
+        ));
+        assert!(!super::should_delegate_status(
             "/tmp/config.yaml",
             None,
             false
