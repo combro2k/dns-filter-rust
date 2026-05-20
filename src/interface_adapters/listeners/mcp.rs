@@ -10,7 +10,8 @@ use rmcp::transport::streamable_http_server::tower::{
 };
 use rmcp::{tool_handler, tool_router};
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use crate::frameworks::config::schema::McpConfig;
@@ -72,6 +73,14 @@ struct ZoneSearchParams {
     record_type: Option<String>,
     /// Maximum number of results to return (default: 50, max: 500)
     limit: Option<usize>,
+    /// Include a human-readable presentation layout in the response envelope.
+    include_presentation: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PresentationParams {
+    /// Include a human-readable presentation layout in the response envelope.
+    include_presentation: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -332,6 +341,202 @@ where
     Ok(Some(parsed))
 }
 
+#[derive(Debug, Serialize)]
+struct McpPresentation {
+    layout: &'static str,
+    title: &'static str,
+    markdown: String,
+}
+
+#[derive(Debug, Serialize)]
+struct McpPresentationMeta {
+    layout_version: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct McpPresentationEnvelope<T>
+where
+    T: Serialize,
+{
+    data: T,
+    display: McpPresentation,
+    meta: McpPresentationMeta,
+}
+
+fn mcp_json<T>(value: &T) -> String
+where
+    T: Serialize,
+{
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+}
+
+fn mcp_with_presentation<T>(data: T, display: McpPresentation) -> String
+where
+    T: Serialize,
+{
+    let envelope = McpPresentationEnvelope {
+        data,
+        display,
+        meta: McpPresentationMeta {
+            layout_version: "v1",
+        },
+    };
+    mcp_json(&envelope)
+}
+
+fn markdown_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', " ")
+}
+
+fn optional_cell(value: Option<&str>) -> String {
+    value.map(markdown_cell).unwrap_or_else(|| "-".to_string())
+}
+
+fn bool_cell(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+fn upstream_auth_mode(
+    auth_token: Option<&str>,
+    auth_username: Option<&str>,
+    auth_password: Option<&str>,
+) -> &'static str {
+    if auth_token.is_some() {
+        "bearer"
+    } else if auth_username.is_some() || auth_password.is_some() {
+        "basic"
+    } else {
+        "none"
+    }
+}
+
+fn render_upstreams_markdown(
+    servers: &[crate::use_cases::repository_types::UpstreamServerRecord],
+) -> String {
+    if servers.is_empty() {
+        return "No upstream servers configured.".to_string();
+    }
+
+    let mut out = String::new();
+    out.push_str("| id | enabled | protocol | address | sort_order | bind_address | fwmark | dnssec | auth | max_hops | nameserver_ip_family | root_hints_path | root_key_path |\n");
+    out.push_str(
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+    );
+
+    for server in servers {
+        let row = format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            markdown_cell(&server.id),
+            bool_cell(server.enabled),
+            markdown_cell(&server.protocol),
+            markdown_cell(&server.address),
+            server.sort_order,
+            optional_cell(server.bind_address.as_deref()),
+            server
+                .fwmark
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            bool_cell(server.dnssec),
+            upstream_auth_mode(
+                server.auth_token.as_deref(),
+                server.auth_username.as_deref(),
+                server.auth_password.as_deref(),
+            ),
+            server
+                .max_hops
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            optional_cell(server.nameserver_ip_family.as_deref()),
+            optional_cell(server.root_hints_path.as_deref()),
+            optional_cell(server.root_key_path.as_deref()),
+        );
+        out.push_str(&row);
+    }
+
+    out
+}
+
+fn render_stats_markdown(stats: &crate::use_cases::server_operations::StatsResult) -> String {
+    let mut out = String::new();
+    out.push_str("## Summary\n\n");
+    out.push_str(&format!(
+        "- filtering_enabled: {}\n- uptime_seconds: {}\n- queries_total: {}\n- queries_blocked: {}\n- queries_allowed: {}\n- queries_passthrough: {}\n- blocklist_hits_total: {}\n- cache_hits_total: {}\n- cache_misses_total: {}\n\n",
+        bool_cell(stats.filtering_enabled),
+        stats.uptime_seconds,
+        stats.queries_total,
+        stats.queries_blocked,
+        stats.queries_allowed,
+        stats.queries_passthrough,
+        stats.blocklist_hits_total,
+        stats.cache_hits_total,
+        stats.cache_misses_total
+    ));
+
+    out.push_str("## Upstreams\n\n");
+    if stats.upstreams.is_empty() {
+        out.push_str("No upstream metrics available.\n");
+    } else {
+        out.push_str(
+            "| upstream | requests_total | errors_total | latency_count | latency_sum_seconds |\n",
+        );
+        out.push_str("| --- | --- | --- | --- | --- |\n");
+        for upstream in &stats.upstreams {
+            let row = format!(
+                "| {} | {} | {} | {} | {} |\n",
+                markdown_cell(&upstream.upstream),
+                upstream.requests_total,
+                upstream.errors_total,
+                upstream.latency_count,
+                upstream.latency_sum_seconds,
+            );
+            out.push_str(&row);
+        }
+    }
+
+    out.push_str("\n## Filter Lists\n\n");
+    out.push_str(&format!("Configured lists: {}\n", stats.lists.len()));
+    out
+}
+
+fn render_zone_search_markdown(
+    search: &crate::use_cases::server_operations::ZoneSearchResultList,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Query: {}\\nTotal matches: {}\\nReturned: {}\\n\\n",
+        markdown_cell(&search.query),
+        search.total_matches,
+        search.results.len()
+    ));
+
+    if search.results.is_empty() {
+        out.push_str("No zone records matched.\n");
+        return out;
+    }
+
+    out.push_str("| zone | name | type | ttl | data | score |\n");
+    out.push_str("| --- | --- | --- | --- | --- | --- |\n");
+    for item in &search.results {
+        let row = format!(
+            "| {} | {} | {} | {} | {} | {} |\n",
+            markdown_cell(&item.record.zone),
+            markdown_cell(&item.record.name),
+            markdown_cell(&item.record.record_type),
+            item.record.ttl,
+            markdown_cell(&item.record.data),
+            item.score,
+        );
+        out.push_str(&row);
+    }
+
+    out
+}
+
 // --- Tool implementations ---
 
 #[tool_router]
@@ -405,8 +610,31 @@ impl McpHandler {
     )]
     async fn get_stats(&self) -> String {
         let result = self.state.ops.get_stats();
-        serde_json::to_string(&result)
-            .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string())
+        mcp_json(&result)
+    }
+
+    #[tool(
+        description = "Get query statistics with a presentation envelope that includes a human-readable markdown layout"
+    )]
+    async fn get_stats_presented(
+        &self,
+        Parameters(params): Parameters<PresentationParams>,
+    ) -> String {
+        let result = self.state.ops.get_stats();
+        if !params.include_presentation.unwrap_or(true) {
+            return mcp_json(&result);
+        }
+
+        let markdown = render_stats_markdown(&result);
+
+        mcp_with_presentation(
+            result,
+            McpPresentation {
+                layout: "stats-summary-v1",
+                title: "DNS Filter Statistics",
+                markdown,
+            },
+        )
     }
 
     #[tool(
@@ -485,8 +713,21 @@ impl McpHandler {
             params.record_type.as_deref(),
             params.limit,
         ) {
-            Ok(result) => serde_json::to_string(&result)
-                .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+            Ok(result) => {
+                if params.include_presentation.unwrap_or(false) {
+                    let markdown = render_zone_search_markdown(&result);
+                    mcp_with_presentation(
+                        result,
+                        McpPresentation {
+                            layout: "zone-search-table-v1",
+                            title: "Zone Search Results",
+                            markdown,
+                        },
+                    )
+                } else {
+                    mcp_json(&result)
+                }
+            }
             Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
         }
     }
@@ -632,9 +873,34 @@ impl McpHandler {
     )]
     async fn list_upstreams(&self) -> String {
         match self.state.ops.list_upstream_servers().await {
-            Ok(servers) => serde_json::to_string(&servers)
-                .unwrap_or_else(|_| r#"{"error":"serialization failed"}"#.to_string()),
+            Ok(servers) => mcp_json(&servers),
             Err(e) => serde_json::json!({"error": e.to_string()}).to_string(),
+        }
+    }
+
+    #[tool(
+        description = "List all configured upstream resolver servers with a presentation envelope that includes a human-readable markdown table"
+    )]
+    async fn list_upstreams_presented(
+        &self,
+        Parameters(params): Parameters<PresentationParams>,
+    ) -> String {
+        match self.state.ops.list_upstream_servers().await {
+            Ok(servers) => {
+                if !params.include_presentation.unwrap_or(true) {
+                    return mcp_json(&servers);
+                }
+
+                mcp_with_presentation(
+                    servers.clone(),
+                    McpPresentation {
+                        layout: "upstreams-table-v1",
+                        title: "Configured Upstreams",
+                        markdown: render_upstreams_markdown(&servers),
+                    },
+                )
+            }
+            Err(e) => json!({"error": e.to_string()}).to_string(),
         }
     }
 
@@ -1037,6 +1303,12 @@ pub async fn start_mcp_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::use_cases::repository_types::UpstreamServerRecord;
+    use crate::use_cases::server_operations::{
+        StatsResult, UpstreamStatsEntry, ZoneSearchResultList,
+    };
+    use crate::use_cases::zone_authority::ZoneRecord;
+    use crate::use_cases::zone_registry::ZoneSearchResult;
 
     #[test]
     fn mcp_handler_is_clone() {
@@ -1064,5 +1336,87 @@ mod tests {
         let input: UpdateUpstreamServerParams =
             serde_json::from_str(r#"{"id":"u1","fwmark":null}"#).unwrap();
         assert_eq!(input.fwmark, Some(None));
+    }
+
+    #[test]
+    fn render_upstreams_markdown_includes_routing_fields() {
+        let upstreams = vec![UpstreamServerRecord {
+            id: "u1".to_string(),
+            enabled: true,
+            protocol: "doh".to_string(),
+            address: "https://dns.example/dns-query".to_string(),
+            auth_token: Some("secret-token".to_string()),
+            auth_username: None,
+            auth_password: None,
+            max_hops: None,
+            nameserver_ip_family: Some("ipv4".to_string()),
+            root_hints_path: None,
+            root_key_path: None,
+            dnssec: true,
+            sort_order: 10,
+            bind_address: Some("10.0.0.2".to_string()),
+            fwmark: Some(42),
+        }];
+
+        let markdown = render_upstreams_markdown(&upstreams);
+        assert!(markdown.contains("bind_address"));
+        assert!(markdown.contains("fwmark"));
+        assert!(markdown.contains("10.0.0.2"));
+        assert!(markdown.contains("42"));
+        assert!(!markdown.contains("secret-token"));
+        assert!(markdown.contains("bearer"));
+    }
+
+    #[test]
+    fn render_stats_markdown_renders_summary_and_upstreams() {
+        let stats = StatsResult {
+            uptime_seconds: 123,
+            filtering_enabled: true,
+            queries_total: 100,
+            queries_blocked: 10,
+            queries_allowed: 80,
+            queries_passthrough: 10,
+            blocklist_hits_total: 5,
+            cache_hits_total: 7,
+            cache_misses_total: 3,
+            upstreams: vec![UpstreamStatsEntry {
+                upstream: "doh://dns.example".to_string(),
+                requests_total: 25,
+                errors_total: 1,
+                latency_count: 25,
+                latency_sum_seconds: 1.5,
+            }],
+            lists: vec![],
+        };
+
+        let markdown = render_stats_markdown(&stats);
+        assert!(markdown.contains("Summary"));
+        assert!(markdown.contains("queries_total: 100"));
+        assert!(markdown.contains("doh://dns.example"));
+    }
+
+    #[test]
+    fn render_zone_search_markdown_renders_results_table() {
+        let search = ZoneSearchResultList {
+            query: "www".to_string(),
+            results: vec![ZoneSearchResult {
+                record: ZoneRecord {
+                    name: "www.example.com".to_string(),
+                    record_type: "A".to_string(),
+                    ttl: 300,
+                    data: "203.0.113.10".to_string(),
+                    zone: "example.com".to_string(),
+                },
+                score: 123,
+            }],
+            total_matches: 1,
+            limit: 50,
+        };
+
+        let markdown = render_zone_search_markdown(&search);
+        assert!(markdown.contains("Query: www"));
+        assert!(markdown.contains("www.example.com"));
+        assert!(markdown.contains("example.com"));
+        assert!(markdown.contains("203.0.113.10"));
     }
 }

@@ -1,6 +1,6 @@
 //! Prometheus metrics provider and exporter.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use prometheus::{
     Counter, CounterVec, Encoder, HistogramOpts, HistogramVec, Registry, TextEncoder,
@@ -94,10 +94,22 @@ static METRICS_STATE: OnceLock<Arc<MetricsState>> = OnceLock::new();
 ///
 /// Must be called once at application startup, before any metrics are recorded.
 pub fn init_prometheus_metrics() -> Result<(), Box<dyn std::error::Error>> {
+    static INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    if METRICS_STATE.get().is_some() {
+        return Ok(());
+    }
+
+    let init_lock = INIT_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = init_lock
+        .lock()
+        .map_err(|_| std::io::Error::other("metrics init lock poisoned"))?;
+
     if METRICS_STATE.get().is_none() {
         let state = Arc::new(MetricsState::new()?);
         let _ = METRICS_STATE.set(state);
     }
+
     Ok(())
 }
 
@@ -298,19 +310,34 @@ pub fn snapshot() -> MetricsSnapshot {
 mod tests {
     use super::*;
 
-    fn metric_value(output: &str, metric_prefix: &str) -> f64 {
-        output
-            .lines()
-            .find_map(|line| {
-                if !line.starts_with(metric_prefix) {
-                    return None;
-                }
-                if line.starts_with('#') {
-                    return None;
-                }
-                line.split_whitespace().nth(1)?.parse::<f64>().ok()
-            })
-            .expect("metric must exist in exposition output")
+    fn metric_value(output: &str, metric_name: &str, labels: &[(&str, &str)]) -> Option<f64> {
+        output.lines().find_map(|line| {
+            if line.starts_with('#') {
+                return None;
+            }
+
+            let mut parts = line.split_whitespace();
+            let sample = parts.next()?;
+            let value = parts.next()?.parse::<f64>().ok()?;
+            let name = sample.split('{').next()?;
+
+            if name != metric_name {
+                return None;
+            }
+
+            if labels
+                .iter()
+                .any(|(k, v)| !sample.contains(&format!("{k}=\"{v}\"")))
+            {
+                return None;
+            }
+
+            Some(value)
+        })
+    }
+
+    fn metric_value_or_zero(output: &str, metric_name: &str, labels: &[(&str, &str)]) -> f64 {
+        metric_value(output, metric_name, labels).unwrap_or(0.0)
     }
 
     #[test]
@@ -342,6 +369,9 @@ mod tests {
     fn snapshot_matches_prometheus_output() {
         init_prometheus_metrics().expect("metrics init should succeed");
 
+        let snapshot_before = snapshot();
+        let output_before = collect_metrics().expect("metrics collection should succeed");
+
         record_dns_query("dns", QueryDecision::Passthrough);
         record_dns_query("dns", QueryDecision::Blocked);
         record_blocklist_hit(None);
@@ -349,55 +379,84 @@ mod tests {
         record_cache_operation(false);
         record_upstream_request("udp://9.9.9.9:53", 0.01, Some("timeout"));
 
-        let snapshot = snapshot();
-        let output = collect_metrics().expect("metrics collection should succeed");
+        let snapshot_after = snapshot();
+        let output_after = collect_metrics().expect("metrics collection should succeed");
 
         assert_eq!(
-            snapshot.queries_total as f64,
-            metric_value(&output, "dns_queries_total ")
+            (snapshot_after.queries_total - snapshot_before.queries_total) as f64,
+            metric_value_or_zero(&output_after, "dns_queries_total", &[])
+                - metric_value_or_zero(&output_before, "dns_queries_total", &[])
         );
         assert_eq!(
-            snapshot.queries_blocked as f64,
-            metric_value(&output, "dns_queries_blocked ")
+            (snapshot_after.queries_blocked - snapshot_before.queries_blocked) as f64,
+            metric_value_or_zero(&output_after, "dns_queries_blocked", &[])
+                - metric_value_or_zero(&output_before, "dns_queries_blocked", &[])
         );
         assert_eq!(
-            snapshot.blocklist_hits_total as f64,
-            metric_value(&output, "blocklist_hits_total ")
+            (snapshot_after.blocklist_hits_total - snapshot_before.blocklist_hits_total) as f64,
+            metric_value_or_zero(&output_after, "blocklist_hits_total", &[])
+                - metric_value_or_zero(&output_before, "blocklist_hits_total", &[])
         );
         assert_eq!(
-            snapshot.cache_hits_total as f64,
-            metric_value(&output, "cache_hits_total ")
+            (snapshot_after.cache_hits_total - snapshot_before.cache_hits_total) as f64,
+            metric_value_or_zero(&output_after, "cache_hits_total", &[])
+                - metric_value_or_zero(&output_before, "cache_hits_total", &[])
         );
         assert_eq!(
-            snapshot.cache_misses_total as f64,
-            metric_value(&output, "cache_misses_total ")
+            (snapshot_after.cache_misses_total - snapshot_before.cache_misses_total) as f64,
+            metric_value_or_zero(&output_after, "cache_misses_total", &[])
+                - metric_value_or_zero(&output_before, "cache_misses_total", &[])
         );
 
-        let upstream = snapshot
+        let upstream_before = snapshot_before
+            .upstreams
+            .iter()
+            .find(|u| u.upstream == "udp://9.9.9.9:53")
+            .cloned()
+            .unwrap_or_default();
+
+        let upstream_after = snapshot_after
             .upstreams
             .iter()
             .find(|u| u.upstream == "udp://9.9.9.9:53")
             .expect("snapshot upstream must exist");
 
         assert_eq!(
-            upstream.latency_count as f64,
-            metric_value(
-                &output,
-                "upstream_request_duration_seconds_count{upstream=\"udp://9.9.9.9:53\"}"
+            (upstream_after.latency_count - upstream_before.latency_count) as f64,
+            metric_value_or_zero(
+                &output_after,
+                "upstream_request_duration_seconds_count",
+                &[("upstream", "udp://9.9.9.9:53")]
+            ) - metric_value_or_zero(
+                &output_before,
+                "upstream_request_duration_seconds_count",
+                &[("upstream", "udp://9.9.9.9:53")]
             )
         );
-        assert_eq!(
-            upstream.latency_sum_seconds,
-            metric_value(
-                &output,
-                "upstream_request_duration_seconds_sum{upstream=\"udp://9.9.9.9:53\"}"
-            )
+
+        let latency_delta_snapshot =
+            upstream_after.latency_sum_seconds - upstream_before.latency_sum_seconds;
+        let latency_delta_prometheus = metric_value_or_zero(
+            &output_after,
+            "upstream_request_duration_seconds_sum",
+            &[("upstream", "udp://9.9.9.9:53")],
+        ) - metric_value_or_zero(
+            &output_before,
+            "upstream_request_duration_seconds_sum",
+            &[("upstream", "udp://9.9.9.9:53")],
         );
+        assert!((latency_delta_snapshot - latency_delta_prometheus).abs() < 1e-12);
+
         assert_eq!(
-            upstream.errors_total as f64,
-            metric_value(
-                &output,
-                "upstream_errors_total{error=\"timeout\",upstream=\"udp://9.9.9.9:53\"}"
+            (upstream_after.errors_total - upstream_before.errors_total) as f64,
+            metric_value_or_zero(
+                &output_after,
+                "upstream_errors_total",
+                &[("upstream", "udp://9.9.9.9:53"), ("error", "timeout")]
+            ) - metric_value_or_zero(
+                &output_before,
+                "upstream_errors_total",
+                &[("upstream", "udp://9.9.9.9:53"), ("error", "timeout")]
             )
         );
     }

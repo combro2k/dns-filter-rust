@@ -2,10 +2,13 @@
 
 description="dns-filter DNS filtering service"
 command="/usr/bin/dns-filter"
-command_args="start --direct --config /etc/dns-filter/config.yaml"
+: ${dns_filter_config:=/etc/dns-filter/config.yaml}
+: ${dns_filter_chroot_dir:=/var/lib/dns-filter}
+
+command_args="start --direct --config ${dns_filter_config}"
 command_background="yes"
 pidfile="/run/${RC_SVCNAME}.pid"
-directory="/var/lib/dns-filter"
+directory="${dns_filter_chroot_dir}"
 output_log="/var/log/${RC_SVCNAME}/${RC_SVCNAME}.log"
 error_log="/var/log/${RC_SVCNAME}/${RC_SVCNAME}.log"
 
@@ -16,23 +19,51 @@ depend() {
 	need net
 }
 
+is_ssl_bind_mounted() {
+	grep -qs "[[:space:]]${dns_filter_chroot_dir}/etc/ssl[[:space:]]" /proc/mounts
+}
+
 start_pre() {
-	checkpath -d /var/lib/dns-filter
+	checkpath -d "${dns_filter_chroot_dir}"
 	checkpath -d /run/dns-filter
 	checkpath -d /var/log/${RC_SVCNAME}
+	checkpath -d "${dns_filter_chroot_dir}/etc"
+	checkpath -d "${dns_filter_chroot_dir}/etc/ssl"
 	# Ensure the chroot directory is owned by the target user so the
 	# process can write state files (e.g. filter cache) after priv-drop.
-	checkpath -d -o nobody:nogroup /var/lib/dns-filter
+	checkpath -d -o nobody:nogroup "${dns_filter_chroot_dir}"
+
+	if [ -d /etc/ssl ] && ! is_ssl_bind_mounted; then
+		ebegin "Bind-mounting /etc/ssl into ${dns_filter_chroot_dir}/etc/ssl"
+		mount --bind /etc/ssl "${dns_filter_chroot_dir}/etc/ssl" || {
+			eend 1
+			return 1
+		}
+		mount -o remount,bind,ro "${dns_filter_chroot_dir}/etc/ssl" || {
+			umount "${dns_filter_chroot_dir}/etc/ssl"
+			eend 1
+			return 1
+		}
+		eend 0
+	fi
+}
+
+stop_post() {
+	if is_ssl_bind_mounted; then
+		ebegin "Unmounting ${dns_filter_chroot_dir}/etc/ssl"
+		umount "${dns_filter_chroot_dir}/etc/ssl"
+		eend $?
+	fi
 }
 
 status() {
 	ebegin "Status of ${RC_SVCNAME}"
-	/usr/bin/dns-filter status --config /etc/dns-filter/config.yaml
+	/usr/bin/dns-filter status --config "${dns_filter_config}"
 	eend $?
 }
 
 reload() {
 	ebegin "Reloading ${RC_SVCNAME}"
-	/usr/bin/dns-filter reload --config /etc/dns-filter/config.yaml
+	/usr/bin/dns-filter reload --config "${dns_filter_config}"
 	eend $?
 }

@@ -217,6 +217,13 @@ dns-filter stop                    # via control socket
 dns-filter stop --socket /run/dns-filter/custom.sock    # explicit socket override
 ```
 
+When running with `security.chroot_dir`, the packaged unit bind-mounts host
+trust roots into the jail (`/etc/ssl` -> `/var/lib/dns-filter/etc/ssl`) so
+DoH/DoT/DoQ upstream certificate validation continues to work after chroot.
+
+If you use `outbound.fwmark`, keep `CAP_NET_ADMIN` in the unit capability set
+in addition to `CAP_NET_BIND_SERVICE`.
+
 ### OpenRC Integration
 
 ```bash
@@ -246,6 +253,18 @@ dns-filter status --socket /run/dns-filter/custom.sock
 sudo rc-service dns-filter stop    # via OpenRC
 dns-filter stop                    # via control socket
 dns-filter stop --socket /run/dns-filter/custom.sock    # explicit socket override
+```
+
+For chrooted deployments, the packaged OpenRC script now bind-mounts host
+trust roots into the jail during `start_pre` and unmounts them in `stop_post`
+(`/etc/ssl` -> `${dns_filter_chroot_dir}/etc/ssl`). This keeps upstream
+certificate validation functional for DoH/DoT/DoQ after chroot.
+
+You can override script defaults from `/etc/conf.d/dns-filter`:
+
+```bash
+dns_filter_config=/etc/dns-filter/config.yaml
+dns_filter_chroot_dir=/var/lib/dns-filter
 ```
 
 ### Verify Installation

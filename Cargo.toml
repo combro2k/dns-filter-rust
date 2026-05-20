@@ -37,7 +37,6 @@ tracing-appender = "0.2"
 tokio-rustls = "0.26"
 rustls-pemfile = "2.1"
 webpki-roots = "0.26"
-chrono = "0.4"
 rustls = "0.23"
 rustls-pki-types = "1"
 syslog = "6"
@@ -49,8 +48,6 @@ schemars = { version = "1", optional = true }
 fuzzy-matcher = { version = "0.3", optional = true }
 utoipa = { version = "5", optional = true }
 quinn = { version = "0.11.9", optional = true }
-opentelemetry = { version = "0.24", features = ["metrics"] }
-opentelemetry-prometheus = "0.15"
 prometheus = "0.13"
 
 [features]
