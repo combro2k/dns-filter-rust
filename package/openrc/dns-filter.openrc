@@ -25,6 +25,12 @@ start_pre() {
 	checkpath -d -o nobody:nogroup /var/lib/dns-filter
 }
 
+status() {
+	ebegin "Status of ${RC_SVCNAME}"
+	/usr/bin/dns-filter status --config /etc/dns-filter/config.yaml
+	eend $?
+}
+
 reload() {
 	ebegin "Reloading ${RC_SVCNAME}"
 	/usr/bin/dns-filter reload --config /etc/dns-filter/config.yaml
