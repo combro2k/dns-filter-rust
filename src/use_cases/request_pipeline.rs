@@ -8,6 +8,7 @@ use hickory_proto::rr::rdata::{A, AAAA};
 use hickory_proto::rr::{RData, Record, RecordType};
 
 use crate::entities::filter::FilterDecision;
+use crate::frameworks::metrics::{record_blocklist_hit, record_dns_query, QueryDecision};
 use crate::use_cases::filtering::DomainFilter;
 use crate::use_cases::upstream_resolver::{UpstreamResolveError, UpstreamResolver};
 
@@ -178,6 +179,7 @@ impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError
         request: &DnsPipelineRequest,
     ) -> Result<Option<DnsPipelineResponse>, DnsPipelineError> {
         if !self.filtering_enabled.load(Ordering::Relaxed) {
+            record_dns_query("dns", QueryDecision::Passthrough);
             return Ok(None);
         }
 
@@ -191,8 +193,17 @@ impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError
 
         let domain = first_query.name().to_ascii();
         match self.domain_filter.decide(&domain) {
-            FilterDecision::Allow | FilterDecision::Neutral => Ok(None),
+            FilterDecision::Allow => {
+                record_dns_query("dns", QueryDecision::Allowed);
+                Ok(None)
+            }
+            FilterDecision::Neutral => {
+                record_dns_query("dns", QueryDecision::Passthrough);
+                Ok(None)
+            }
             FilterDecision::Block => {
+                record_dns_query("dns", QueryDecision::Blocked);
+                record_blocklist_hit(None);
                 tracing::info!(domain = %domain, "query blocked by filter policy");
                 let response = build_sinkhole_response(
                     &message,
@@ -226,6 +237,15 @@ impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError
         let response = match self.upstream_resolver.resolve(request.query.clone()).await {
             Ok(r) => r,
             Err(error) => {
+                if is_dnssec_nodata_protocol_error(&error) {
+                    tracing::info!(
+                        %error,
+                        "upstream returned DNSSEC NSEC/NODATA proof; returning NOERROR-empty"
+                    );
+                    return Ok(Some(DnsPipelineResponse::new(build_nodata_response(
+                        &request.query,
+                    ))));
+                }
                 tracing::warn!(%error, "upstream resolution failed; returning SERVFAIL");
                 return Ok(Some(DnsPipelineResponse::new(build_servfail_response(
                     &request.query,
@@ -358,6 +378,20 @@ fn make_aaaa_record(name: hickory_proto::rr::Name, addr: Ipv6Addr) -> Record {
 
 pub fn build_servfail_response(query_bytes: &[u8]) -> Vec<u8> {
     build_error_response(query_bytes, ResponseCode::ServFail)
+}
+
+fn build_nodata_response(query_bytes: &[u8]) -> Vec<u8> {
+    build_error_response(query_bytes, ResponseCode::NoError)
+}
+
+fn is_dnssec_nodata_protocol_error(error: &UpstreamResolveError) -> bool {
+    let UpstreamResolveError::Protocol(message) = error else {
+        return false;
+    };
+
+    // Hickory may surface DNSSEC NSEC-validated NODATA as a protocol error
+    // string, e.g. "Dns(Nsec { ... })".
+    message.contains("Dns(Nsec") || message.contains("Nsec {")
 }
 
 fn build_error_response(query_bytes: &[u8], response_code: ResponseCode) -> Vec<u8> {
@@ -603,6 +637,17 @@ mod tests {
         }
     }
 
+    struct NsecProtocolErrorResolver;
+
+    #[async_trait]
+    impl UpstreamResolver for NsecProtocolErrorResolver {
+        async fn resolve(&self, _query: Vec<u8>) -> Result<Vec<u8>, UpstreamResolveError> {
+            Err(UpstreamResolveError::Protocol(
+                "Dns(Nsec { query: Query { name: Name(\"example.com.\") } })".to_string(),
+            ))
+        }
+    }
+
     struct TestDomainFilter {
         decision: FilterDecision,
     }
@@ -731,6 +776,26 @@ mod tests {
 
         let message = Message::from_vec(&response).expect("valid DNS message");
         assert_eq!(message.response_code, ResponseCode::ServFail);
+    }
+
+    #[tokio::test]
+    async fn dns_pipeline_maps_dnssec_nsec_protocol_error_to_nodata() {
+        let resolver: Arc<dyn UpstreamResolver> = Arc::new(NsecProtocolErrorResolver);
+        let pipeline = DnsRequestPipeline::default()
+            .add_stage(DnsAnyQueryPolicyStage::new(AnyQueryPolicy::Passthrough))
+            .add_stage(DnsUpstreamStage::new(resolver));
+
+        let response = pipeline
+            .handle_request(&DnsPipelineRequest::new(make_query("example.com.")))
+            .await
+            .expect("pipeline should not error")
+            .expect("pipeline should return a response")
+            .into_bytes();
+
+        let message = Message::from_vec(&response).expect("valid DNS message");
+        assert_eq!(message.id, 42);
+        assert_eq!(message.response_code, ResponseCode::NoError);
+        assert!(message.answers.is_empty());
     }
 
     #[tokio::test]

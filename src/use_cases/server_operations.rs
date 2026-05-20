@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -40,6 +41,43 @@ impl QueryStats {
             queries_blocked: AtomicU64::new(0),
             queries_allowed: AtomicU64::new(0),
             queries_passthrough: AtomicU64::new(0),
+        }
+    }
+}
+
+static QUERY_STATS: OnceLock<Arc<QueryStats>> = OnceLock::new();
+
+/// Registers the shared query stats recorder used by request processing stages.
+///
+/// Safe to call multiple times; only the first call is retained.
+pub fn init_query_stats_recorder(stats: Arc<QueryStats>) {
+    let _ = QUERY_STATS.set(stats);
+}
+
+/// Decision outcomes used to update query counters for `/api/v1/stats`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryStatsDecision {
+    Blocked,
+    Allowed,
+    Passthrough,
+}
+
+/// Records query outcome counters when the shared recorder has been initialized.
+pub fn record_query_stats(decision: QueryStatsDecision) {
+    let Some(stats) = QUERY_STATS.get() else {
+        return;
+    };
+
+    stats.queries_total.fetch_add(1, Ordering::Relaxed);
+    match decision {
+        QueryStatsDecision::Blocked => {
+            stats.queries_blocked.fetch_add(1, Ordering::Relaxed);
+        }
+        QueryStatsDecision::Allowed => {
+            stats.queries_allowed.fetch_add(1, Ordering::Relaxed);
+        }
+        QueryStatsDecision::Passthrough => {
+            stats.queries_passthrough.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -1126,18 +1164,18 @@ fn validate_zone_name(zone: &str) -> Result<(), ServerOperationError> {
 
 fn validate_protocol(protocol: &str) -> Result<(), ServerOperationError> {
     match protocol {
-        "dns" | "dot" | "doh" | "recursive" | "json" => Ok(()),
+        "dns" | "dot" | "doh" | "doq" | "recursive" | "json" => Ok(()),
         _ => Err(ServerOperationError::InvalidInput(format!(
-            "invalid protocol '{protocol}'; must be one of: dns, dot, doh, recursive, json"
+            "invalid protocol '{protocol}'; must be one of: dns, dot, doh, doq, recursive, json"
         ))),
     }
 }
 
 fn validate_upstream_protocol(protocol: &str) -> Result<(), ServerOperationError> {
     match protocol {
-        "dns" | "dot" | "doh" | "recursive" => Ok(()),
+        "dns" | "dot" | "doh" | "doq" | "recursive" => Ok(()),
         _ => Err(ServerOperationError::InvalidInput(format!(
-            "invalid upstream protocol '{protocol}'; must be one of: dns, dot, doh, recursive"
+            "invalid upstream protocol '{protocol}'; must be one of: dns, dot, doh, doq, recursive"
         ))),
     }
 }

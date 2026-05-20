@@ -48,13 +48,17 @@ rmcp = { version = "1.7", features = ["server", "transport-streamable-http-serve
 schemars = { version = "1", optional = true }
 fuzzy-matcher = { version = "0.3", optional = true }
 utoipa = { version = "5", optional = true }
+quinn = { version = "0.11.9", optional = true }
+opentelemetry = { version = "0.24", features = ["metrics"] }
+opentelemetry-prometheus = "0.15"
+prometheus = "0.13"
 
 [features]
 default = ["dot", "doh", "doq", "http-api", "mcp", "db-sqlite"]
 plugins = ["wasmtime"]
 dot = ["hickory-server/tls-ring", "dep:rcgen", "dep:hostname"]
 doh = ["hickory-server/https-ring", "dep:rcgen", "dep:hostname"]
-doq = ["hickory-server/quic-ring", "dep:rcgen", "dep:hostname"]
+doq = ["hickory-net/quic-ring", "hickory-server/quic-ring", "dep:hostname", "dep:quinn", "dep:rcgen"]
 http-api = ["dep:axum", "dep:utoipa"]
 mcp = ["dep:axum", "dep:rmcp", "dep:schemars", "dep:fuzzy-matcher"]
 db-sqlite = ["sqlx/sqlite"]

@@ -3,6 +3,7 @@ pub mod control_client;
 pub mod control_socket;
 pub mod database;
 pub mod logging;
+pub mod metrics;
 #[cfg(feature = "plugins")]
 pub mod plugin_runtime;
 pub mod privileges;

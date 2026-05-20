@@ -6,6 +6,7 @@ use std::sync::{
 use async_trait::async_trait;
 
 use crate::entities::resolution::UpstreamStrategy;
+use crate::frameworks::metrics::record_upstream_request;
 
 /// Errors that can occur when resolving a DNS query against an upstream server.
 #[derive(Debug, thiserror::Error)]
@@ -27,6 +28,34 @@ pub enum UpstreamResolveError {
 #[async_trait]
 pub trait UpstreamResolver: Send + Sync {
     async fn resolve(&self, query: Vec<u8>) -> Result<Vec<u8>, UpstreamResolveError>;
+}
+
+/// Wraps a resolver and records per-upstream latency/error metrics.
+pub struct InstrumentedUpstreamResolver {
+    label: String,
+    inner: Arc<dyn UpstreamResolver>,
+}
+
+impl InstrumentedUpstreamResolver {
+    pub fn new(label: String, inner: Arc<dyn UpstreamResolver>) -> Self {
+        Self { label, inner }
+    }
+}
+
+#[async_trait]
+impl UpstreamResolver for InstrumentedUpstreamResolver {
+    async fn resolve(&self, query: Vec<u8>) -> Result<Vec<u8>, UpstreamResolveError> {
+        let started = std::time::Instant::now();
+        let result = self.inner.resolve(query).await;
+        let error_label = result.as_ref().err().map(|e| match e {
+            UpstreamResolveError::Io(_) => "io",
+            UpstreamResolveError::Timeout => "timeout",
+            UpstreamResolveError::Protocol(_) => "protocol",
+            UpstreamResolveError::AllFailed => "all_failed",
+        });
+        record_upstream_request(&self.label, started.elapsed().as_secs_f64(), error_label);
+        result
+    }
 }
 
 /// Dispatches DNS queries to one or more upstream resolvers according to a strategy.

@@ -12,7 +12,6 @@ DNS_PORT="15353"
 DOT_PORT="1853"
 DOH_PORT="1443"
 DOQ_PORT="18853"
-HTTP_PORT="18080"
 METRICS_PORT="19100"
 API_PORT="18090"
 API_TOKEN="test-api-token-for-batch"
@@ -195,10 +194,6 @@ listen:
       cert_path: "cert.pem"
       key_path: "key.pem"
       autogenerate: true
-  http:
-    enabled: true
-    address: "$DNS_HOST"
-    port: $HTTP_PORT
   metrics:
     enabled: true
     address: "$DNS_HOST"
@@ -599,7 +594,7 @@ check_optional_listener_port() {
   if [ "$STRICT" -eq 1 ]; then
     fail "$listener_name port is not reachable on ${DNS_HOST}:${port}"
   else
-    skip "$listener_name port is not reachable (currently expected until listener startup is wired)"
+    skip "$listener_name port is not reachable on ${DNS_HOST}:${port}"
   fi
 
   return 1
@@ -642,19 +637,6 @@ if check_optional_listener_port "DoH" "$DOH_PORT"; then
   fi
 fi
 
-if check_optional_listener_port "HTTP" "$HTTP_PORT"; then
-  if command_exists curl; then
-    http_code="$(curl -sS -o /dev/null -w "%{http_code}" "http://$DNS_HOST:$HTTP_PORT/" 2>/dev/null || true)"
-    if [ "$http_code" != "000" ] && [ -n "$http_code" ]; then
-      pass "HTTP listener responded with code $http_code"
-    else
-      fail "HTTP listener did not respond"
-    fi
-  else
-    skip "HTTP check skipped (install curl)"
-  fi
-fi
-
 if check_optional_listener_port "Metrics" "$METRICS_PORT"; then
   if command_exists curl; then
     metrics_body="$(curl -sS "http://$DNS_HOST:$METRICS_PORT/metrics" 2>/dev/null || true)"
@@ -675,7 +657,7 @@ if command_exists kdig; then
     if [ "$STRICT" -eq 1 ]; then
       fail "DoQ query failed (kdig +quic)"
     else
-      skip "DoQ query failed (currently expected until listener startup is wired)"
+      skip "DoQ query failed (kdig +quic)"
     fi
   fi
 else

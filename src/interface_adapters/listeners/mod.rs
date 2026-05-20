@@ -12,6 +12,7 @@ pub mod handler;
 pub mod http;
 #[cfg(feature = "mcp")]
 pub mod mcp;
+pub mod metrics;
 #[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
 pub mod tls;
 

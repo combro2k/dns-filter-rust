@@ -17,7 +17,9 @@ use dns_filter::frameworks::config::loader::load_config;
 use dns_filter::frameworks::config::merger::merge_with_example;
 #[cfg(feature = "http-api")]
 use dns_filter::frameworks::config::schema::ApiConfig;
-use dns_filter::frameworks::config::schema::{DEFAULT_CONTROL_SOCKET_PATH, DEFAULT_DATABASE_URL};
+use dns_filter::frameworks::config::schema::{
+    MetricsConfig, DEFAULT_CONTROL_SOCKET_PATH, DEFAULT_DATABASE_URL,
+};
 use dns_filter::frameworks::control_client;
 use dns_filter::frameworks::control_socket::ControlServer;
 use dns_filter::frameworks::database;
@@ -26,6 +28,7 @@ use dns_filter::frameworks::database::{
     SqlxUpstreamConfigRepository, SqlxZoneDiscoveryRepository, SqlxZoneRepository,
 };
 use dns_filter::frameworks::logging;
+use dns_filter::frameworks::metrics::init_prometheus_metrics;
 use dns_filter::frameworks::privileges::{
     drop_privileges, PrivilegeDropConfig, DEFAULT_CHROOT_DIR, DEFAULT_GROUP, DEFAULT_USER,
 };
@@ -35,6 +38,7 @@ use dns_filter::interface_adapters::listeners::build_tls_config_with_alpn;
 use dns_filter::interface_adapters::listeners::handler::HickoryRequestHandler;
 #[cfg(feature = "http-api")]
 use dns_filter::interface_adapters::listeners::http::{start_api_server, ApiState};
+use dns_filter::interface_adapters::listeners::metrics::start_metrics_server;
 use dns_filter::interface_adapters::listeners::{bind_tcp_tokio, bind_udp_tokio, parse_bind_addrs};
 use dns_filter::use_cases::config_bootstrap::{
     build_any_query_policy, build_dns_request_pipeline_full, build_domain_filter_with_cache,
@@ -45,9 +49,9 @@ use dns_filter::use_cases::config_bootstrap::{
 use dns_filter::use_cases::config_from_db::{apply_db_config, Repositories};
 use dns_filter::use_cases::reload::reload_config_from_db_cached;
 use dns_filter::use_cases::seed;
-use dns_filter::use_cases::server_operations::QueryStats;
 #[cfg(any(feature = "http-api", feature = "mcp"))]
 use dns_filter::use_cases::server_operations::ServerOperations;
+use dns_filter::use_cases::server_operations::{init_query_stats_recorder, QueryStats};
 #[cfg(feature = "http-api")]
 use std::net::SocketAddr;
 #[cfg(feature = "http-api")]
@@ -999,6 +1003,7 @@ async fn run_daemon(config_path: String, debug: bool) {
         .unwrap_or_default()
         .as_secs();
     let shared_stats = Arc::new(QueryStats::new());
+    init_query_stats_recorder(Arc::clone(&shared_stats));
 
     let status_stats = Arc::clone(&shared_stats);
     let status_filtering_enabled = Arc::clone(&filtering_enabled);
@@ -1069,6 +1074,19 @@ async fn run_daemon(config_path: String, debug: bool) {
     #[cfg(not(feature = "http-api"))]
     let api_task: Option<tokio::task::JoinHandle<()>> = None;
 
+    if config
+        .listen
+        .metrics
+        .as_ref()
+        .is_some_and(|cfg| cfg.enabled)
+    {
+        if let Err(error) = init_prometheus_metrics() {
+            eprintln!("failed to initialize metrics: {error:#}");
+            std::process::exit(1);
+        }
+        spawn_metrics_servers(&config.listen.metrics);
+    }
+
     // Start the MCP server if configured.
     #[cfg(feature = "mcp")]
     let mcp_task = spawn_mcp_server(&config.mcp, Arc::clone(&server_ops), shutdown.clone());
@@ -1113,6 +1131,28 @@ async fn run_daemon(config_path: String, debug: bool) {
         } => {
             tracing::warn!("MCP server exited unexpectedly");
         }
+    }
+}
+
+fn spawn_metrics_servers(metrics_config: &Option<MetricsConfig>) {
+    let Some(metrics_config) = metrics_config.as_ref().filter(|c| c.enabled) else {
+        return;
+    };
+
+    let addrs = match parse_bind_addrs(&metrics_config.addresses, metrics_config.port) {
+        Ok(addrs) => addrs,
+        Err(error) => {
+            eprintln!("failed to parse metrics bind addresses: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    for addr in addrs {
+        tokio::spawn(async move {
+            if let Err(error) = start_metrics_server(addr).await {
+                tracing::error!(error = %error, addr = %addr, "metrics server failed");
+            }
+        });
     }
 }
 

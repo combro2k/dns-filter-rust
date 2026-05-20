@@ -4,7 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Outbound and zone-forwarded DoQ support**: added a DNS-over-QUIC upstream client with hostname parsing, bootstrap A/AAAA resolution, QUIC/TLS connection reuse, and outbound routing support including source-IP binding and Linux `SO_MARK` for fwmark-based policy routing. Global upstream resolvers and zone-forwarding servers now accept `protocol: doq`.
+- **Prometheus metrics listener and instrumentation**: implemented `listen.metrics` as a dedicated HTTP listener exposing `/metrics` in Prometheus text format. Added counters and histogram for DNS query outcomes (blocked/allowed/passthrough), blocklist hits, filter-document cache restore hits/misses, upstream request latency, and upstream errors.
+
 ### Changed
+- **DNSSEC NSEC/NODATA fallback handling in request pipeline**: when an upstream resolver surfaces DNSSEC NSEC-based proof-of-nonexistence as a protocol error string (for example from recursive resolution of signed CNAME chains with no requested RRset), the DNS pipeline now returns a `NOERROR` empty-answer response instead of `SERVFAIL`. This reduces false SERVFAIL responses for valid NODATA outcomes.
+- **Listener batch test no longer probes dead `listen.http` wiring**: removed the temporary `listen.http` section and its `127.0.0.1:18080` reachability check from `tests/listener_batch_test.sh`. The code serves the Axum HTTP API from `api.port`, not `listen.http.port`, so the old strict-mode failure was a test bug rather than a product bug.
+- **Per-upstream Prometheus latency/error metrics**: upstream resolver timing and error counters are now labeled by configured upstream target (`upstream="<protocol>://<address>"`) instead of a single global aggregate, enabling per-upstream SLO dashboards and alerting.
 - **Init-system wiring for `start`/`stop`**: `dns-filter start` and `dns-filter stop` now delegate to systemd (`systemctl`) or OpenRC (`rc-service`) when run with default settings, so service-managed installs use the init system by default. Added `--direct` to both commands to force direct daemon/control-socket behavior. Packaged systemd/OpenRC service definitions now use `--direct` internally to avoid recursion.
 - **Direct control-socket status only**: `dns-filter status` now always queries daemon runtime statistics via the control socket and no longer delegates to systemd/OpenRC. Removed `--direct` from the `status` subcommand.
 - **OpenRC `status()` function**: added a `status()` hook to `dns-filter.openrc` so `rc-service dns-filter status` calls `dns-filter status` directly via the control socket.
@@ -14,6 +21,7 @@ All notable changes to this project will be documented in this file.
 - **Control socket default moved to chroot context**: default `control.socket_path` changed from `/run/dns-filter/dns-filter.sock` to `run/dns-filter.sock` (resolved within chroot).
 - **Protocol-aware upstream address validation for DoH**: upstream CRUD mutations now reject `protocol: doh` addresses that are missing a URL scheme or do not use `https://`. This prevents invalid DoH endpoints from being persisted and later failing during restart/reload.
 - **MCP `fwmark` clear sentinel compatibility**: the MCP `update_upstream` tool now accepts string `"None"` (case-insensitive) for `fwmark` in addition to JSON `null`, allowing clients that cannot emit null literals to clear the stored mark.
+- **DoQ listener test wording**: removed stale "currently expected until listener startup is wired" language from the listener batch test script now that DoQ listener startup is wired and outbound DoQ is implemented.
 
 ## [2.5.1] - 2026-05-20
 

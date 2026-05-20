@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use crate::entities::filter::FilterDecision;
 use crate::frameworks::config::schema::{DnsFilterConfig, NamedList};
+use crate::frameworks::metrics::record_cache_operation;
 use crate::use_cases::repositories::FilterCacheRepository;
 use crate::use_cases::repository_types::FilterCacheDocumentRecord;
 use anyhow::{anyhow, Context, Result};
@@ -288,6 +289,7 @@ impl ListFilterEngine {
         for runtime in &self.runtimes {
             match cache_repo.load(&runtime.key).await {
                 Ok(Some(record)) => {
+                    record_cache_operation(true);
                     let document = match serde_json::from_str::<CachedListDocument>(&record.value) {
                         Ok(doc) => doc,
                         Err(e) => {
@@ -324,8 +326,11 @@ impl ListFilterEngine {
                     );
                     restored += 1;
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    record_cache_operation(false);
+                }
                 Err(error) => {
+                    record_cache_operation(false);
                     tracing::warn!(
                         list = %runtime.name,
                         key = %runtime.key,

@@ -15,6 +15,8 @@ use crate::frameworks::upstream::recursive_resolver::{
     load_root_hints, load_root_key, NameserverIpFamily, DEFAULT_MAX_HOPS,
 };
 use crate::frameworks::upstream::runtime::OutboundRouting;
+#[cfg(feature = "doq")]
+use crate::frameworks::upstream::DnsQuicClient;
 use crate::frameworks::upstream::{
     DnsHttpsClient, DnsTlsClient, DnsUdpTcpClient, RecursiveResolver,
 };
@@ -24,7 +26,9 @@ use crate::use_cases::request_pipeline::{
     AnyQueryPolicy, DnsAnyQueryPolicyStage, DnsFilterStage, DnsRequestPipeline,
     DnsServfailFallbackStage, DnsUpstreamStage,
 };
-use crate::use_cases::upstream_resolver::{StrategyUpstreamResolver, UpstreamResolver};
+use crate::use_cases::upstream_resolver::{
+    InstrumentedUpstreamResolver, StrategyUpstreamResolver, UpstreamResolver,
+};
 use crate::use_cases::zone_authority::{ZoneAuthorityResolver, ZoneSourceAuth};
 use crate::use_cases::zone_discovery::build_zone_discovery_entries;
 use crate::use_cases::zone_forwarding::{ZoneEntry, ZoneForwardingStage};
@@ -645,6 +649,14 @@ fn build_single_zone_upstream_resolver(
                 client.with_bootstrap_resolvers(bootstrap_resolvers.to_vec()),
             ))
         }
+        #[cfg(feature = "doq")]
+        "doq" => {
+            let client = DnsQuicClient::parse_endpoint(&server.address)
+                .map_err(|e| anyhow!("invalid DoQ zone server '{}': {e}", server.address))?;
+            Ok(Arc::new(
+                client.with_bootstrap_resolvers(bootstrap_resolvers.to_vec()),
+            ))
+        }
         "recursive" => {
             let max_hops = server.max_hops.unwrap_or(DEFAULT_MAX_HOPS);
             let nameserver_ip_family = match server.nameserver_ip_family.as_deref() {
@@ -668,7 +680,7 @@ fn build_single_zone_upstream_resolver(
             )))
         }
         other => bail!(
-            "unsupported zone server protocol: '{other}'; supported values are: dns, dot, doh, recursive, json"
+            "unsupported zone server protocol: '{other}'; supported values are: dns, dot, doh, doq, recursive, json"
         ),
     }
 }
@@ -729,32 +741,40 @@ fn build_single_upstream_resolver(
     let fwmark = server.fwmark.or(global_outbound.and_then(|o| o.fwmark));
     let routing = OutboundRouting::new(bind_address, fwmark);
 
-    match server.protocol.as_str() {
+    let resolver: Arc<dyn UpstreamResolver> = match server.protocol.as_str() {
         "dns" => {
             let address = parse_dns_address(&server.address)?;
-            Ok(Arc::new(
-                DnsUdpTcpClient::new(address).with_routing(routing),
-            ))
+            Arc::new(DnsUdpTcpClient::new(address).with_routing(routing))
         }
         "dot" => {
             let client = DnsTlsClient::parse_endpoint(&server.address)
                 .map_err(|e| anyhow!("invalid DoT upstream '{}': {e}", server.address))?;
-            Ok(Arc::new(
+            Arc::new(
                 client
                     .with_bootstrap_resolvers(bootstrap_resolvers.to_vec())
                     .with_routing(routing),
-            ))
+            )
         }
         "doh" => {
             let auth =
                 validate_server_auth("upstream", "doh", true, server.authentication.as_ref())?;
             let client = DnsHttpsClient::new(server.address.clone(), auth)
                 .map_err(|e| anyhow!("invalid DoH upstream '{}': {e}", server.address))?;
-            Ok(Arc::new(
+            Arc::new(
                 client
                     .with_bootstrap_resolvers(bootstrap_resolvers.to_vec())
                     .with_routing(routing),
-            ))
+            )
+        }
+        #[cfg(feature = "doq")]
+        "doq" => {
+            let client = DnsQuicClient::parse_endpoint(&server.address)
+                .map_err(|e| anyhow!("invalid DoQ upstream '{}': {e}", server.address))?;
+            Arc::new(
+                client
+                    .with_bootstrap_resolvers(bootstrap_resolvers.to_vec())
+                    .with_routing(routing),
+            )
         }
         "recursive" => {
             let max_hops = server.max_hops.unwrap_or(DEFAULT_MAX_HOPS);
@@ -770,19 +790,22 @@ fn build_single_upstream_resolver(
             } else {
                 None
             };
-            Ok(Arc::new(RecursiveResolver::with_routing(
+            Arc::new(RecursiveResolver::with_routing(
                 root_hints,
                 max_hops,
                 nameserver_ip_family,
                 dnssec,
                 trust_anchor,
                 routing,
-            )))
+            ))
         }
         other => bail!(
-            "unsupported upstream protocol: {other}; supported values are: dns, dot, doh, recursive"
+            "unsupported upstream protocol: {other}; supported values are: dns, dot, doh, doq, recursive"
         ),
-    }
+    };
+
+    let label = format!("{}://{}", server.protocol, server.address);
+    Ok(Arc::new(InstrumentedUpstreamResolver::new(label, resolver)))
 }
 
 fn parse_dns_address(value: &str) -> Result<SocketAddr> {
@@ -1016,8 +1039,8 @@ mod tests {
     fn build_upstream_resolver_rejects_unknown_protocol() {
         let config = base_config(vec![UpstreamServer {
             enabled: true,
-            protocol: "quic".into(),
-            address: "quic://dns.example.com".into(),
+            protocol: "foo".into(),
+            address: "foo://dns.example.com".into(),
             ..Default::default()
         }]);
 
@@ -1033,6 +1056,20 @@ mod tests {
             enabled: true,
             protocol: "doh".into(),
             address: "https://dns.example.com/dns-query".into(),
+            ..Default::default()
+        }]);
+
+        let result = build_upstream_resolver(&config);
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "doq")]
+    #[test]
+    fn build_upstream_resolver_accepts_doq_server() {
+        let config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "doq".into(),
+            address: "quic://dns.example.com:8853".into(),
             ..Default::default()
         }]);
 
@@ -1559,7 +1596,7 @@ mod tests {
             "home.arpa",
             vec![ZoneServerConfig {
                 enabled: true,
-                protocol: "quic".into(),
+                protocol: "foo".into(),
                 address: "192.168.1.1:853".into(),
                 ..Default::default()
             }],
@@ -1571,6 +1608,29 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unsupported zone server protocol"));
+    }
+
+    #[cfg(feature = "doq")]
+    #[test]
+    fn build_zone_entries_accepts_doq_forwarding() {
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "8.8.8.8:53".into(),
+            ..Default::default()
+        }]);
+        config.resolvers.zones = vec![zone_config(
+            "home.arpa",
+            vec![ZoneServerConfig {
+                enabled: true,
+                protocol: "doq".into(),
+                address: "quic://dns.example.com:8853".into(),
+                ..Default::default()
+            }],
+        )];
+
+        let result = build_zone_entries(&config);
+        assert!(result.is_ok());
     }
 
     // ── Authentication tests ───────────────────────────────────────────────────

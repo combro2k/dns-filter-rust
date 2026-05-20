@@ -694,7 +694,7 @@ resolvers:
       strategy: "round_robin"       # Optional: override global strategy for this zone
       servers:
         - enabled: true
-          protocol: "dns"           # dns | dot | doh | recursive | json
+          protocol: "dns"           # dns | dot | doh | doq | recursive | json
           address: "192.168.1.1:53"
 ```
 
@@ -707,10 +707,11 @@ Each zone entry has a `servers[]` list. Every server requires `enabled`, `protoc
 | `dns` | `<ip>:<port>` | No |
 | `dot` | `tls://<host>[:<port>]` or `<ip>[:<port>]` | No |
 | `doh` | `https://…` | Yes (Bearer or Basic) |
+| `doq` | `quic://<host>[:<port>]`, `<host>[:<port>]`, or `<ip>[:<port>]` | No |
 | `recursive` | *(no address needed)* | No |
 | `json` | `file:///…`, `http://…`, or `https://…` | Yes for HTTP(S) |
 
-**Zone Forwarding (dns/dot/doh/recursive):**
+**Zone Forwarding (dns/dot/doh/doq/recursive):**
 ```yaml
 zones:
   - zone: "home.arpa"
@@ -2384,11 +2385,15 @@ filtering:
 curl http://127.0.0.1:9100/metrics | grep dns
 
 # Key metrics to monitor
-# dns_filter_queries_total - total queries handled
-# dns_filter_filtered_total - total queries blocked
-# dns_filter_upstream_latency_seconds - upstream resolver latency
-# dns_filter_cache_hits_total - cache hit count
-# dns_filter_cache_misses_total - cache miss count
+# dns_queries_total - total queries handled
+# dns_queries_blocked - total queries blocked
+# dns_queries_allowed - total queries explicitly allowlisted
+# dns_queries_passthrough - total passthrough queries
+# blocklist_hits_total - total blocklist matches
+# cache_hits_total - filter-document cache restore hits
+# cache_misses_total - filter-document cache restore misses
+# upstream_request_duration_seconds - upstream resolver latency histogram
+# upstream_errors_total - total upstream resolver errors
 ```
 
 ### Optimization Tips
