@@ -27,8 +27,9 @@ listen:
       - "::"
     port: 853
     tls:
-      cert_path: "/etc/dns-filter/cert.pem"
-      key_path: "/etc/dns-filter/key.pem"
+      # Relative paths are resolved from security.chroot_dir.
+      cert_path: "certs/cert.pem"
+      key_path: "certs/key.pem"
       autogenerate: true
 
   doh:
@@ -38,8 +39,8 @@ listen:
       - "::"
     port: 443
     tls:
-      cert_path: "/etc/dns-filter/cert.pem"
-      key_path: "/etc/dns-filter/key.pem"
+      cert_path: "certs/cert.pem"
+      key_path: "certs/key.pem"
       autogenerate: true
 
   doq:
@@ -49,8 +50,8 @@ listen:
       - "::"
     port: 8853
     tls:
-      cert_path: "/etc/dns-filter/cert.pem"
-      key_path: "/etc/dns-filter/key.pem"
+      cert_path: "certs/cert.pem"
+      key_path: "certs/key.pem"
       autogenerate: true
 
   http:
@@ -184,7 +185,7 @@ resolvers:
       protocol: "dot"
       address: "dns.google:853"
       tls:
-        cert_path: "/etc/dns-filter/upstream-cert.pem"
+        cert_path: "certs/upstream-cert.pem"
         autogenerate: true
 
     # DNS over HTTPS
@@ -192,7 +193,7 @@ resolvers:
       protocol: "doh"
       address: "https://dns.google/dns-query"
       tls:
-        cert_path: "/etc/dns-filter/upstream-cert.pem"
+        cert_path: "certs/upstream-cert.pem"
         autogenerate: true
 
     # DNS over QUIC
@@ -200,7 +201,7 @@ resolvers:
       protocol: "doq"
       address: "dns.google:8853"
       tls:
-        cert_path: "/etc/dns-filter/upstream-cert.pem"
+        cert_path: "certs/upstream-cert.pem"
         autogenerate: true
 
     # Full recursive resolution with DNSSEC validation
@@ -356,7 +357,8 @@ api:
 # Control socket — CLI-based daemon management (stop, reload)
 # ---------------------------------------------------------------------------
 control:
-  socket_path: "/run/dns-filter/dns-filter.sock"
+  # Relative paths are resolved from security.chroot_dir.
+  socket_path: "run/dns-filter.sock"
 
 # ---------------------------------------------------------------------------
 # Database — operational config storage

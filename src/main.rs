@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use nix::unistd;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -34,7 +35,9 @@ use dns_filter::interface_adapters::listeners::http::{start_api_server, ApiState
 use dns_filter::interface_adapters::listeners::{bind_tcp_tokio, bind_udp_tokio, parse_bind_addrs};
 use dns_filter::use_cases::config_bootstrap::{
     build_any_query_policy, build_dns_request_pipeline_full, build_domain_filter_with_cache,
-    build_upstream_resolver, build_zone_entries, validate_config,
+    build_upstream_resolver, build_zone_entries, resolve_path_for_chroot_host,
+    resolve_path_for_chroot_runtime, sqlite_url_for_chroot_host, sqlite_url_for_chroot_runtime,
+    validate_config,
 };
 use dns_filter::use_cases::config_from_db::{apply_db_config, Repositories};
 use dns_filter::use_cases::reload::reload_config_from_db_cached;
@@ -190,11 +193,25 @@ async fn main() {
 /// Send a control command (stop/reload) to the running daemon.
 fn run_control_command(config_path: &str, command: &str) {
     let socket_path = match load_config(config_path) {
-        Ok(cfg) => cfg.socket_path().to_string(),
+        Ok(cfg) => {
+            let chroot_dir = cfg
+                .security
+                .as_ref()
+                .and_then(|s| s.chroot_dir.as_deref())
+                .unwrap_or(DEFAULT_CHROOT_DIR);
+            match resolve_path_for_chroot_host(cfg.socket_path(), chroot_dir) {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!("invalid control socket path in config: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Err(e) => {
             eprintln!("failed to load config: {e}");
             eprintln!("using default control socket path");
-            DEFAULT_CONTROL_SOCKET_PATH.to_string()
+            resolve_path_for_chroot_host(DEFAULT_CONTROL_SOCKET_PATH, DEFAULT_CHROOT_DIR)
+                .unwrap_or_else(|_| DEFAULT_CONTROL_SOCKET_PATH.to_string())
         }
     };
 
@@ -263,12 +280,30 @@ async fn run_daemon(config_path: String, debug: bool) {
     };
 
     let mut config = match load_config(&config_path) {
-        Ok(cfg) => validate_config(cfg),
+        Ok(cfg) => match validate_config(cfg) {
+            Ok(validated) => validated,
+            Err(e) => {
+                eprintln!("invalid configuration: {e:#}");
+                std::process::exit(1);
+            }
+        },
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
         }
     };
+
+    let security = config.security.as_ref();
+    let priv_user = security
+        .and_then(|s| s.user.as_deref())
+        .unwrap_or(DEFAULT_USER);
+    let priv_group = security
+        .and_then(|s| s.group.as_deref())
+        .unwrap_or(DEFAULT_GROUP);
+    let priv_chroot = security
+        .and_then(|s| s.chroot_dir.as_deref())
+        .unwrap_or(DEFAULT_CHROOT_DIR)
+        .to_string();
 
     // Initialize logging from configuration.
     // Must be done BEFORE drop_privileges() so syslog can access /dev/log.
@@ -280,6 +315,19 @@ async fn run_daemon(config_path: String, debug: bool) {
         }
     };
 
+    // Drop privileges early so database and TLS/control files are opened in chroot context.
+    let will_chroot = unistd::getuid().is_root();
+
+    let priv_config = PrivilegeDropConfig {
+        user: priv_user,
+        group: priv_group,
+        chroot_dir: Some(Path::new(&priv_chroot)),
+    };
+    if let Err(e) = drop_privileges(&priv_config) {
+        eprintln!("failed to drop privileges: {e:#}");
+        std::process::exit(1);
+    }
+
     // --- Initialize database ---
     let db_url = config
         .database
@@ -287,7 +335,19 @@ async fn run_daemon(config_path: String, debug: bool) {
         .map(|d| d.url.as_str())
         .unwrap_or(DEFAULT_DATABASE_URL);
 
-    let db_pool = match database::pool::init_pool(db_url).await {
+    let runtime_db_url = match if will_chroot {
+        sqlite_url_for_chroot_runtime(db_url, &priv_chroot)
+    } else {
+        sqlite_url_for_chroot_host(db_url, &priv_chroot)
+    } {
+        Ok(url) => url,
+        Err(e) => {
+            eprintln!("invalid database.url for chroot runtime: {e:#}");
+            std::process::exit(1);
+        }
+    };
+
+    let db_pool = match database::pool::init_pool(&runtime_db_url).await {
         Ok(pool) => pool,
         Err(e) => {
             eprintln!("failed to initialize database: {e:#}");
@@ -446,8 +506,32 @@ async fn run_daemon(config_path: String, debug: bool) {
                 std::process::exit(1);
             }
         };
+        let mut runtime_tls = dot_config.tls.clone();
+        runtime_tls.cert_path = match if will_chroot {
+            resolve_path_for_chroot_runtime(&runtime_tls.cert_path, &priv_chroot)
+        } else {
+            resolve_path_for_chroot_host(&runtime_tls.cert_path, &priv_chroot)
+        } {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("invalid DoT tls.cert_path: {e:#}");
+                std::process::exit(1);
+            }
+        };
+        runtime_tls.key_path = match if will_chroot {
+            resolve_path_for_chroot_runtime(&runtime_tls.key_path, &priv_chroot)
+        } else {
+            resolve_path_for_chroot_host(&runtime_tls.key_path, &priv_chroot)
+        } {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("invalid DoT tls.key_path: {e:#}");
+                std::process::exit(1);
+            }
+        };
+
         let tls_config =
-            match build_tls_config_with_alpn(&dot_config.tls, &dot_config.addresses, b"dot") {
+            match build_tls_config_with_alpn(&runtime_tls, &dot_config.addresses, b"dot") {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("failed to configure DoT TLS: {e}");
@@ -484,8 +568,32 @@ async fn run_daemon(config_path: String, debug: bool) {
                 std::process::exit(1);
             }
         };
+        let mut runtime_tls = doh_config.tls.clone();
+        runtime_tls.cert_path = match if will_chroot {
+            resolve_path_for_chroot_runtime(&runtime_tls.cert_path, &priv_chroot)
+        } else {
+            resolve_path_for_chroot_host(&runtime_tls.cert_path, &priv_chroot)
+        } {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("invalid DoH tls.cert_path: {e:#}");
+                std::process::exit(1);
+            }
+        };
+        runtime_tls.key_path = match if will_chroot {
+            resolve_path_for_chroot_runtime(&runtime_tls.key_path, &priv_chroot)
+        } else {
+            resolve_path_for_chroot_host(&runtime_tls.key_path, &priv_chroot)
+        } {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("invalid DoH tls.key_path: {e:#}");
+                std::process::exit(1);
+            }
+        };
+
         let tls_config =
-            match build_tls_config_with_alpn(&doh_config.tls, &doh_config.addresses, b"h2") {
+            match build_tls_config_with_alpn(&runtime_tls, &doh_config.addresses, b"h2") {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("failed to configure DoH TLS: {e}");
@@ -524,8 +632,32 @@ async fn run_daemon(config_path: String, debug: bool) {
                 std::process::exit(1);
             }
         };
+        let mut runtime_tls = doq_config.tls.clone();
+        runtime_tls.cert_path = match if will_chroot {
+            resolve_path_for_chroot_runtime(&runtime_tls.cert_path, &priv_chroot)
+        } else {
+            resolve_path_for_chroot_host(&runtime_tls.cert_path, &priv_chroot)
+        } {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("invalid DoQ tls.cert_path: {e:#}");
+                std::process::exit(1);
+            }
+        };
+        runtime_tls.key_path = match if will_chroot {
+            resolve_path_for_chroot_runtime(&runtime_tls.key_path, &priv_chroot)
+        } else {
+            resolve_path_for_chroot_host(&runtime_tls.key_path, &priv_chroot)
+        } {
+            Ok(path) => path,
+            Err(e) => {
+                eprintln!("invalid DoQ tls.key_path: {e:#}");
+                std::process::exit(1);
+            }
+        };
+
         let tls_config =
-            match build_tls_config_with_alpn(&doq_config.tls, &doq_config.addresses, b"doq") {
+            match build_tls_config_with_alpn(&runtime_tls, &doq_config.addresses, b"doq") {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("failed to configure DoQ TLS: {e}");
@@ -552,9 +684,18 @@ async fn run_daemon(config_path: String, debug: bool) {
         }
     }
 
-    // Bind control socket while still running as root (before chroot).
-    // The fd survives chroot so the accept loop continues to work.
-    let control_socket_path = config.socket_path().to_string();
+    // Bind control socket inside the chroot runtime filesystem.
+    let control_socket_path = match if will_chroot {
+        resolve_path_for_chroot_runtime(config.socket_path(), &priv_chroot)
+    } else {
+        resolve_path_for_chroot_host(config.socket_path(), &priv_chroot)
+    } {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("invalid control.socket_path for chroot runtime: {e:#}");
+            std::process::exit(1);
+        }
+    };
     let control_server = match ControlServer::bind(&control_socket_path) {
         Ok(s) => s,
         Err(e) => {
@@ -562,27 +703,6 @@ async fn run_daemon(config_path: String, debug: bool) {
             std::process::exit(1);
         }
     };
-
-    // Drop privileges: chroot + setgid + setuid + retain CAP_NET_BIND_SERVICE.
-    let security = config.security.as_ref();
-    let priv_user = security
-        .and_then(|s| s.user.as_deref())
-        .unwrap_or(DEFAULT_USER);
-    let priv_group = security
-        .and_then(|s| s.group.as_deref())
-        .unwrap_or(DEFAULT_GROUP);
-    let priv_chroot = security
-        .and_then(|s| s.chroot_dir.as_deref())
-        .unwrap_or(DEFAULT_CHROOT_DIR);
-    let priv_config = PrivilegeDropConfig {
-        user: priv_user,
-        group: priv_group,
-        chroot_dir: Some(Path::new(priv_chroot)),
-    };
-    if let Err(e) = drop_privileges(&priv_config) {
-        eprintln!("failed to drop privileges: {e:#}");
-        std::process::exit(1);
-    }
 
     // Use the hickory-server's built-in shutdown token for unified lifecycle.
     let shutdown = server.shutdown_token().clone();

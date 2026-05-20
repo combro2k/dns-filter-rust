@@ -1,4 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -7,8 +8,9 @@ use anyhow::{anyhow, bail, Result};
 use crate::entities::resolution::UpstreamStrategy;
 use crate::frameworks::config::schema::{
     DnsFilterConfig, ResolverZoneConfig, UpstreamServer, ZoneServerAuthenticationConfig,
-    ZoneServerConfig,
+    ZoneServerConfig, DEFAULT_DATABASE_URL,
 };
+use crate::frameworks::privileges::DEFAULT_CHROOT_DIR;
 use crate::frameworks::upstream::recursive_resolver::{
     load_root_hints, load_root_key, NameserverIpFamily, DEFAULT_MAX_HOPS,
 };
@@ -29,9 +31,218 @@ use crate::use_cases::zone_forwarding::{ZoneEntry, ZoneForwardingStage};
 
 use std::sync::atomic::AtomicBool;
 
-pub fn validate_config(config: DnsFilterConfig) -> DnsFilterConfig {
-    // Keep validation simple for the first migration step.
-    config
+pub fn validate_config(config: DnsFilterConfig) -> Result<DnsFilterConfig> {
+    let chroot_dir = effective_chroot_dir(&config)?;
+
+    validate_sqlite_path(&config, &chroot_dir)?;
+    validate_listener_tls_paths(&config, &chroot_dir)?;
+    validate_control_socket_path(&config, &chroot_dir)?;
+
+    Ok(config)
+}
+
+pub fn resolve_path_for_chroot_host(path: &str, chroot_dir: &str) -> Result<String> {
+    let chroot = parse_chroot_dir(chroot_dir)?;
+    let resolved = resolve_scoped_host_path(path, &chroot)?;
+    Ok(resolved.to_string_lossy().to_string())
+}
+
+pub fn resolve_path_for_chroot_runtime(path: &str, chroot_dir: &str) -> Result<String> {
+    let chroot = parse_chroot_dir(chroot_dir)?;
+    let resolved_host = resolve_scoped_host_path(path, &chroot)?;
+    let rel = resolved_host
+        .strip_prefix(&chroot)
+        .map_err(|_| anyhow!("path escapes chroot after normalization: {}", path))?;
+    let runtime = Path::new("/").join(rel);
+    Ok(runtime.to_string_lossy().to_string())
+}
+
+pub fn sqlite_url_for_chroot_runtime(url: &str, chroot_dir: &str) -> Result<String> {
+    if url == "sqlite::memory:" {
+        bail!("sqlite::memory: is not supported when chroot confinement is enforced");
+    }
+
+    let Some(rest) = url.strip_prefix("sqlite://") else {
+        return Ok(url.to_string());
+    };
+
+    let (raw_path, query_suffix) = match rest.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (rest, None),
+    };
+
+    if raw_path.trim().is_empty() {
+        bail!("sqlite URL must include a database file path");
+    }
+
+    let runtime_path = resolve_path_for_chroot_runtime(raw_path, chroot_dir)?;
+    let mut runtime_url = format!("sqlite://{runtime_path}");
+    if let Some(query) = query_suffix {
+        runtime_url.push('?');
+        runtime_url.push_str(query);
+    }
+    Ok(runtime_url)
+}
+
+pub fn sqlite_url_for_chroot_host(url: &str, chroot_dir: &str) -> Result<String> {
+    if url == "sqlite::memory:" {
+        bail!("sqlite::memory: is not supported when chroot confinement is enforced");
+    }
+
+    let Some(rest) = url.strip_prefix("sqlite://") else {
+        return Ok(url.to_string());
+    };
+
+    let (raw_path, query_suffix) = match rest.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (rest, None),
+    };
+
+    if raw_path.trim().is_empty() {
+        bail!("sqlite URL must include a database file path");
+    }
+
+    let host_path = resolve_path_for_chroot_host(raw_path, chroot_dir)?;
+    let mut host_url = format!("sqlite://{host_path}");
+    if let Some(query) = query_suffix {
+        host_url.push('?');
+        host_url.push_str(query);
+    }
+    Ok(host_url)
+}
+
+fn effective_chroot_dir(config: &DnsFilterConfig) -> Result<String> {
+    let chroot_dir = config
+        .security
+        .as_ref()
+        .and_then(|s| s.chroot_dir.as_deref())
+        .unwrap_or(DEFAULT_CHROOT_DIR);
+    let chroot = parse_chroot_dir(chroot_dir)?;
+    Ok(chroot.to_string_lossy().to_string())
+}
+
+fn parse_chroot_dir(chroot_dir: &str) -> Result<PathBuf> {
+    if chroot_dir.trim().is_empty() {
+        bail!("security.chroot_dir must not be empty");
+    }
+    let path = Path::new(chroot_dir);
+    if !path.is_absolute() {
+        bail!(
+            "security.chroot_dir must be an absolute path, got '{}'",
+            chroot_dir
+        );
+    }
+    Ok(normalize_lexical(path))
+}
+
+fn validate_sqlite_path(config: &DnsFilterConfig, chroot_dir: &str) -> Result<()> {
+    let db_url = config
+        .database
+        .as_ref()
+        .map(|d| d.url.as_str())
+        .unwrap_or(DEFAULT_DATABASE_URL);
+
+    if db_url == "sqlite::memory:" {
+        bail!("database.url uses sqlite::memory:, which is not allowed with chroot confinement");
+    }
+
+    let Some(rest) = db_url.strip_prefix("sqlite://") else {
+        return Ok(());
+    };
+
+    let (raw_path, _) = match rest.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (rest, None),
+    };
+
+    if raw_path.trim().is_empty() {
+        bail!("database.url must include a SQLite file path");
+    }
+
+    resolve_path_for_chroot_host(raw_path, chroot_dir)
+        .map(|_| ())
+        .map_err(|e| anyhow!("database.url path validation failed: {e}"))
+}
+
+fn validate_listener_tls_paths(config: &DnsFilterConfig, chroot_dir: &str) -> Result<()> {
+    for (name, listener) in [
+        ("listen.dot", config.listen.dot.as_ref()),
+        ("listen.doh", config.listen.doh.as_ref()),
+        ("listen.doq", config.listen.doq.as_ref()),
+    ] {
+        let Some(listener) = listener else {
+            continue;
+        };
+        if !listener.enabled {
+            continue;
+        }
+
+        if listener.tls.cert_path.trim().is_empty() {
+            bail!("{name}.tls.cert_path must not be empty when listener is enabled");
+        }
+        if listener.tls.key_path.trim().is_empty() {
+            bail!("{name}.tls.key_path must not be empty when listener is enabled");
+        }
+
+        resolve_path_for_chroot_host(&listener.tls.cert_path, chroot_dir)
+            .map_err(|e| anyhow!("{name}.tls.cert_path path validation failed: {e}"))?;
+        resolve_path_for_chroot_host(&listener.tls.key_path, chroot_dir)
+            .map_err(|e| anyhow!("{name}.tls.key_path path validation failed: {e}"))?;
+    }
+    Ok(())
+}
+
+fn validate_control_socket_path(config: &DnsFilterConfig, chroot_dir: &str) -> Result<()> {
+    let socket_path = config.socket_path();
+    if socket_path.trim().is_empty() {
+        bail!("control.socket_path must not be empty");
+    }
+
+    resolve_path_for_chroot_host(socket_path, chroot_dir)
+        .map(|_| ())
+        .map_err(|e| anyhow!("control.socket_path path validation failed: {e}"))
+}
+
+fn resolve_scoped_host_path(path: &str, chroot_dir: &Path) -> Result<PathBuf> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        bail!("path is empty");
+    }
+
+    let raw = Path::new(trimmed);
+    let chroot_norm = normalize_lexical(chroot_dir);
+    let joined = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        chroot_norm.join(raw)
+    };
+    let normalized = normalize_lexical(&joined);
+
+    if !normalized.starts_with(&chroot_norm) {
+        bail!(
+            "path '{}' resolves outside chroot '{}'",
+            path,
+            chroot_norm.display()
+        );
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push("/"),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let _ = normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
 }
 
 pub fn build_upstream_resolver(config: &DnsFilterConfig) -> Result<Arc<dyn UpstreamResolver>> {
@@ -609,9 +820,10 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::frameworks::config::schema::{
-        DnsFilterConfig, FilteringConfig, ListenConfig, LoggingConfig, NamedList,
-        ResolverZoneConfig, ResolversConfig, SocketConfig, StdoutLogConfig, UpstreamServer,
-        ZoneServerAuthenticationConfig, ZoneServerConfig,
+        ControlConfig, DnsFilterConfig, FilteringConfig, ListenConfig, LoggingConfig, NamedList,
+        ResolverZoneConfig, ResolversConfig, SecurityConfig, SocketConfig, StdoutLogConfig,
+        TlsConfig, TlsSocketConfig, UpstreamServer, ZoneServerAuthenticationConfig,
+        ZoneServerConfig,
     };
 
     use super::*;
@@ -696,6 +908,93 @@ mod tests {
             strategy: None,
             servers,
         }
+    }
+
+    #[test]
+    fn resolve_path_for_chroot_host_accepts_relative_path() {
+        let resolved = resolve_path_for_chroot_host("run/dns-filter.sock", "/var/lib/dns-filter")
+            .expect("resolve path");
+        assert_eq!(resolved, "/var/lib/dns-filter/run/dns-filter.sock");
+    }
+
+    #[test]
+    fn resolve_path_for_chroot_host_rejects_path_escape() {
+        let result = resolve_path_for_chroot_host("../etc/passwd", "/var/lib/dns-filter");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("outside chroot"));
+    }
+
+    #[test]
+    fn resolve_path_for_chroot_runtime_rebases_absolute_path() {
+        let runtime = resolve_path_for_chroot_runtime(
+            "/var/lib/dns-filter/certs/cert.pem",
+            "/var/lib/dns-filter",
+        )
+        .expect("runtime path");
+        assert_eq!(runtime, "/certs/cert.pem");
+    }
+
+    #[test]
+    fn sqlite_url_for_chroot_runtime_rebases_absolute_sqlite_file() {
+        let runtime = sqlite_url_for_chroot_runtime(
+            "sqlite:///var/lib/dns-filter/dns-filter.db?mode=rwc",
+            "/var/lib/dns-filter",
+        )
+        .expect("runtime sqlite url");
+        assert_eq!(runtime, "sqlite:///dns-filter.db?mode=rwc");
+    }
+
+    #[test]
+    fn validate_config_rejects_control_socket_outside_chroot() {
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "1.1.1.1:53".into(),
+            ..Default::default()
+        }]);
+        config.security = Some(SecurityConfig {
+            user: None,
+            group: None,
+            chroot_dir: Some("/var/lib/dns-filter".into()),
+        });
+        config.control = Some(ControlConfig {
+            socket_path: Some("/run/dns-filter/dns-filter.sock".into()),
+        });
+
+        let result = validate_config(config);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("control.socket_path"));
+    }
+
+    #[test]
+    fn validate_config_accepts_enabled_dot_with_relative_tls_paths() {
+        let mut config = base_config(vec![UpstreamServer {
+            enabled: true,
+            protocol: "dns".into(),
+            address: "1.1.1.1:53".into(),
+            ..Default::default()
+        }]);
+        config.security = Some(SecurityConfig {
+            user: None,
+            group: None,
+            chroot_dir: Some("/var/lib/dns-filter".into()),
+        });
+        config.listen.dot = Some(TlsSocketConfig {
+            enabled: true,
+            addresses: vec!["127.0.0.1".into()],
+            port: 853,
+            tls: TlsConfig {
+                cert_path: "certs/cert.pem".into(),
+                key_path: "certs/key.pem".into(),
+                autogenerate: Some(true),
+            },
+        });
+
+        let result = validate_config(config);
+        assert!(result.is_ok());
     }
 
     // ── Global upstream resolver tests ────────────────────────────────────────

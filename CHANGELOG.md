@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Chroot-scoped runtime paths for DB/TLS/control socket**: startup now validates that SQLite database file paths, enabled listener TLS `cert_path`/`key_path`, and `control.socket_path` resolve inside `security.chroot_dir`; startup fails fast if any path escapes chroot. Relative paths are supported and resolved from chroot root.
+- **Database initialization moved after chroot**: SQLite is now opened after privilege drop/chroot, preventing post-chroot pool connections from targeting host filesystem paths.
+- **Control socket default moved to chroot context**: default `control.socket_path` changed from `/run/dns-filter/dns-filter.sock` to `run/dns-filter.sock` (resolved within chroot).
+
 ## [2.5.1] - 2026-05-20
 
 ### Changed

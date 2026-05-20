@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::de;
 use serde::Deserialize;
 
-pub const DEFAULT_CONTROL_SOCKET_PATH: &str = "/run/dns-filter/dns-filter.sock";
+pub const DEFAULT_CONTROL_SOCKET_PATH: &str = "run/dns-filter.sock";
 
 #[derive(Debug, Deserialize)]
 pub struct DnsFilterConfig {
@@ -188,7 +188,7 @@ pub struct TlsSocketConfig {
     pub tls: TlsConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TlsConfig {
     pub cert_path: String,
     pub key_path: String,

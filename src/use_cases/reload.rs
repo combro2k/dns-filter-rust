@@ -42,7 +42,7 @@ pub fn reload_config(config_path: &str) -> Result<ReloadedConfig> {
     tracing::info!(path = %config_path, "reloading configuration");
 
     let config = load_config(config_path)?;
-    let config = validate_config(config);
+    let config = validate_config(config)?;
 
     let resolver = build_upstream_resolver(&config)?;
     let filter = build_domain_filter(&config)?;
@@ -67,7 +67,7 @@ pub async fn reload_config_from_db(
     tracing::info!(path = %config_path, "reloading configuration (DB-backed)");
 
     let config = load_config(config_path)?;
-    let mut config = validate_config(config);
+    let mut config = validate_config(config)?;
     apply_db_config(&mut config, repos).await?;
 
     let resolver = build_upstream_resolver(&config)?;
@@ -99,7 +99,7 @@ pub async fn reload_config_from_db_cached(
     tracing::info!("reloading configuration (DB-backed, cached YAML)");
 
     let config = load_config_from_str(cached_yaml)?;
-    let mut config = validate_config(config);
+    let mut config = validate_config(config)?;
     apply_db_config(&mut config, repos).await?;
 
     let resolver = build_upstream_resolver(&config)?;

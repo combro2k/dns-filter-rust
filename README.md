@@ -316,7 +316,7 @@ security:        # Privilege dropping and sandboxing
   chroot_dir: "..."
 
 control:         # Daemon control socket
-  socket_path: "/run/dns-filter/dns-filter.sock"
+  socket_path: "run/dns-filter.sock"
 ```
 
 ---
@@ -1483,13 +1483,20 @@ security:
 ### Privilege Model
 
 1. **Start as root** — Required to bind privileged ports (< 1024)
-2. **Bind ports** — All socket binding happens as root
-3. **Privilege drop** — After ports are bound:
+2. **Privilege drop** — Chroot and user/group switch happen early in startup:
    - Clear all groups, add target group (`setgroups`, `setgid`)
    - Change to target user (`setuid`)
    - Change root directory (`chroot`)
-   - On Linux: retain `CAP_NET_BIND_SERVICE` for potential rebinds on reload
-4. **Serve requests** — All DNS request handling is as the unprivileged user
+  - On Linux: retain `CAP_NET_BIND_SERVICE` for privileged bind operations
+3. **Open runtime files** — Database, TLS cert/key paths, and control socket paths are opened inside chroot context
+4. **Bind listeners and serve** — Network listeners and request handling run as the unprivileged user
+
+### Chroot-Scoped Path Rules
+
+- Relative paths are allowed for `database.url` (SQLite file), listener `tls.cert_path`/`tls.key_path`, and `control.socket_path`.
+- Relative paths are interpreted from chroot root (`security.chroot_dir`).
+- Absolute paths are allowed only if they resolve inside `security.chroot_dir`.
+- Startup fails fast if any of these paths resolve outside chroot.
 
 ### Setup for Privilege Dropping
 
@@ -2563,7 +2570,7 @@ dns-filter reload                                        # Reload configuration
 dns-filter merge-config --config /etc/dns-filter/config.yaml  # Merge with defaults
 ```
 
-The control socket defaults to `/run/dns-filter/dns-filter.sock` and is configurable via `control.socket_path`. Stale sockets from crashed runs are auto-detected and replaced on startup.
+The control socket defaults to `run/dns-filter.sock` (inside chroot) and is configurable via `control.socket_path`. Relative values are resolved from chroot root, and stale sockets from crashed runs are auto-detected and replaced on startup.
 
 ---
 

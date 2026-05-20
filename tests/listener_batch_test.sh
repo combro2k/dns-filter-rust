@@ -176,24 +176,24 @@ listen:
     address: "$DNS_HOST"
     port: $DOT_PORT
     tls:
-      cert_path: "$TEMP_DIR/cert.pem"
-      key_path: "$TEMP_DIR/key.pem"
+      cert_path: "cert.pem"
+      key_path: "key.pem"
       autogenerate: true
   doh:
     enabled: true
     address: "$DNS_HOST"
     port: $DOH_PORT
     tls:
-      cert_path: "$TEMP_DIR/cert.pem"
-      key_path: "$TEMP_DIR/key.pem"
+      cert_path: "cert.pem"
+      key_path: "key.pem"
       autogenerate: true
   doq:
     enabled: true
     address: "$DNS_HOST"
     port: $DOQ_PORT
     tls:
-      cert_path: "$TEMP_DIR/cert.pem"
-      key_path: "$TEMP_DIR/key.pem"
+      cert_path: "cert.pem"
+      key_path: "key.pem"
       autogenerate: true
   http:
     enabled: true
@@ -230,7 +230,12 @@ logging:
     level: "info"
 
 control:
-  socket_path: "$TEMP_DIR/dns-filter.sock"
+  socket_path: "dns-filter.sock"
+
+security:
+  user: "nobody"
+  group: "nogroup"
+  chroot_dir: "$TEMP_DIR"
 
 api:
   enabled: true
@@ -239,7 +244,7 @@ api:
   api_token: "$API_TOKEN"
 
 database:
-  url: "sqlite://$TEMP_DIR/dns-filter.db"
+  url: "sqlite://dns-filter.db"
 EOF
 
 note "Starting dns-filter with temporary config: $CONFIG_FILE"
@@ -422,10 +427,15 @@ logging:
     level: "info"
 
 control:
-  socket_path: "$TEMP_DIR/zone-test.sock"
+  socket_path: "zone-test.sock"
+
+security:
+  user: "nobody"
+  group: "nogroup"
+  chroot_dir: "$TEMP_DIR"
 
 database:
-  url: "sqlite://$TEMP_DIR/$db_name.db"
+  url: "sqlite://$db_name.db"
 EOF
 }
 
@@ -472,10 +482,15 @@ logging:
     level: "info"
 
 control:
-  socket_path: "$TEMP_DIR/zone-upstream.sock"
+  socket_path: "zone-upstream.sock"
+
+security:
+  user: "nobody"
+  group: "nogroup"
+  chroot_dir: "$TEMP_DIR"
 
 database:
-  url: "sqlite://$TEMP_DIR/zone-upstream.db"
+  url: "sqlite://zone-upstream.db"
 EOF
 
   note "Starting auxiliary zone upstream on ${DNS_HOST}:${ZONE_UPSTREAM_PORT}"
@@ -1088,10 +1103,15 @@ logging:
     level: "info"
 
 control:
-  socket_path: "$TEMP_DIR/outbound-routing.sock"
+  socket_path: "outbound-routing.sock"
+
+security:
+  user: "nobody"
+  group: "nogroup"
+  chroot_dir: "$TEMP_DIR"
 
 database:
-  url: "sqlite://$TEMP_DIR/outbound-routing.db"
+  url: "sqlite://outbound-routing.db"
 EOF
 
   note "Starting outbound routing test instance on ${DNS_HOST}:${OUTBOUND_TEST_PORT}"
@@ -1165,7 +1185,15 @@ logging:
     level: "info"
 
 control:
-  socket_path: "$TEMP_DIR/recursive.sock"
+  socket_path: "recursive.sock"
+
+security:
+  user: "nobody"
+  group: "nogroup"
+  chroot_dir: "$TEMP_DIR"
+
+database:
+  url: "sqlite://recursive.db"
 RECEOF
 
   note "Starting dns-filter with recursive resolver on port 25353"
