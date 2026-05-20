@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
+use url::Url;
 use uuid::Uuid;
 
 use crate::entities::filter::FilterDecision;
@@ -456,7 +457,7 @@ impl ServerOperations {
         input: CreateUpstreamServerInput,
     ) -> Result<UpstreamServerRecord, ServerOperationError> {
         validate_upstream_protocol(&input.protocol)?;
-        validate_upstream_address(&input.address)?;
+        validate_upstream_address(&input.protocol, &input.address)?;
         validate_bind_address(input.bind_address.as_deref())?;
         let fwmark = parse_fwmark(input.fwmark)?;
 
@@ -523,9 +524,10 @@ impl ServerOperations {
             record.protocol = protocol;
         }
         if let Some(address) = input.address {
-            validate_upstream_address(&address)?;
+            validate_upstream_address(&record.protocol, &address)?;
             record.address = address;
         }
+        validate_upstream_address(&record.protocol, &record.address)?;
         if let Some(authentication) = input.authentication {
             record.auth_token = authentication.token;
             record.auth_username = authentication.username;
@@ -1140,12 +1142,32 @@ fn validate_upstream_protocol(protocol: &str) -> Result<(), ServerOperationError
     }
 }
 
-fn validate_upstream_address(address: &str) -> Result<(), ServerOperationError> {
+fn validate_upstream_address(protocol: &str, address: &str) -> Result<(), ServerOperationError> {
     if address.trim().is_empty() {
         return Err(ServerOperationError::InvalidInput(
             "upstream address must not be empty".into(),
         ));
     }
+
+    if protocol == "doh" {
+        let url = Url::parse(address).map_err(|e| {
+            ServerOperationError::InvalidInput(format!(
+                "invalid DoH upstream address '{address}': {e}"
+            ))
+        })?;
+        if url.scheme() != "https" {
+            return Err(ServerOperationError::InvalidInput(format!(
+                "DoH upstream address must use https:// scheme, got '{}': {address}",
+                url.scheme()
+            )));
+        }
+        if url.host_str().is_none() {
+            return Err(ServerOperationError::InvalidInput(format!(
+                "DoH upstream address must include a host: {address}"
+            )));
+        }
+    }
+
     Ok(())
 }
 
@@ -1592,5 +1614,27 @@ mod tests {
             serde_json::from_str(r#"{"bind_address": "10.0.0.1", "fwmark": 42}"#).unwrap();
         assert_eq!(input.bind_address, Some(Some("10.0.0.1".to_string())));
         assert_eq!(input.fwmark, Some(Some(42)));
+    }
+
+    #[test]
+    fn validate_upstream_address_rejects_doh_without_scheme() {
+        let result = validate_upstream_address("doh", "dns.example.com/dns-query");
+        assert!(result.is_err());
+        let error = result.expect_err("expected validation error").to_string();
+        assert!(error.contains("invalid DoH upstream address"));
+    }
+
+    #[test]
+    fn validate_upstream_address_rejects_doh_http_scheme() {
+        let result = validate_upstream_address("doh", "http://dns.example.com/dns-query");
+        assert!(result.is_err());
+        let error = result.expect_err("expected validation error").to_string();
+        assert!(error.contains("must use https://"));
+    }
+
+    #[test]
+    fn validate_upstream_address_accepts_doh_https_url() {
+        let result = validate_upstream_address("doh", "https://dns.example.com/dns-query");
+        assert!(result.is_ok());
     }
 }

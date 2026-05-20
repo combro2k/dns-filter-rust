@@ -10,7 +10,7 @@ use rmcp::transport::streamable_http_server::tower::{
 };
 use rmcp::{tool_handler, tool_router};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use tokio_util::sync::CancellationToken;
 
 use crate::frameworks::config::schema::McpConfig;
@@ -165,8 +165,9 @@ struct UpdateUpstreamServerParams {
     #[serde(default, deserialize_with = "deserialize_optional_field")]
     bind_address: Option<Option<String>>,
     /// Linux SO_MARK value for policy routing. Pass JSON `null` to clear the
-    /// existing value; omit the field to leave it unchanged.
-    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    /// existing value; omit the field to leave it unchanged. MCP clients may
+    /// also pass string "None" to clear.
+    #[serde(default, deserialize_with = "deserialize_optional_fwmark_field")]
     fwmark: Option<Option<u32>>,
     /// New sort order
     sort_order: Option<i32>,
@@ -294,6 +295,41 @@ struct UpdateZoneDiscoveryParams {
 struct DeleteByIdParams {
     /// The ID of the entry to delete
     id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum FwmarkFieldInput {
+    Number(u32),
+    String(String),
+}
+
+/// Serde helper for MCP fwmark updates.
+///
+/// Accepts omitted (unchanged), null (clear), integer (set),
+/// and string "none"/"null" (clear).
+fn deserialize_optional_fwmark_field<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<u32>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<FwmarkFieldInput>::deserialize(deserializer)?;
+    let parsed = match value {
+        None => None,
+        Some(FwmarkFieldInput::Number(v)) => Some(v),
+        Some(FwmarkFieldInput::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.eq_ignore_ascii_case("none") || trimmed.eq_ignore_ascii_case("null") {
+                None
+            } else {
+                return Err(serde::de::Error::custom(
+                    "fwmark must be an integer, null, or the string 'None'",
+                ));
+            }
+        }
+    };
+    Ok(Some(parsed))
 }
 
 // --- Tool implementations ---
@@ -1007,5 +1043,26 @@ mod tests {
         // Verify McpHandler satisfies Clone (required by rmcp)
         fn assert_clone<T: Clone>() {}
         assert_clone::<McpHandler>();
+    }
+
+    #[test]
+    fn mcp_update_upstream_fwmark_none_string_clears_value() {
+        let input: UpdateUpstreamServerParams =
+            serde_json::from_str(r#"{"id":"u1","fwmark":"None"}"#).unwrap();
+        assert_eq!(input.fwmark, Some(None));
+    }
+
+    #[test]
+    fn mcp_update_upstream_fwmark_integer_sets_value() {
+        let input: UpdateUpstreamServerParams =
+            serde_json::from_str(r#"{"id":"u1","fwmark":42}"#).unwrap();
+        assert_eq!(input.fwmark, Some(Some(42)));
+    }
+
+    #[test]
+    fn mcp_update_upstream_fwmark_null_clears_value() {
+        let input: UpdateUpstreamServerParams =
+            serde_json::from_str(r#"{"id":"u1","fwmark":null}"#).unwrap();
+        assert_eq!(input.fwmark, Some(None));
     }
 }

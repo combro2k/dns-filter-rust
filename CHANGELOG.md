@@ -8,6 +8,8 @@ All notable changes to this project will be documented in this file.
 - **Chroot-scoped runtime paths for DB/TLS/control socket**: startup now validates that SQLite database file paths, enabled listener TLS `cert_path`/`key_path`, and `control.socket_path` resolve inside `security.chroot_dir`; startup fails fast if any path escapes chroot. Relative paths are supported and resolved from chroot root.
 - **Database initialization moved after chroot**: SQLite is now opened after privilege drop/chroot, preventing post-chroot pool connections from targeting host filesystem paths.
 - **Control socket default moved to chroot context**: default `control.socket_path` changed from `/run/dns-filter/dns-filter.sock` to `run/dns-filter.sock` (resolved within chroot).
+- **Protocol-aware upstream address validation for DoH**: upstream CRUD mutations now reject `protocol: doh` addresses that are missing a URL scheme or do not use `https://`. This prevents invalid DoH endpoints from being persisted and later failing during restart/reload.
+- **MCP `fwmark` clear sentinel compatibility**: the MCP `update_upstream` tool now accepts string `"None"` (case-insensitive) for `fwmark` in addition to JSON `null`, allowing clients that cannot emit null literals to clear the stored mark.
 
 ## [2.5.1] - 2026-05-20
 
