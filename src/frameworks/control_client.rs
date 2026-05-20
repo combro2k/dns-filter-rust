@@ -12,6 +12,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct ControlResponse {
     pub status: String,
     pub message: Option<String>,
+    pub data: Option<serde_json::Value>,
 }
 
 /// Send a control command to the running daemon via Unix socket.

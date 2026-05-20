@@ -9,6 +9,7 @@ use tokio::net::UnixListener;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use serde_json::Value;
 const MAX_MESSAGE_BYTES: usize = 1024;
 const CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -22,6 +23,8 @@ struct ControlResponse {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
 }
 
 impl ControlResponse {
@@ -29,6 +32,15 @@ impl ControlResponse {
         Self {
             status: "ok",
             message: Some(msg.to_string()),
+            data: None,
+        }
+    }
+
+    fn ok_with_data(data: Value) -> Self {
+        Self {
+            status: "ok",
+            message: None,
+            data: Some(data),
         }
     }
 
@@ -36,9 +48,12 @@ impl ControlResponse {
         Self {
             status: "error",
             message: Some(msg.to_string()),
+            data: None,
         }
     }
 }
+
+pub type StatusProvider = std::sync::Arc<dyn Fn() -> Value + Send + Sync>;
 
 #[derive(Debug)]
 pub struct ControlServer {
@@ -101,11 +116,16 @@ impl ControlServer {
         })
     }
 
-    /// Accept loop: dispatches `reload` and `stop` commands.
+    /// Accept loop: dispatches `reload`, `stop`, and `status` commands.
     ///
     /// Runs until a `stop` command is received or the `shutdown` token is
     /// cancelled (e.g. by SIGTERM).  On exit the socket file is removed.
-    pub async fn serve(self, reload_tx: mpsc::Sender<()>, shutdown: CancellationToken) {
+    pub async fn serve(
+        self,
+        reload_tx: mpsc::Sender<()>,
+        shutdown: CancellationToken,
+        status_provider: Option<StatusProvider>,
+    ) {
         loop {
             tokio::select! {
                 biased;
@@ -124,7 +144,12 @@ impl ControlServer {
 
                     let result = tokio::time::timeout(
                         CONNECTION_TIMEOUT,
-                        Self::handle_connection(stream, &reload_tx, &shutdown),
+                        Self::handle_connection(
+                            stream,
+                            &reload_tx,
+                            &shutdown,
+                            status_provider.as_ref(),
+                        ),
                     ).await;
 
                     match result {
@@ -151,6 +176,7 @@ impl ControlServer {
         stream: tokio::net::UnixStream,
         reload_tx: &mpsc::Sender<()>,
         shutdown: &CancellationToken,
+        status_provider: Option<&StatusProvider>,
     ) -> Result<bool> {
         let (reader, mut writer) = stream.into_split();
         let mut buf_reader = BufReader::new(reader);
@@ -187,6 +213,16 @@ impl ControlServer {
                 tracing::info!(source = "control_socket", "shutdown requested");
                 shutdown.cancel();
                 (ControlResponse::ok_with_message("shutdown initiated"), true)
+            }
+            "status" => {
+                if let Some(provider) = status_provider {
+                    (ControlResponse::ok_with_data(provider()), false)
+                } else {
+                    (
+                        ControlResponse::error("status unavailable in this build"),
+                        false,
+                    )
+                }
             }
             other => (
                 ControlResponse::error(&format!("unknown command: {other}")),
@@ -236,7 +272,7 @@ mod tests {
 
         let serve_shutdown = shutdown.clone();
         let serve_handle = tokio::spawn(async move {
-            server.serve(reload_tx, serve_shutdown).await;
+            server.serve(reload_tx, serve_shutdown, None).await;
         });
 
         // Give server time to start accepting.
@@ -272,7 +308,7 @@ mod tests {
 
         let serve_shutdown = shutdown.clone();
         let serve_handle = tokio::spawn(async move {
-            server.serve(reload_tx, serve_shutdown).await;
+            server.serve(reload_tx, serve_shutdown, None).await;
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -309,7 +345,7 @@ mod tests {
 
         let serve_shutdown = shutdown.clone();
         let serve_handle = tokio::spawn(async move {
-            server.serve(reload_tx, serve_shutdown).await;
+            server.serve(reload_tx, serve_shutdown, None).await;
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -344,6 +380,80 @@ mod tests {
         assert!(server.is_ok(), "should detect stale socket and rebind");
         // Clean up.
         let _ = fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn status_command_returns_data_when_provider_set() {
+        let path = test_socket_path();
+        let server = ControlServer::bind(&path).expect("bind should succeed");
+        let (reload_tx, _reload_rx) = mpsc::channel::<()>(4);
+        let shutdown = CancellationToken::new();
+
+        let status_provider: StatusProvider = std::sync::Arc::new(|| {
+            serde_json::json!({
+                "uptime_seconds": 123,
+                "queries_total": 7
+            })
+        });
+
+        let serve_shutdown = shutdown.clone();
+        let serve_handle = tokio::spawn(async move {
+            server
+                .serve(reload_tx, serve_shutdown, Some(status_provider))
+                .await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let stream = tokio::net::UnixStream::connect(&path)
+            .await
+            .expect("connect");
+        let (reader, mut writer) = stream.into_split();
+        writer
+            .write_all(b"{\"command\":\"status\"}\n")
+            .await
+            .expect("write");
+        let mut buf = BufReader::new(reader);
+        let mut resp = String::new();
+        buf.read_line(&mut resp).await.expect("read");
+        assert!(resp.contains("\"status\":\"ok\""));
+        assert!(resp.contains("\"data\""));
+        assert!(resp.contains("\"uptime_seconds\":123"));
+
+        shutdown.cancel();
+        serve_handle.await.expect("serve task");
+    }
+
+    #[tokio::test]
+    async fn status_command_errors_without_provider() {
+        let path = test_socket_path();
+        let server = ControlServer::bind(&path).expect("bind should succeed");
+        let (reload_tx, _reload_rx) = mpsc::channel::<()>(4);
+        let shutdown = CancellationToken::new();
+
+        let serve_shutdown = shutdown.clone();
+        let serve_handle = tokio::spawn(async move {
+            server.serve(reload_tx, serve_shutdown, None).await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let stream = tokio::net::UnixStream::connect(&path)
+            .await
+            .expect("connect");
+        let (reader, mut writer) = stream.into_split();
+        writer
+            .write_all(b"{\"command\":\"status\"}\n")
+            .await
+            .expect("write");
+        let mut buf = BufReader::new(reader);
+        let mut resp = String::new();
+        buf.read_line(&mut resp).await.expect("read");
+        assert!(resp.contains("\"status\":\"error\""));
+        assert!(resp.contains("status unavailable"));
+
+        shutdown.cancel();
+        serve_handle.await.expect("serve task");
     }
 
     #[tokio::test]

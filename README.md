@@ -14,7 +14,7 @@
 - **Zone Discovery**: Automatically import zones from a JSON index endpoint, filtered by type (forward, reverse, reverse-aggregate)
 - **Recursive Resolution**: Full DNS recursion with DNSSEC chain-of-trust validation from IANA root
 - **Load-Balancing**: Multiple upstream resolver strategies (round-robin, random, failover)
-- **Daemon Management**: Subcommand-based CLI (`start`, `stop`, `reload`, `merge-config`) with Unix domain control socket
+- **Daemon Management**: Subcommand-based CLI (`start`, `stop`, `reload`, `status`, `merge-config`) with Unix domain control socket
 - **Graceful Shutdown**: Clean shutdown via `dns-filter stop`, `SIGTERM`/`SIGINT`, or REST API (`POST /api/v1/stop`)
 - **Graceful Reload**: SIGHUP, `dns-filter reload`, or REST API-triggered zero-downtime configuration reload
 - **Config Merging**: `dns-filter merge-config` deep-merges user config with built-in defaults, filling missing sections automatically
@@ -205,10 +205,16 @@ sudo journalctl -u dns-filter -f
 # Reload configuration
 sudo systemctl reload dns-filter   # via SIGHUP
 dns-filter reload                  # via control socket
+dns-filter reload --socket /run/dns-filter/custom.sock  # explicit socket override
+
+# Query daemon status/statistics via control socket
+dns-filter status
+dns-filter status --socket /run/dns-filter/custom.sock
 
 # Stop the daemon
 sudo systemctl stop dns-filter     # via systemd
 dns-filter stop                    # via control socket
+dns-filter stop --socket /run/dns-filter/custom.sock    # explicit socket override
 ```
 
 ### OpenRC Integration
@@ -230,10 +236,16 @@ sudo rc-service dns-filter status
 # Reload configuration
 sudo rc-service dns-filter reload  # via SIGHUP
 dns-filter reload                  # via control socket
+dns-filter reload --socket /run/dns-filter/custom.sock  # explicit socket override
+
+# Query daemon status/statistics via control socket
+dns-filter status
+dns-filter status --socket /run/dns-filter/custom.sock
 
 # Stop the daemon
 sudo rc-service dns-filter stop    # via OpenRC
 dns-filter stop                    # via control socket
+dns-filter stop --socket /run/dns-filter/custom.sock    # explicit socket override
 ```
 
 ### Verify Installation
@@ -263,7 +275,7 @@ curl http://127.0.0.1:9100/metrics
 
 ## Configuration
 
-All configuration is provided via a single YAML file (default: `/etc/dns-filter/config.yaml`). The configuration is loaded at startup and can be reloaded at runtime via SIGHUP signal, `dns-filter reload` command, or REST API.
+All configuration is provided via a single YAML file (default: `/etc/dns-filter/config.yaml`). The configuration is loaded at startup and can be reloaded at runtime via SIGHUP signal, `dns-filter reload` command, or REST API. Control-socket commands (`stop`, `reload`, `status`) read `control.socket_path` from this config by default and also accept `--socket <path>` to override it.
 
 ### Configuration Structure
 
@@ -2567,6 +2579,7 @@ The daemon is managed via subcommands that communicate over a Unix domain contro
 dns-filter start --config /etc/dns-filter/config.yaml   # Start daemon
 dns-filter stop                                          # Graceful shutdown
 dns-filter reload                                        # Reload configuration
+dns-filter status                                        # Runtime status + statistics
 dns-filter merge-config --config /etc/dns-filter/config.yaml  # Merge with defaults
 ```
 

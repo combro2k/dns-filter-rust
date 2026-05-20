@@ -1,9 +1,10 @@
 use clap::{Parser, Subcommand};
 use nix::unistd;
+use serde::Deserialize;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 #[cfg(any(feature = "http-api", feature = "mcp"))]
 use tokio_util::sync::CancellationToken;
@@ -42,14 +43,13 @@ use dns_filter::use_cases::config_bootstrap::{
 use dns_filter::use_cases::config_from_db::{apply_db_config, Repositories};
 use dns_filter::use_cases::reload::reload_config_from_db_cached;
 use dns_filter::use_cases::seed;
+use dns_filter::use_cases::server_operations::QueryStats;
 #[cfg(any(feature = "http-api", feature = "mcp"))]
-use dns_filter::use_cases::server_operations::{QueryStats, ServerOperations};
+use dns_filter::use_cases::server_operations::ServerOperations;
 #[cfg(feature = "http-api")]
 use std::net::SocketAddr;
 #[cfg(feature = "http-api")]
 use std::sync::Mutex as StdMutex;
-#[cfg(any(feature = "http-api", feature = "mcp"))]
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/dns-filter/config.yaml";
 
@@ -61,9 +61,15 @@ enum CliAction {
     },
     Stop {
         config_path: String,
+        socket_path: Option<String>,
     },
     Reload {
         config_path: String,
+        socket_path: Option<String>,
+    },
+    Status {
+        config_path: String,
+        socket_path: Option<String>,
     },
     MergeConfig {
         config_path: String,
@@ -104,6 +110,9 @@ enum Commands {
             default_value = DEFAULT_CONFIG_PATH
         )]
         config_path: String,
+
+        #[arg(long = "socket", value_name = "path")]
+        socket_path: Option<String>,
     },
     /// Reload the running daemon's configuration via control socket
     Reload {
@@ -113,6 +122,21 @@ enum Commands {
             default_value = DEFAULT_CONFIG_PATH
         )]
         config_path: String,
+
+        #[arg(long = "socket", value_name = "path")]
+        socket_path: Option<String>,
+    },
+    /// Show daemon status and runtime statistics via control socket
+    Status {
+        #[arg(
+            long = "config",
+            value_name = "path",
+            default_value = DEFAULT_CONFIG_PATH
+        )]
+        config_path: String,
+
+        #[arg(long = "socket", value_name = "path")]
+        socket_path: Option<String>,
     },
     /// Merge config with built-in defaults (missing sections filled from example)
     MergeConfig {
@@ -142,8 +166,27 @@ where
 
     match parsed.command {
         Some(Commands::Start { config_path, debug }) => Ok(CliAction::Start { config_path, debug }),
-        Some(Commands::Stop { config_path }) => Ok(CliAction::Stop { config_path }),
-        Some(Commands::Reload { config_path }) => Ok(CliAction::Reload { config_path }),
+        Some(Commands::Stop {
+            config_path,
+            socket_path,
+        }) => Ok(CliAction::Stop {
+            config_path,
+            socket_path,
+        }),
+        Some(Commands::Reload {
+            config_path,
+            socket_path,
+        }) => Ok(CliAction::Reload {
+            config_path,
+            socket_path,
+        }),
+        Some(Commands::Status {
+            config_path,
+            socket_path,
+        }) => Ok(CliAction::Status {
+            config_path,
+            socket_path,
+        }),
         Some(Commands::MergeConfig {
             config_path,
             overwrite,
@@ -152,7 +195,7 @@ where
             overwrite,
         }),
         None => Err(
-            "no subcommand provided. Usage: dns-filter <start|stop|reload|merge-config> [OPTIONS]"
+            "no subcommand provided. Usage: dns-filter <start|stop|reload|status|merge-config> [OPTIONS]"
                 .to_string(),
         ),
     }
@@ -175,11 +218,23 @@ async fn main() {
         CliAction::Start { config_path, debug } => {
             run_daemon(config_path, debug).await;
         }
-        CliAction::Stop { config_path } => {
-            run_control_command(&config_path, "stop");
+        CliAction::Stop {
+            config_path,
+            socket_path,
+        } => {
+            run_control_command(&config_path, socket_path.as_deref(), "stop");
         }
-        CliAction::Reload { config_path } => {
-            run_control_command(&config_path, "reload");
+        CliAction::Reload {
+            config_path,
+            socket_path,
+        } => {
+            run_control_command(&config_path, socket_path.as_deref(), "reload");
+        }
+        CliAction::Status {
+            config_path,
+            socket_path,
+        } => {
+            run_status_command(&config_path, socket_path.as_deref());
         }
         CliAction::MergeConfig {
             config_path,
@@ -190,9 +245,12 @@ async fn main() {
     }
 }
 
-/// Send a control command (stop/reload) to the running daemon.
-fn run_control_command(config_path: &str, command: &str) {
-    let socket_path = match load_config(config_path) {
+fn resolve_control_socket_path(config_path: &str, socket_override: Option<&str>) -> String {
+    if let Some(path) = socket_override {
+        return path.to_string();
+    }
+
+    match load_config(config_path) {
         Ok(cfg) => {
             let chroot_dir = cfg
                 .security
@@ -213,7 +271,12 @@ fn run_control_command(config_path: &str, command: &str) {
             resolve_path_for_chroot_host(DEFAULT_CONTROL_SOCKET_PATH, DEFAULT_CHROOT_DIR)
                 .unwrap_or_else(|_| DEFAULT_CONTROL_SOCKET_PATH.to_string())
         }
-    };
+    }
+}
+
+/// Send a control command (stop/reload) to the running daemon.
+fn run_control_command(config_path: &str, socket_override: Option<&str>, command: &str) {
+    let socket_path = resolve_control_socket_path(config_path, socket_override);
 
     match control_client::send_command(&socket_path, command) {
         Ok(resp) => {
@@ -235,6 +298,75 @@ fn run_control_command(config_path: &str, command: &str) {
             eprintln!("{e}");
             std::process::exit(1);
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct StatusListInfo {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StatusPayload {
+    uptime_seconds: u64,
+    filtering_enabled: bool,
+    queries_total: u64,
+    queries_blocked: u64,
+    queries_allowed: u64,
+    queries_passthrough: u64,
+    lists: Vec<StatusListInfo>,
+}
+
+fn run_status_command(config_path: &str, socket_override: Option<&str>) {
+    let socket_path = resolve_control_socket_path(config_path, socket_override);
+
+    let resp = match control_client::send_command(&socket_path, "status") {
+        Ok(resp) => resp,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+
+    if resp.status != "ok" {
+        eprintln!(
+            "daemon returned error: {}",
+            resp.message.unwrap_or_default()
+        );
+        std::process::exit(1);
+    }
+
+    let Some(data) = resp.data else {
+        eprintln!("daemon did not return status data");
+        std::process::exit(1);
+    };
+
+    let payload: StatusPayload = match serde_json::from_value(data) {
+        Ok(payload) => payload,
+        Err(e) => {
+            eprintln!("failed to decode status payload: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    println!("Daemon status: healthy");
+    println!("Uptime (s): {}", payload.uptime_seconds);
+    println!("Filtering enabled: {}", payload.filtering_enabled);
+    println!("Queries total: {}", payload.queries_total);
+    println!("Queries blocked: {}", payload.queries_blocked);
+    println!("Queries allowed: {}", payload.queries_allowed);
+    println!("Queries passthrough: {}", payload.queries_passthrough);
+    println!("Filter lists: {}", payload.lists.len());
+    if payload.lists.is_empty() {
+        println!("List names: (none)");
+    } else {
+        let names = payload
+            .lists
+            .iter()
+            .map(|list| list.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("List names: {names}");
     }
 }
 
@@ -761,25 +893,43 @@ async fn run_daemon(config_path: String, debug: bool) {
         }
     });
 
+    // Runtime stats for control status/API/MCP responses.
+    let start_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let shared_stats = Arc::new(QueryStats::new());
+
+    let status_stats = Arc::clone(&shared_stats);
+    let status_filtering_enabled = Arc::clone(&filtering_enabled);
+    let status_domain_filter = Arc::clone(&domain_filter);
+    let status_provider = Arc::new(move || {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        serde_json::json!({
+            "uptime_seconds": now.saturating_sub(start_time),
+            "filtering_enabled": status_filtering_enabled.load(Ordering::Relaxed),
+            "queries_total": status_stats.queries_total.load(Ordering::Relaxed),
+            "queries_blocked": status_stats.queries_blocked.load(Ordering::Relaxed),
+            "queries_allowed": status_stats.queries_allowed.load(Ordering::Relaxed),
+            "queries_passthrough": status_stats.queries_passthrough.load(Ordering::Relaxed),
+            "lists": status_domain_filter.list_names(),
+        })
+    });
+
     // Start the control socket server.
     let control_reload_tx = reload_tx.clone();
     let control_shutdown = shutdown.clone();
     let control_task = tokio::spawn(async move {
         control_server
-            .serve(control_reload_tx, control_shutdown)
+            .serve(control_reload_tx, control_shutdown, Some(status_provider))
             .await;
     });
 
     // Start the HTTP API server if configured.
     // Clone state for MCP before API takes ownership.
-    #[cfg(any(feature = "http-api", feature = "mcp"))]
-    let start_time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    #[cfg(any(feature = "http-api", feature = "mcp"))]
-    let shared_stats = Arc::new(QueryStats::new());
 
     #[cfg(any(feature = "http-api", feature = "mcp"))]
     let query_log = {
@@ -794,7 +944,7 @@ async fn run_daemon(config_path: String, debug: bool) {
         }
         #[cfg(not(feature = "http-api"))]
         {
-            None::<Arc<StdMutex<QueryLog>>>
+            None
         }
     };
 
@@ -969,6 +1119,20 @@ mod tests {
             parsed,
             CliAction::Stop {
                 config_path: "/tmp/test.yaml".to_string(),
+                socket_path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_stop_with_socket_override() {
+        let parsed = parse_cli_args(["dns-filter", "stop", "--socket", "/tmp/custom.sock"])
+            .expect("parse should succeed");
+        assert_eq!(
+            parsed,
+            CliAction::Stop {
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
+                socket_path: Some("/tmp/custom.sock".to_string()),
             }
         );
     }
@@ -980,6 +1144,52 @@ mod tests {
             parsed,
             CliAction::Reload {
                 config_path: DEFAULT_CONFIG_PATH.to_string(),
+                socket_path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_reload_with_socket_override() {
+        let parsed = parse_cli_args(["dns-filter", "reload", "--socket", "/tmp/custom.sock"])
+            .expect("parse should succeed");
+        assert_eq!(
+            parsed,
+            CliAction::Reload {
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
+                socket_path: Some("/tmp/custom.sock".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_status_subcommand() {
+        let parsed = parse_cli_args(["dns-filter", "status"]).expect("parse should succeed");
+        assert_eq!(
+            parsed,
+            CliAction::Status {
+                config_path: DEFAULT_CONFIG_PATH.to_string(),
+                socket_path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_status_with_socket_override() {
+        let parsed = parse_cli_args([
+            "dns-filter",
+            "status",
+            "--config",
+            "/tmp/test.yaml",
+            "--socket",
+            "/tmp/custom.sock",
+        ])
+        .expect("parse should succeed");
+        assert_eq!(
+            parsed,
+            CliAction::Status {
+                config_path: "/tmp/test.yaml".to_string(),
+                socket_path: Some("/tmp/custom.sock".to_string()),
             }
         );
     }
