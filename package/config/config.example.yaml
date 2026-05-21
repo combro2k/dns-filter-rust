@@ -12,153 +12,142 @@
 # ---------------------------------------------------------------------------
 # Listener configuration
 # ---------------------------------------------------------------------------
+# Only dns is required; all other listeners default to absent (disabled).
+# Addresses default: ["0.0.0.0", "::"] for public, ["127.0.0.1", "::1"] for metrics.
 listen:
   dns:
     enabled: true
-    addresses:
-      - "0.0.0.0"
-      - "::"
     port: 53
+    addresses: ["0.0.0.0", "::"]      # serde default
 
-  dot:
-    enabled: false
-    addresses:
-      - "0.0.0.0"
-      - "::"
-    port: 853
-    tls:
-      # Relative paths are resolved from security.chroot_dir.
-      cert_path: "certs/cert.pem"
-      key_path: "certs/key.pem"
-      autogenerate: true
+  # dot:
+  #   enabled: true
+  #   port: 853
+  #   addresses: ["0.0.0.0", "::"]
+  #   tls:
+  #     cert_path: "certs/cert.pem"
+  #     key_path: "certs/key.pem"
+  #     autogenerate: true
 
-  doh:
-    enabled: false
-    addresses:
-      - "0.0.0.0"
-      - "::"
-    port: 443
-    tls:
-      cert_path: "certs/cert.pem"
-      key_path: "certs/key.pem"
-      autogenerate: true
+  # doh:
+  #   enabled: true
+  #   port: 443
+  #   addresses: ["0.0.0.0", "::"]
+  #   tls:
+  #     cert_path: "certs/cert.pem"
+  #     key_path: "certs/key.pem"
+  #     autogenerate: true
 
-  doq:
-    enabled: false
-    addresses:
-      - "0.0.0.0"
-      - "::"
-    port: 8853
-    tls:
-      cert_path: "certs/cert.pem"
-      key_path: "certs/key.pem"
-      autogenerate: true
+  # doq:
+  #   enabled: true
+  #   addresses: ["0.0.0.0", "::"]
+  #   port: 8853
+  #   tls:
+  #     cert_path: "certs/cert.pem"
+  #     key_path: "certs/key.pem"
+  #     autogenerate: true
 
-  http:
-    enabled: false
-    addresses:
-      - "0.0.0.0"
-      - "::"
-    port: 8080
+  # http:
+  #   enabled: true
+  #   addresses: ["0.0.0.0", "::"]
+  #   port: 8080
 
-  metrics:
-    enabled: false
-    addresses:
-      - "127.0.0.1"
-      - "::1"
-    port: 9100
+  # metrics:
+  #   enabled: true
+  #   addresses: ["127.0.0.1", "::1"]
+  #   port: 9100
 
 # MCP (Model Context Protocol) server for AI/LLM tool integration.
 # Requires the 'mcp' feature flag: cargo build --features mcp
+# Default from struct: absent (disabled).
 # mcp:
-#   enabled: false
-#   addresses:
-#     - "0.0.0.0"
-#     - "::"
-#   port: 8953
+#   enabled: true
+#   port: 8953                           # default
 #   api_token: "change-me"
-#   sse_keep_alive: 30                   # SSE keep-alive ping interval (seconds)
-#   stateful_mode: true                  # persistent sessions per client
-#   json_response: false                 # JSON instead of SSE (stateless only)
-#   allowed_origins: []                  # CORS origins for browser clients
-#   # allowed_hosts:                     # DNS rebinding protection (auto-derived if omitted)
-#   #   - "dns-filter.local:8953"
+#   sse_keep_alive: 30
+#   stateful_mode: true                  # default
+#   json_response: false                 # default
+#   allowed_origins: []                  # default
 
 # ---------------------------------------------------------------------------
 # Blocklists — domains to block
 # ---------------------------------------------------------------------------
+# Default from struct: empty list.
 # Supported list_type values:
 #   "adguard"  — AdGuard/ABP filter syntax (default)
 #   "hosts"    — hosts file format (including compressed multi-hostname lines)
 #   "rpz"      — Response Policy Zone format
 #   "domains"  — flat domain list, one domain per line
 #   "wildcard" — wildcard domain list, *.example.com per line
-blocklists:
-  - adguard_base:
-      enabled: true
-      url: "https://raw.githubusercontent.com/AdguardTeam/FiltersRegistry/master/filters/filter_2_Base/filter.txt"
-      interval: "12h"
-      # list_type: "adguard"  # default
-  - custom_ads:
-      enabled: false
-      url: "https://example.com/myadblock.txt"
-      interval: "30m"
-      # list_type: "adguard"  # default
-  # - stevenblack_hosts:
-  #     enabled: false
-  #     url: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
-  #     interval: "12h"
-  #     list_type: "hosts"
-  # - rpz_blocklist:
-  #     enabled: false
-  #     url: "https://example.com/rpz-zone.txt"
-  #     interval: "6h"
-  #     list_type: "rpz"
-  # - simple_domains:
-  #     enabled: false
-  #     url: "https://example.com/domains.txt"
-  #     interval: "12h"
-  #     list_type: "domains"
-  # - wildcard_ads:
-  #     enabled: false
-  #     url: "https://example.com/wildcards.txt"
-  #     interval: "12h"
-  #     list_type: "wildcard"
+blocklists: []
+# - adguard_base:
+#     enabled: true
+#     url: "https://raw.githubusercontent.com/AdguardTeam/FiltersRegistry/master/filters/filter_2_Base/filter.txt"
+#     interval: "12h"
+#     # list_type: "adguard"  # default
+# - custom_ads:
+#     enabled: false
+#     url: "https://example.com/myadblock.txt"
+#     interval: "30m"
+#     # list_type: "adguard"  # default
+# - stevenblack_hosts:
+#     enabled: false
+#     url: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+#     interval: "12h"
+#     list_type: "hosts"
+# - rpz_blocklist:
+#     enabled: false
+#     url: "https://example.com/rpz-zone.txt"
+#     interval: "6h"
+#     list_type: "rpz"
+# - simple_domains:
+#     enabled: false
+#     url: "https://example.com/domains.txt"
+#     interval: "12h"
+#     list_type: "domains"
+# - wildcard_ads:
+#     enabled: false
+#     url: "https://example.com/wildcards.txt"
+#     interval: "12h"
+#     list_type: "wildcard"
 
 # ---------------------------------------------------------------------------
 # Allowlists — exceptions that bypass filtering
 # ---------------------------------------------------------------------------
+# Default from struct: empty list.
 # Allowlists take precedence over blocklists.
-allowlists:
-  - corporate_allow:
-      enabled: false
-      url: "https://example.com/allowlist.txt"
-      interval: "1h"
-  - local_allow:
-      enabled: false
-      url: "/etc/dns-filter/allowlist.txt"
+allowlists: []
+# - corporate_allow:
+#     enabled: false
+#     url: "https://example.com/allowlist.txt"
+#     interval: "1h"
+# - local_allow:
+#     enabled: false
+#     url: "/etc/dns-filter/allowlist.txt"
 
 # ---------------------------------------------------------------------------
 # Filtering behaviour
 # ---------------------------------------------------------------------------
+# Default from struct: absent (None).
+# When absent, code applies these internal defaults:
+#   sinkhole_ipv4: "0.0.0.0"
+#   sinkhole_ipv6: "::"
+#   any_query_policy: "notimp"           # "notimp", "refused", or "passthrough"
 filtering:
   sinkhole_ipv4: "0.0.0.0"
   sinkhole_ipv6: "::"
-  # Policy for incoming QTYPE=ANY queries:
-  #   "notimp"      — reply NOTIMP locally, per RFC 8482 (default)
-  #   "refused"     — reply REFUSED locally
-  #   "passthrough" — forward ANY upstream as-is
   any_query_policy: "notimp"
 
 # ---------------------------------------------------------------------------
 # Outbound routing (optional)
 # ---------------------------------------------------------------------------
+# Default from struct: absent (None). No outbound routing applied.
 # Global defaults for upstream DNS connections. Use to route queries through
 # a specific interface (e.g. WireGuard) or apply policy routing via SO_MARK.
 # Per-server bind_address/fwmark overrides these defaults.
-#outbound:
-#  bind_address: "10.0.0.2"   # Source IP to bind upstream sockets to
-#  fwmark: 51820              # Linux SO_MARK for policy routing (needs CAP_NET_ADMIN)
+# outbound:
+#   bind_address: "10.0.0.2"            # Source IP to bind upstream sockets to
+#   fwmark: 51820                       # Linux SO_MARK for policy routing (needs CAP_NET_ADMIN)
 
 # ---------------------------------------------------------------------------
 # Upstream resolvers
@@ -167,119 +156,97 @@ resolvers:
   # Load-balancing strategy: "round_robin", "random", or "failover"
   strategy: "round_robin"
 
-  # DNS response cache. Enabled by default; set enabled: false to disable.
-  # Positive and negative responses are cached using upstream TTLs,
-  # optionally bounded by min/max TTL caps.
-  # cache:
-  #   enabled: false
-  #   min_ttl: "5s"
-  #   max_ttl: "1h"
+  # DNS response cache. Default from struct: absent (None).
+  # When absent, code defaults to enabled: true with no TTL bounds.
+  cache:
+    enabled: true
+    # min_ttl: "5s"
+    # max_ttl: "1h"
 
-  # Resolvers used to look up upstream hostnames (e.g. DoH/DoT server names)
+  # Default from struct: ["194.242.2.2", "2a07:e340::2"]
+  # Mullvad no-filtering DNS (used to resolve DoH hostnames at startup)
   bootstrap_resolvers:
-    - "1.1.1.1"
+    - "194.242.2.2"
+    - "2a07:e340::2"
 
   servers:
-    # Plain DNS
-    - enabled: false
-      protocol: "dns"
-      address: "8.8.8.8:53"
-    - enabled: false
-      protocol: "dns"
-      address: "1.1.1.1:53"
-
-    # DNS over TLS
-    - enabled: false
-      protocol: "dot"
-      address: "dns.google:853"
-      tls:
-        cert_path: "certs/upstream-cert.pem"
-        autogenerate: true
-
-    # DNS over HTTPS
-    - enabled: false
-      protocol: "doh"
-      address: "https://dns.google/dns-query"
-      tls:
-        cert_path: "certs/upstream-cert.pem"
-        autogenerate: true
-
-    # DNS over QUIC
-    - enabled: false
-      protocol: "doq"
-      address: "dns.google:8853"
-      tls:
-        cert_path: "certs/upstream-cert.pem"
-        autogenerate: true
-
-    # Full recursive resolution with DNSSEC validation
     - enabled: true
-      protocol: "recursive"
-      dnssec: true                       # DNSSEC chain-of-trust validation (default: true)
-      nameserver_ip_family: "ipv4"       # "ipv4", "ipv6", or omit for both
-      # root_hints_path: "/usr/share/dns/root.hints"   # auto-detected
-      # root_key_path: "/usr/share/dns/root.key"       # auto-detected
-      # max_hops: 12                                    # default: 12
+      protocol: "doh"
+      address: "https://dns.mullvad.net/dns-query"
+
+    # Example: recursive resolver
+    # - enabled: true
+    #   protocol: "recursive"
+    #   # dnssec: true                         # default: true
+    #   # nameserver_ip_family: "ipv4"       # "ipv4", "ipv6", or omit for both
+    #   # root_hints_path: "/usr/share/dns/root.hints"   # auto-detected
+    #   # root_key_path: "/usr/share/dns/root.key"       # auto-detected
+    #   # max_hops: 12                                    # default: 12
+
+    # Optional examples
+    # - enabled: true
+    #   protocol: "dns"
+    #   address: "8.8.8.8:53"
+    # - enabled: true
+    #   protocol: "dns"
+    #   address: "1.1.1.1:53"
+    # - enabled: true
+    #   protocol: "dot"
+    #   address: "dns.google:853"
+    # - enabled: true
+    #   protocol: "doh"
+    #   address: "https://dns.google/dns-query"
+    # - enabled: true
+    #   protocol: "doq"
+    #   address: "dns.google:8853"
 
   # -------------------------------------------------------------------------
   # Zone forwarding / zone authority
   # -------------------------------------------------------------------------
+  # Default from struct: empty list.
   # Choose exactly one mode per zone:
   #   1) Forwarding  — route queries to zone-specific servers[]
   #   2) Authoritative — serve records from a JSON zone_source
-  zones:
-    - zone: "home.arpa"
-      enabled: false
-      bypass_filter: true
-      fallback_to_default_resolvers: false
-      strategy: "failover"
-      servers: []
+  zones: []
 
-    - zone: "168.192.in-addr.arpa"
-      enabled: false
-      bypass_filter: true
-      fallback_to_default_resolvers: false
-      strategy: "failover"
-      servers: []
+  # Zone forwarding with DoH upstream and optional Bearer auth
+  # - zone: "corp.example"
+  #   enabled: false
+  #   bypass_filter: false
+  #   fallback_to_default_resolvers: false
+  #   strategy: "failover"
+  #   servers:
+  #     - enabled: true
+  #       protocol: "doh"
+  #       address: "https://dns.corp.example/dns-query"
+  #       # authentication:
+  #       #   token: "my-bearer-token"
 
-    # Zone forwarding with DoH upstream and optional Bearer auth
-    # - zone: "corp.example"
-    #   enabled: false
-    #   bypass_filter: false
-    #   fallback_to_default_resolvers: false
-    #   strategy: "failover"
-    #   servers:
-    #     - enabled: true
-    #       protocol: "doh"
-    #       address: "https://dns.corp.example/dns-query"
-    #       # authentication:
-    #       #   token: "my-bearer-token"
+  # Zone authority from a local JSON file
+  # - zone: "example.com"
+  #   enabled: false
+  #   bypass_filter: false
+  #   fallback_to_default_resolvers: false
+  #   servers:
+  #     - enabled: true
+  #       protocol: "json"
+  #       address: "file:///etc/dns-filter/zones/example.com.json"
 
-    # Zone authority from a local JSON file
-    # - zone: "example.com"
-    #   enabled: false
-    #   bypass_filter: false
-    #   fallback_to_default_resolvers: false
-    #   servers:
-    #     - enabled: true
-    #       protocol: "json"
-    #       address: "file:///etc/dns-filter/zones/example.com.json"
-
-    # Zone authority from an HTTP(S) URL with periodic refresh
-    # - zone: "example.net"
-    #   enabled: false
-    #   bypass_filter: false
-    #   fallback_to_default_resolvers: false
-    #   servers:
-    #     - enabled: true
-    #       protocol: "json"
-    #       address: "https://zones.example.net/example.net.json"
-    #       check_interval: "15m"
-    #       # authentication:
-    #       #   token: "my-bearer-token"        # Bearer
-    #       # authentication:                   # …or Basic
-    #       #   username: "user"
-    #       #   password: "secret"
+  # Zone authority from an HTTP(S) URL with periodic refresh
+  # - zone: "example.net"
+  #   enabled: false
+  #   bypass_filter: false
+  #   fallback_to_default_resolvers: false
+  #   servers:
+  #     - enabled: true
+  #       protocol: "json"
+  #       address: "https://zones.example.net/example.net.json"
+  #       check_interval: "15m"
+  #       # authentication:
+  #       #   token: "my-bearer-token"        # Bearer
+  #       # authentication:                   # ...or Basic
+  #       #   username: "user"
+  #       #   password: "secret"
 
   # -------------------------------------------------------------------------
   # Zone discovery — auto-import zones from a JSON index endpoint
@@ -311,73 +278,79 @@ plugins: []
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+# Required section. All sub-loggers default to absent (None = no output).
 logging:
-  syslog:
-    enabled: true
-    transport: "unix"                    # "unix" (default), "udp", "tcp", "tls"
-    server: "/dev/log"                   # socket path or host:port
-    format: "rfc3164"                    # "rfc3164" (default) or "rfc5424"
-    facility: local0
-    level: info
-    # TLS settings (only when transport: "tls")
-    # tls:
-    #   ca_cert_path: "/etc/ssl/certs/ca-certificates.crt"
-    #   verify_hostname: true
-  file:
-    enabled: false
-    location: /var/log/dns-filter.log
-    level: debug
+  # syslog:
+  #   enabled: true
+  #   transport: "unix"                  # "unix" (default), "udp", "tcp", "tls"
+  #   server: "/dev/log"                 # socket path or host:port
+  #   format: "rfc3164"                  # "rfc3164" (default) or "rfc5424"
+  #   facility: local0
+  #   level: info
+  #   # tls:
+  #   #   ca_cert_path: "/etc/ssl/certs/ca-certificates.crt"
+  #   #   verify_hostname: true
+  # file:
+  #   enabled: false
+  #   location: /var/log/dns-filter.log
+  #   level: debug
   stdout:
-    enabled: false
-    level: debug
+    enabled: true
+    level: info
 
 # ---------------------------------------------------------------------------
 # Security — privilege dropping after socket bind
 # ---------------------------------------------------------------------------
+# Default from struct: absent (None).
+# When absent, code applies these internal defaults:
+#   user: "nobody"
+#   group: "nogroup"
+#   chroot_dir: "/var/lib/dns-filter"
+#
 # The process starts as root to bind privileged ports, then drops to an
 # unprivileged user/group and optionally chroots.
 # CAP_NET_BIND_SERVICE is retained on Linux for potential rebinds on reload.
 #
 # NOTE: After chroot, config files and caches must be accessible from within
 # the chroot directory (e.g. bind-mount or copy into it).
-security:
-  user: "nobody"
-  group: "nogroup"
-  chroot_dir: "/var/lib/dns-filter"
+# security:
+#   user: "nobody"
+#   group: "nogroup"
+#   chroot_dir: "/var/lib/dns-filter"
 
 # ---------------------------------------------------------------------------
 # REST API — runtime administration
 # ---------------------------------------------------------------------------
-# Endpoints for reloading config, refreshing lists, toggling filtering,
-# viewing stats, and query logging.
+# Default from struct: absent (None = API disabled).
 # All /api/* endpoints require a Bearer token when api_token is set.
 # The /health endpoint is always unauthenticated.
-api:
-  enabled: false
-  address: "0.0.0.0"
-  port: 8000
-  # api_token: "change-me-to-a-secure-value"
-  query_logging:
-    enabled: false
-    max_entries: 10000
+# api:
+#   enabled: false
+#   address: "0.0.0.0"                  # default
+#   port: 8000                          # default
+#   # api_token: "change-me-to-a-secure-value"
+#   query_logging:
+#     enabled: false                    # default
+#     max_entries: 10000                # default
 
 # ---------------------------------------------------------------------------
 # Control socket — CLI-based daemon management (stop, reload)
 # ---------------------------------------------------------------------------
+# Default from struct: absent (None).
+# When absent, code uses default socket_path: "run/dns-filter.sock"
+# (relative paths resolved from security.chroot_dir).
 control:
-  # Relative paths are resolved from security.chroot_dir.
   socket_path: "run/dns-filter.sock"
 
 # ---------------------------------------------------------------------------
 # Database — operational config storage
 # ---------------------------------------------------------------------------
-# Operational config (blocklists, allowlists, upstream resolvers, zones, etc.)
-# is stored in the database.  On first start the YAML config above is seeded
-# into the DB; after that the DB is authoritative.
+# Default from struct: absent (None).
+# When absent, code uses default URL: "sqlite://db/dns-filter.db"
 #
 # Supported backends (compile-time feature flags):
-#   db-sqlite   (default)   sqlite:///var/lib/dns-filter/dns-filter.db
+#   db-sqlite   (default)   sqlite://db/dns-filter.db
 #   db-mysql                mysql://user:pass@localhost/dns_filter
 #   db-postgres             postgres://user:pass@localhost/dns_filter
 database:
-  url: "sqlite:///var/lib/dns-filter/dns-filter.db"
+  url: "sqlite://db/dns-filter.db"

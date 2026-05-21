@@ -57,7 +57,7 @@ fn hint_for_path(field_path: &str) -> &'static str {
     } else if field_path.starts_with("resolvers.zones") {
         "Check each zone includes 'zone' and at least one enabled entry in 'servers[]'. Each server requires 'enabled', 'protocol', and 'address'. Protocols: 'dns' (<ip>:<port>), 'dot' (tls://<host>[:port]), 'doh' (https://...), 'recursive', 'json' (file://, http://, or https:// address). The 'json' protocol accepts 'check_interval' for URL sources. Both 'json' and 'doh' accept nested 'authentication' with 'token' (Bearer) or 'username'+'password' (Basic). Zone-level 'strategy' supports round_robin, random, or failover."
     } else if field_path.starts_with("resolvers") {
-        "Check that 'strategy' is valid, each server includes 'protocol'/'address', and optional 'bootstrap_resolvers' values are IP or IP:port (default: 1.1.1.1; protocol support: dns, dot, recursive; DoT examples: tls://1.1.1.1, tls://dns.example.com:853, or 1.1.1.1:853)."
+        "Check that 'strategy' is valid, each server includes 'protocol'/'address', and optional 'bootstrap_resolvers' values are IP or IP:port (default: 194.242.2.2; protocol support: dns, dot, recursive; DoT examples: tls://1.1.1.1, tls://dns.example.com:853, or 1.1.1.1:853)."
     } else if field_path.starts_with("logging") {
         "Check each logging target uses the expected keys (enabled/level and location for file logging)."
     } else if field_path.starts_with("filtering") {

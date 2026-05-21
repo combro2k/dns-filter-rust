@@ -64,7 +64,7 @@ pub struct ControlConfig {
     pub socket_path: Option<String>,
 }
 
-pub const DEFAULT_DATABASE_URL: &str = "sqlite:///var/lib/dns-filter/dns-filter.db";
+pub const DEFAULT_DATABASE_URL: &str = "sqlite://db/dns-filter.db";
 
 #[derive(Debug, Deserialize)]
 pub struct DatabaseConfig {
@@ -367,7 +367,7 @@ pub struct ZoneDiscoveryConfig {
 }
 
 fn default_bootstrap_resolvers() -> Vec<String> {
-    vec!["1.1.1.1".to_string()]
+    vec!["194.242.2.2".to_string(), "2a07:e340::2".to_string()]
 }
 
 fn default_enabled() -> bool {
