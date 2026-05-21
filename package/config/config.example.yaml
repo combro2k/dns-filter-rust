@@ -160,8 +160,9 @@ resolvers:
   # When absent, code defaults to enabled: true with no TTL bounds.
   cache:
     enabled: true
-    # min_ttl: "5s"
-    # max_ttl: "1h"
+    max_entries: 10000           # default
+    min_ttl: "60s"
+    max_ttl: "1h"
 
   # Default from struct: ["194.242.2.2", "2a07:e340::2"]
   # Mullvad no-filtering DNS (used to resolve DoH hostnames at startup)

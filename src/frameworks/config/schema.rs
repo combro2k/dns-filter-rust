@@ -330,12 +330,18 @@ pub struct ResolversConfig {
     pub servers: Vec<UpstreamServer>,
 }
 
+fn default_min_ttl() -> Option<String> { Some("60s".to_string()) }
+fn default_max_ttl() -> Option<String> { Some("1h".to_string()) }
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ResolverCacheConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default = "default_min_ttl")]
     pub min_ttl: Option<String>,
+    #[serde(default = "default_max_ttl")]
     pub max_ttl: Option<String>,
+    pub max_entries: Option<usize>,
 }
 
 /// Configuration for automatic zone discovery from a JSON index endpoint.

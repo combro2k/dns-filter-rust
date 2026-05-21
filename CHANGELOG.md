@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **DNS resolution stalls from unbounded response cache**: the in-memory resolver cache (`CachedUpstreamResolver`) had no size limit and removed expired entries via a separate write-lock acquisition. Under sustained load this caused unbounded memory growth and RwLock contention that could stall all DNS queries. Added a configurable `max_entries` cap (default 10,000) with automatic eviction of expired and soonest-to-expire entries when the limit is reached, and eliminated the unnecessary write-lock on expired-entry removal.
+
 ### Added
 - **Opt-out DNS response cache settings**: added global `resolvers.cache` configuration plumbing with database-backed persistence for `enabled`, `min_ttl`, and `max_ttl`. DNS response caching is on by default and can be disabled explicitly with `resolvers.cache.enabled: false`.
 - **Runtime resolver-config management (API + MCP)**: added DB-backed global resolver configuration endpoints/tools to read and update `strategy`, `bootstrap_resolvers`, and DNS cache settings (`dns_cache_enabled`, `dns_cache_min_ttl`, `dns_cache_max_ttl`) with validation and reload-on-change behavior.

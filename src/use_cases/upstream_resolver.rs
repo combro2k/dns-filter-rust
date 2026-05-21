@@ -35,11 +35,25 @@ pub trait UpstreamResolver: Send + Sync {
     async fn resolve(&self, query: Vec<u8>) -> Result<Vec<u8>, UpstreamResolveError>;
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+const DEFAULT_MAX_CACHE_ENTRIES: usize = 10_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolverCacheSettings {
     pub enabled: bool,
     pub min_ttl: Option<Duration>,
     pub max_ttl: Option<Duration>,
+    pub max_entries: usize,
+}
+
+impl Default for ResolverCacheSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_ttl: None,
+            max_ttl: None,
+            max_entries: DEFAULT_MAX_CACHE_ENTRIES,
+        }
+    }
 }
 
 impl ResolverCacheSettings {
@@ -113,15 +127,35 @@ impl UpstreamResolver for CachedUpstreamResolver {
                     client_query_id,
                 ));
             }
-
-            self.entries.write().await.remove(&key);
+            // Expired entry — don't acquire a write lock just to remove it.
+            // It will be overwritten on insert below or evicted during cleanup.
         }
 
         record_cache_operation(false);
 
         let response = self.inner.resolve(query).await?;
         if let Some(ttl) = cache_ttl(&response, &self.settings) {
-            self.entries.write().await.insert(
+            let mut entries = self.entries.write().await;
+            // Evict expired entries and enforce size cap before inserting.
+            if entries.len() >= self.settings.max_entries {
+                entries.retain(|_, v| v.expires_at > now);
+            }
+            if entries.len() >= self.settings.max_entries {
+                // Still over limit — evict the entries closest to expiry.
+                let mut by_expiry: Vec<Vec<u8>> = entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.expires_at))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|(k, _)| k)
+                    .collect();
+                by_expiry.sort_by_key(|k| entries.get(k).map(|v| v.expires_at));
+                let to_remove = entries.len() - self.settings.max_entries / 2;
+                for k in by_expiry.into_iter().take(to_remove) {
+                    entries.remove(&k);
+                }
+            }
+            entries.insert(
                 key,
                 CachedResponse {
                     response: scrub_response_id(&response),
@@ -458,6 +492,7 @@ mod tests {
                 enabled: true,
                 min_ttl: None,
                 max_ttl: None,
+                ..Default::default()
             },
         );
 
@@ -485,6 +520,7 @@ mod tests {
                 enabled: true,
                 min_ttl: Some(Duration::from_secs(30)),
                 max_ttl: Some(Duration::from_secs(120)),
+                ..Default::default()
             },
         )
         .expect("negative response should be cacheable");
@@ -498,8 +534,51 @@ mod tests {
             enabled: true,
             min_ttl: Some(Duration::from_secs(60)),
             max_ttl: Some(Duration::from_secs(30)),
+            ..Default::default()
         };
 
         assert!(settings.validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn cached_upstream_resolver_evicts_when_over_max_entries() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let inner = Arc::new(StaticResolver {
+            response: positive_response("example.com.", 300, 10),
+            calls: Arc::clone(&calls),
+        });
+        let resolver = CachedUpstreamResolver::new(
+            inner,
+            ResolverCacheSettings {
+                enabled: true,
+                min_ttl: None,
+                max_ttl: None,
+                max_entries: 3,
+            },
+        );
+
+        // Fill the cache with 3 unique queries.
+        for i in 0u16..3 {
+            let name = format!("host{i}.example.com.");
+            resolver
+                .resolve(dns_query(&name, RecordType::A, i))
+                .await
+                .unwrap();
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+
+        // A 4th unique query triggers eviction — cache should not grow unbounded.
+        resolver
+            .resolve(dns_query("host3.example.com.", RecordType::A, 3))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 4);
+
+        let entries = resolver.entries.read().await;
+        assert!(
+            entries.len() <= 3,
+            "cache should not exceed max_entries, got {}",
+            entries.len()
+        );
     }
 }

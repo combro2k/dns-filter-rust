@@ -360,6 +360,9 @@ fn build_resolver_cache_settings(config: &DnsFilterConfig) -> Result<ResolverCac
                 })
             })
             .transpose()?,
+        max_entries: cache
+            .and_then(|cache| cache.max_entries)
+            .unwrap_or(ResolverCacheSettings::default().max_entries),
     };
     settings.validate().map_err(anyhow::Error::msg)?;
     Ok(settings)
@@ -937,6 +940,7 @@ mod tests {
                     enabled: true,
                     min_ttl: None,
                     max_ttl: None,
+                    max_entries: None,
                 }),
                 zones: Vec::new(),
                 zone_discovery: Vec::new(),

@@ -178,6 +178,7 @@ pub async fn apply_db_config(config: &mut DnsFilterConfig, repos: &Repositories)
             max_ttl: resolver_record
                 .dns_cache_max_ttl_seconds
                 .map(|seconds| format!("{seconds}s")),
+            max_entries: None,
         }),
         servers,
         zones,
