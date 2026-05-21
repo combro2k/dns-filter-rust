@@ -2,7 +2,8 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+
+## [3.0.0] - 2026-05-21
 
 ### Fixed
 - **DNS resolution stalls from unbounded response cache**: the in-memory resolver cache (`CachedUpstreamResolver`) had no size limit and removed expired entries via a separate write-lock acquisition. Under sustained load this caused unbounded memory growth and RwLock contention that could stall all DNS queries. Added a configurable `max_entries` cap (default 10,000) with automatic eviction of expired and soonest-to-expire entries when the limit is reached, and eliminated the unnecessary write-lock on expired-entry removal.
@@ -21,6 +22,8 @@ All notable changes to this project will be documented in this file.
 - **Systemd capability set includes `CAP_NET_ADMIN` for fwmark routing**: the packaged systemd unit now retains `CAP_NET_ADMIN` in ambient and bounding sets so Linux `SO_MARK` (`outbound.fwmark`) can be applied without repeated `PermissionDenied` upstream failures.
 - **MCP presentation-enabled tool variants**: added additive MCP tools `get_stats_presented` and `list_upstreams_presented`, plus optional `include_presentation` support on `search_zone_records`, to return a structured envelope with canonical `data` and a human-readable markdown `display` layout. Existing MCP tools keep their previous raw JSON responses for backward compatibility.
 - **Unified in-memory metrics source for Prometheus and API stats**: `/metrics` and `/api/v1/stats` now read from the same Prometheus-backed in-memory primitives, ensuring equal totals and per-upstream aggregates (requests, errors, latency count/sum) across both outputs.
+
+## [2.5.1] - 2026-05-20
 - **DNSSEC NSEC/NODATA fallback handling in request pipeline**: when an upstream resolver surfaces DNSSEC NSEC-based proof-of-nonexistence as a protocol error string (for example from recursive resolution of signed CNAME chains with no requested RRset), the DNS pipeline now returns a `NOERROR` empty-answer response instead of `SERVFAIL`. This reduces false SERVFAIL responses for valid NODATA outcomes.
 - **Listener batch test no longer probes dead `listen.http` wiring**: removed the temporary `listen.http` section and its `127.0.0.1:18080` reachability check from `tests/listener_batch_test.sh`. The code serves the Axum HTTP API from `api.port`, not `listen.http.port`, so the old strict-mode failure was a test bug rather than a product bug.
 - **Per-upstream Prometheus latency/error metrics**: upstream resolver timing and error counters are now labeled by configured upstream target (`upstream="<protocol>://<address>"`) instead of a single global aggregate, enabling per-upstream SLO dashboards and alerting.
