@@ -135,6 +135,7 @@ pub struct McpConfig {
     pub json_response: bool,
     #[serde(default)]
     pub allowed_origins: Vec<String>,
+    #[serde(default)]
     pub allowed_hosts: Option<Vec<String>>,
 }
 
@@ -330,8 +331,12 @@ pub struct ResolversConfig {
     pub servers: Vec<UpstreamServer>,
 }
 
-fn default_min_ttl() -> Option<String> { Some("60s".to_string()) }
-fn default_max_ttl() -> Option<String> { Some("1h".to_string()) }
+fn default_min_ttl() -> Option<String> {
+    Some("60s".to_string())
+}
+fn default_max_ttl() -> Option<String> {
+    Some("1h".to_string())
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ResolverCacheConfig {
