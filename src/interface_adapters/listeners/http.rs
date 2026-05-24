@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{middleware, Json, Router};
 use serde::Serialize;
@@ -81,6 +81,12 @@ fn json_error(status: StatusCode, message: &str) -> Response {
         timestamp: now_unix(),
     };
     (status, Json(body)).into_response()
+}
+
+const ADMIN_PAGE_TEMPLATE: &str = include_str!("../../../templates/admin.html");
+
+fn render_admin_page() -> Html<&'static str> {
+    Html(ADMIN_PAGE_TEMPLATE)
 }
 
 #[derive(OpenApi)]
@@ -233,6 +239,8 @@ pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> anyhow:
 
     // Unauthenticated routes + merge with authenticated routes
     let app = Router::new()
+        .route("/", get(handle_admin_page))
+        .route("/admin", get(handle_admin_page))
         .route("/health", get(handle_health))
         .merge(api_routes)
         .with_state(state);
@@ -275,6 +283,10 @@ pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> anyhow:
 async fn handle_health(State(state): State<Arc<ApiState>>) -> Response {
     let result = state.ops.server_health();
     json_ok(result)
+}
+
+async fn handle_admin_page() -> Html<&'static str> {
+    render_admin_page()
 }
 
 #[utoipa::path(
@@ -1141,5 +1153,13 @@ mod tests {
         assert!(spec.contains("/api/v1/resolver-config"));
         assert!(spec.contains("UpdateResolverConfigInput"));
         assert!(spec.contains("ResolverConfigRecord"));
+    }
+
+    #[test]
+    fn admin_page_template_contains_tailwind_and_dashboard_bindings() {
+        assert!(ADMIN_PAGE_TEMPLATE.contains("https://cdn.tailwindcss.com"));
+        assert!(ADMIN_PAGE_TEMPLATE.contains("loadDashboard"));
+        assert!(ADMIN_PAGE_TEMPLATE.contains("sessionStorage"));
+        assert!(ADMIN_PAGE_TEMPLATE.contains("/api/v1/stats"));
     }
 }

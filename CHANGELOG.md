@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+- **Embedded Tailwind admin UI**: added a browser-facing administration dashboard at `/` and `/admin` that uses the existing authenticated API, stores the bearer token in session storage, and exposes runtime status, filtering controls, query log, and quick-action buttons.
+- **Alpine-based container support**: added an Alpine Dockerfile and a container-specific `docker/config.yaml` so the admin UI and HTTP API are available by default in Docker builds.
+
 ### Fixed
 - **Config schema robustness**: Added `#[serde(default)]` to `allowed_hosts` in `McpConfig` to ensure it is always present and defaults to `None` if not set. This prevents deserialization errors and makes config handling more robust.
 

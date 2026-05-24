@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="en" class="h-full bg-slate-950">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dns-filter admin</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-full bg-slate-950 text-slate-100">
+    <div class="mx-auto flex min-h-screen max-w-7xl flex-col px-4 py-8 sm:px-6 lg:px-8">
+        <header class="mb-8 flex flex-col gap-4 border-b border-slate-800 pb-6 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+                <p class="text-sm uppercase tracking-[0.3em] text-cyan-300">dns-filter</p>
+                <h1 class="mt-2 text-3xl font-semibold text-white">Administration dashboard</h1>
+                <p class="mt-2 max-w-3xl text-sm text-slate-300">
+                    Monitor runtime status, filtering state, recent DNS decisions, and trigger common administrative actions through the existing API.
+                </p>
+            </div>
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-xl shadow-slate-950/40">
+                <div class="flex items-center gap-3">
+                    <label for="api-token" class="text-sm font-medium text-slate-200">API token</label>
+                    <input
+                        id="api-token"
+                        type="password"
+                        autocomplete="off"
+                        placeholder="Bearer token (optional unless configured)"
+                        class="w-80 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-cyan-400"
+                    />
+                </div>
+                <div class="mt-3 flex items-center justify-end gap-2">
+                    <button
+                        id="save-token"
+                        type="button"
+                        class="rounded-lg bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400"
+                    >Save token</button>
+                    <button
+                        id="refresh-btn"
+                        type="button"
+                        class="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-100 transition hover:border-cyan-400 hover:text-cyan-200"
+                    >Refresh</button>
+                </div>
+            </div>
+        </header>
+
+        <div id="status-banner" class="mb-6 rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-50">
+            Loading dashboard...
+        </div>
+
+        <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-lg shadow-slate-950/30">
+                <p class="text-sm text-slate-300">Server health</p>
+                <div class="mt-3 flex items-center justify-between gap-3">
+                    <p id="health-status" class="text-2xl font-semibold text-white">—</p>
+                    <span id="health-badge" class="rounded-full bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-200">loading</span>
+                </div>
+                <p class="mt-3 text-sm text-slate-300">Version: <span id="health-version" class="text-white">—</span></p>
+                <p class="mt-1 text-sm text-slate-300">Uptime: <span id="health-uptime" class="text-white">—</span></p>
+            </div>
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-lg shadow-slate-950/30">
+                <p class="text-sm text-slate-300">Filtering</p>
+                <p id="filtering-state" class="mt-3 text-2xl font-semibold text-white">—</p>
+                <p class="mt-3 text-sm text-slate-300">Toggle the global filtering decision from the API.</p>
+            </div>
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-lg shadow-slate-950/30">
+                <p class="text-sm text-slate-300">Queries</p>
+                <div class="mt-3 grid grid-cols-2 gap-2 text-sm">
+                    <div>
+                        <p class="text-slate-400">Total</p>
+                        <p id="stats-total" class="text-xl font-semibold text-white">0</p>
+                    </div>
+                    <div>
+                        <p class="text-slate-400">Blocked</p>
+                        <p id="stats-blocked" class="text-xl font-semibold text-rose-300">0</p>
+                    </div>
+                    <div>
+                        <p class="text-slate-400">Allowed</p>
+                        <p id="stats-allowed" class="text-xl font-semibold text-emerald-300">0</p>
+                    </div>
+                    <div>
+                        <p class="text-slate-400">Passthrough</p>
+                        <p id="stats-passthrough" class="text-xl font-semibold text-amber-300">0</p>
+                    </div>
+                </div>
+            </div>
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-lg shadow-slate-950/30">
+                <p class="text-sm text-slate-300">Cache</p>
+                <div class="mt-3 grid grid-cols-2 gap-2 text-sm">
+                    <div>
+                        <p class="text-slate-400">Hits</p>
+                        <p id="stats-cache-hits" class="text-xl font-semibold text-white">0</p>
+                    </div>
+                    <div>
+                        <p class="text-slate-400">Misses</p>
+                        <p id="stats-cache-misses" class="text-xl font-semibold text-white">0</p>
+                    </div>
+                </div>
+                <p class="mt-3 text-sm text-slate-300">Configured lists: <span id="stats-lists-count" class="text-white">0</span></p>
+                <p class="mt-1 text-sm text-slate-300">Upstreams: <span id="stats-upstreams-count" class="text-white">0</span></p>
+            </div>
+        </section>
+
+        <section class="mt-8 grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-lg shadow-slate-950/30">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h2 class="text-lg font-semibold text-white">Recent queries</h2>
+                        <p class="text-sm text-slate-300">Latest entries from the query log endpoint.</p>
+                    </div>
+                    <span class="rounded-full border border-slate-700 px-3 py-1 text-xs text-slate-200">live</span>
+                </div>
+                <div class="mt-4 overflow-x-auto">
+                    <table class="min-w-full text-sm">
+                        <thead>
+                            <tr class="text-left text-slate-300">
+                                <th class="pb-2">Time</th>
+                                <th class="pb-2">Domain</th>
+                                <th class="pb-2">Type</th>
+                                <th class="pb-2">Decision</th>
+                                <th class="pb-2">Source</th>
+                            </tr>
+                        </thead>
+                        <tbody id="query-log-body" class="text-slate-100"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 shadow-lg shadow-slate-950/30">
+                <h2 class="text-lg font-semibold text-white">Quick actions</h2>
+                <p class="mt-1 text-sm text-slate-300">Trigger common administration tasks through the authenticated API.</p>
+                <div class="mt-4 flex flex-col gap-3">
+                    <button id="toggle-filtering-btn" type="button" class="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400">Toggle filtering</button>
+                    <button id="refresh-lists-btn" type="button" class="rounded-lg bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-cyan-400">Refresh all lists</button>
+                    <button id="reload-btn" type="button" class="rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-amber-300">Reload config</button>
+                    <button id="shutdown-btn" type="button" class="rounded-lg bg-rose-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-400">Shutdown server</button>
+                </div>
+
+                <div class="mt-6 rounded-xl border border-slate-800 bg-slate-950/70 p-4">
+                    <h3 class="text-sm font-semibold text-white">Configured lists</h3>
+                    <div id="lists-body" class="mt-3 space-y-2 text-sm text-slate-200"></div>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        const TOKEN_KEY = 'dns-filter-admin-token';
+        const statusBanner = document.getElementById('status-banner');
+        const apiTokenInput = document.getElementById('api-token');
+        const saveTokenButton = document.getElementById('save-token');
+        const refreshButton = document.getElementById('refresh-btn');
+        const toggleFilteringButton = document.getElementById('toggle-filtering-btn');
+        const refreshListsButton = document.getElementById('refresh-lists-btn');
+        const reloadButton = document.getElementById('reload-btn');
+        const shutdownButton = document.getElementById('shutdown-btn');
+
+        const healthStatus = document.getElementById('health-status');
+        const healthBadge = document.getElementById('health-badge');
+        const healthVersion = document.getElementById('health-version');
+        const healthUptime = document.getElementById('health-uptime');
+        const filteringState = document.getElementById('filtering-state');
+        const statsTotal = document.getElementById('stats-total');
+        const statsBlocked = document.getElementById('stats-blocked');
+        const statsAllowed = document.getElementById('stats-allowed');
+        const statsPassthrough = document.getElementById('stats-passthrough');
+        const statsCacheHits = document.getElementById('stats-cache-hits');
+        const statsCacheMisses = document.getElementById('stats-cache-misses');
+        const statsListsCount = document.getElementById('stats-lists-count');
+        const statsUpstreamsCount = document.getElementById('stats-upstreams-count');
+        const queryLogBody = document.getElementById('query-log-body');
+        const listsBody = document.getElementById('lists-body');
+
+        let filteringEnabled = false;
+
+        function setStatus(message, tone = 'info') {
+            const toneClasses = {
+                info: 'border-cyan-500/40 bg-cyan-500/10 text-cyan-50',
+                success: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-50',
+                error: 'border-rose-500/40 bg-rose-500/10 text-rose-50'
+            };
+            statusBanner.className = `mb-6 rounded-xl border px-4 py-3 text-sm ${toneClasses[tone] || toneClasses.info}`;
+            statusBanner.textContent = message;
+        }
+
+        function getToken() {
+            return sessionStorage.getItem(TOKEN_KEY) || '';
+        }
+
+        function persistToken() {
+            const token = apiTokenInput.value.trim();
+            if (token) {
+                sessionStorage.setItem(TOKEN_KEY, token);
+                setStatus('Token saved for this session.', 'success');
+            } else {
+                sessionStorage.removeItem(TOKEN_KEY);
+                setStatus('Token cleared.', 'success');
+            }
+        }
+
+        function buildHeaders(extra = {}) {
+            const token = getToken();
+            const headers = { 'Content-Type': 'application/json', ...extra };
+            if (token) {
+                headers.Authorization = `Bearer ${token}`;
+            }
+            return headers;
+        }
+
+        async function apiRequest(path, options = {}) {
+            const response = await fetch(`${window.location.origin}${path}`, {
+                ...options,
+                headers: buildHeaders(options.headers || {})
+            });
+
+            const contentType = response.headers.get('content-type') || '';
+            let payload = null;
+            if (contentType.includes('application/json')) {
+                payload = await response.json();
+            } else {
+                payload = await response.text();
+            }
+
+            if (!response.ok) {
+                const message = payload?.error || payload || `Request failed (${response.status})`;
+                throw new Error(message);
+            }
+
+            if (payload && payload.success === false) {
+                throw new Error(payload.error || 'Request failed');
+            }
+
+            return payload?.data ?? payload;
+        }
+
+        function formatUptime(seconds) {
+            if (!Number.isFinite(seconds) || seconds < 0) {
+                return 'n/a';
+            }
+            const days = Math.floor(seconds / 86400);
+            const hours = Math.floor((seconds % 86400) / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = seconds % 60;
+            const parts = [];
+            if (days) parts.push(`${days}d`);
+            if (hours) parts.push(`${hours}h`);
+            if (minutes) parts.push(`${minutes}m`);
+            parts.push(`${secs}s`);
+            return parts.join(' ');
+        }
+
+        function renderHealthyState(enabled) {
+            healthBadge.textContent = enabled ? 'healthy' : 'degraded';
+            healthBadge.className = enabled
+                ? 'rounded-full bg-emerald-500/20 px-3 py-1 text-xs font-semibold text-emerald-200'
+                : 'rounded-full bg-rose-500/20 px-3 py-1 text-xs font-semibold text-rose-200';
+        }
+
+        function renderQueryLog(entries) {
+            queryLogBody.innerHTML = '';
+            if (!entries || !entries.length) {
+                const row = document.createElement('tr');
+                row.innerHTML = '<td colspan="5" class="py-3 text-slate-300">No query log entries are currently available.</td>';
+                queryLogBody.appendChild(row);
+                return;
+            }
+
+            entries.slice(0, 8).forEach((entry) => {
+                const row = document.createElement('tr');
+                row.className = 'border-t border-slate-800';
+                row.innerHTML = `
+                    <td class="py-3 pr-3 text-slate-200">${new Date(entry.timestamp * 1000).toLocaleString()}</td>
+                    <td class="py-3 pr-3 text-slate-100">${entry.domain}</td>
+                    <td class="py-3 pr-3 text-slate-200">${entry.qtype}</td>
+                    <td class="py-3 pr-3">
+                        <span class="rounded-full px-2 py-1 text-xs font-semibold ${entry.decision === 'blocked' ? 'bg-rose-500/20 text-rose-200' : entry.decision === 'allowed' ? 'bg-emerald-500/20 text-emerald-200' : 'bg-amber-500/20 text-amber-100'}">${entry.decision}</span>
+                    </td>
+                    <td class="py-3 text-slate-200">${entry.source_ip}</td>
+                `;
+                queryLogBody.appendChild(row);
+            });
+        }
+
+        function renderLists(lists) {
+            listsBody.innerHTML = '';
+            if (!lists || !lists.length) {
+                listsBody.innerHTML = '<p class="text-slate-300">No filter lists are configured.</p>';
+                return;
+            }
+
+            lists.forEach((list) => {
+                const entry = document.createElement('div');
+                entry.className = 'rounded-lg border border-slate-800 bg-slate-950 px-3 py-2';
+                entry.innerHTML = `
+                    <div class="flex items-center justify-between gap-3">
+                        <div>
+                            <p class="font-semibold text-white">${list.name}</p>
+                            <p class="text-xs text-slate-300">${list.kind} • ${list.list_type}</p>
+                        </div>
+                        <span class="rounded-full px-2 py-1 text-xs ${list.enabled ? 'bg-emerald-500/20 text-emerald-200' : 'bg-slate-800 text-slate-200'}">${list.enabled ? 'enabled' : 'disabled'}</span>
+                    </div>
+                    <p class="mt-2 text-xs text-slate-300">${list.domain_count} domains • ${list.exception_count} exceptions • refresh every ${list.interval_secs}s</p>
+                `;
+                listsBody.appendChild(entry);
+            });
+        }
+
+        async function loadDashboard() {
+            setStatus('Loading dashboard...', 'info');
+            try {
+                const [health, filtering, stats, queryLog, lists] = await Promise.allSettled([
+                    apiRequest('/health'),
+                    apiRequest('/api/v1/filtering/status'),
+                    apiRequest('/api/v1/stats'),
+                    apiRequest('/api/v1/query-log'),
+                    apiRequest('/api/v1/lists')
+                ]);
+
+                if (health.status === 'fulfilled') {
+                    const data = health.value;
+                    healthStatus.textContent = data.status;
+                    healthVersion.textContent = data.version;
+                    healthUptime.textContent = formatUptime(data.uptime_seconds);
+                    renderHealthyState(data.status === 'ok');
+                    filteringEnabled = data.filtering_enabled;
+                } else {
+                    healthStatus.textContent = 'unavailable';
+                    renderHealthyState(false);
+                    healthVersion.textContent = 'n/a';
+                    healthUptime.textContent = 'n/a';
+                }
+
+                if (filtering.status === 'fulfilled') {
+                    filteringEnabled = filtering.value.filtering_enabled;
+                    filteringState.textContent = filteringEnabled ? 'enabled' : 'disabled';
+                } else {
+                    filteringState.textContent = 'unavailable';
+                }
+
+                if (stats.status === 'fulfilled') {
+                    const data = stats.value;
+                    statsTotal.textContent = String(data.queries_total ?? 0);
+                    statsBlocked.textContent = String(data.queries_blocked ?? 0);
+                    statsAllowed.textContent = String(data.queries_allowed ?? 0);
+                    statsPassthrough.textContent = String(data.queries_passthrough ?? 0);
+                    statsCacheHits.textContent = String(data.cache_hits_total ?? 0);
+                    statsCacheMisses.textContent = String(data.cache_misses_total ?? 0);
+                    statsListsCount.textContent = String(data.lists?.length ?? 0);
+                    statsUpstreamsCount.textContent = String(data.upstreams?.length ?? 0);
+                } else {
+                    statsTotal.textContent = '0';
+                    statsBlocked.textContent = '0';
+                    statsAllowed.textContent = '0';
+                    statsPassthrough.textContent = '0';
+                    statsCacheHits.textContent = '0';
+                    statsCacheMisses.textContent = '0';
+                    statsListsCount.textContent = '0';
+                    statsUpstreamsCount.textContent = '0';
+                }
+
+                if (queryLog.status === 'fulfilled') {
+                    renderQueryLog(queryLog.value.entries ?? []);
+                } else {
+                    renderQueryLog([]);
+                }
+
+                if (lists.status === 'fulfilled') {
+                    renderLists(lists.value);
+                } else {
+                    renderLists([]);
+                }
+
+                setStatus('Dashboard refreshed successfully.', 'success');
+            } catch (error) {
+                const message = error instanceof Error ? error.message : 'Failed to load dashboard';
+                setStatus(message, 'error');
+            }
+        }
+
+        async function actionWithFeedback(path, method, message) {
+            setStatus(message, 'info');
+            try {
+                await apiRequest(path, { method });
+                await loadDashboard();
+            } catch (error) {
+                const messageText = error instanceof Error ? error.message : 'Action failed';
+                setStatus(messageText, 'error');
+            }
+        }
+
+        saveTokenButton.addEventListener('click', () => {
+            persistToken();
+            loadDashboard();
+        });
+
+        refreshButton.addEventListener('click', () => {
+            loadDashboard();
+        });
+
+        toggleFilteringButton.addEventListener('click', () => {
+            const endpoint = filteringEnabled ? '/api/v1/filtering/disable' : '/api/v1/filtering/enable';
+            actionWithFeedback(endpoint, 'POST', `Requesting ${filteringEnabled ? 'disable' : 'enable'}...`);
+        });
+
+        refreshListsButton.addEventListener('click', () => {
+            actionWithFeedback('/api/v1/lists/refresh', 'POST', 'Refreshing all lists...');
+        });
+
+        reloadButton.addEventListener('click', () => {
+            actionWithFeedback('/api/v1/reload', 'POST', 'Reloading configuration...');
+        });
+
+        shutdownButton.addEventListener('click', () => {
+            if (!window.confirm('Shutdown the server now?')) {
+                return;
+            }
+            actionWithFeedback('/api/v1/stop', 'POST', 'Shutting down server...');
+        });
+
+        apiTokenInput.value = getToken();
+        loadDashboard();
+    </script>
+</body>
+</html>

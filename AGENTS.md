@@ -26,7 +26,15 @@ src/
     frameworks/
         config/
         plugin_runtime/   # cfg(feature = "plugins")
+
+templates/
+    admin.html
 ```
+
+### Embedded UI Assets
+- Embedded browser-facing HTML templates live under `templates/`.
+- Rust code may include these assets with `include_str!` from the template directory.
+- Keep template files outside `src/` so the Rust source tree remains focused on application logic.
 
 ### Protocol Scope
 - DNS UDP/TCP

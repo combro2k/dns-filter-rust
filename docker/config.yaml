@@ -1,0 +1,47 @@
+listen:
+  dns:
+    enabled: true
+    port: 53
+    addresses: ["0.0.0.0", "::"]
+
+  http:
+    enabled: true
+    port: 8080
+    addresses: ["0.0.0.0", "::"]
+
+  metrics:
+    enabled: true
+    port: 9100
+    addresses: ["127.0.0.1", "::1"]
+
+api:
+  enabled: true
+  address: "0.0.0.0"
+  port: 8080
+  # api_token: "change-me"
+
+logging:
+  stdout:
+    enabled: true
+    level: "info"
+
+database:
+  url: "sqlite:///app/data/dns-filter.db"
+
+resolvers:
+  strategy: "round_robin"
+  bootstrap_resolvers:
+    - "194.242.2.2"
+    - "2a07:e340::2"
+  cache:
+    enabled: true
+    min_ttl: "60s"
+    max_ttl: "1h"
+    max_entries: 10000
+  servers:
+    - enabled: true
+      protocol: "doh"
+      address: "https://dns.mullvad.net/dns-query"
+
+blocklists: []
+allowlists: []
