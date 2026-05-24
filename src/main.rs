@@ -273,14 +273,6 @@ async fn main() {
     }
 }
 
-fn should_delegate_start(_config_path: &str, _debug: bool, _direct: bool) -> bool {
-    false
-}
-
-fn should_delegate_stop(_config_path: &str, _socket_override: Option<&str>, _direct: bool) -> bool {
-    false
-}
-
 async fn run_start_command(config_path: String, debug: bool, _direct: bool) {
     run_daemon(config_path, debug).await;
 }
@@ -1366,51 +1358,4 @@ mod tests {
         assert!(err.contains("--config"));
     }
 
-    #[test]
-    fn start_never_delegates_to_init_system() {
-        assert!(!super::should_delegate_start(
-            DEFAULT_CONFIG_PATH,
-            false,
-            false
-        ));
-        assert!(!super::should_delegate_start(
-            DEFAULT_CONFIG_PATH,
-            true,
-            false
-        ));
-        assert!(!super::should_delegate_start(
-            DEFAULT_CONFIG_PATH,
-            false,
-            true
-        ));
-        assert!(!super::should_delegate_start(
-            "/tmp/config.yaml",
-            false,
-            false
-        ));
-    }
-
-    #[test]
-    fn stop_never_delegates_to_init_system() {
-        assert!(!super::should_delegate_stop(
-            DEFAULT_CONFIG_PATH,
-            None,
-            false
-        ));
-        assert!(!super::should_delegate_stop(
-            DEFAULT_CONFIG_PATH,
-            Some("/tmp/custom.sock"),
-            false
-        ));
-        assert!(!super::should_delegate_stop(
-            DEFAULT_CONFIG_PATH,
-            None,
-            true
-        ));
-        assert!(!super::should_delegate_stop(
-            "/tmp/config.yaml",
-            None,
-            false
-        ));
-    }
 }
