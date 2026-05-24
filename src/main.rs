@@ -1,9 +1,7 @@
 use clap::{Parser, Subcommand};
 use nix::unistd;
 use serde::Deserialize;
-use std::io::ErrorKind;
 use std::path::Path;
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -275,76 +273,19 @@ async fn main() {
     }
 }
 
-fn should_delegate_start(config_path: &str, debug: bool, direct: bool) -> bool {
-    !direct && !debug && config_path == DEFAULT_CONFIG_PATH
+fn should_delegate_start(_config_path: &str, _debug: bool, _direct: bool) -> bool {
+    false
 }
 
-fn should_delegate_stop(config_path: &str, socket_override: Option<&str>, direct: bool) -> bool {
-    !direct && socket_override.is_none() && config_path == DEFAULT_CONFIG_PATH
+fn should_delegate_stop(_config_path: &str, _socket_override: Option<&str>, _direct: bool) -> bool {
+    false
 }
 
-fn run_service_command(bin: &str, args: &[&str]) -> Result<bool, String> {
-    let status = match Command::new(bin).args(args).status() {
-        Ok(status) => status,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(format!("failed to execute {bin}: {e}")),
-    };
-
-    if status.success() {
-        Ok(true)
-    } else {
-        Err(format!(
-            "{} {} failed with status {}",
-            bin,
-            args.join(" "),
-            status
-        ))
-    }
-}
-
-fn try_delegate_to_init(action: &str) -> Result<bool, String> {
-    if Path::new("/run/systemd/system").exists()
-        && run_service_command("systemctl", &[action, "dns-filter"])?
-    {
-        return Ok(true);
-    }
-
-    if (Path::new("/run/openrc/softlevel").exists() || Path::new("/sbin/openrc-run").exists())
-        && run_service_command("rc-service", &["dns-filter", action])?
-    {
-        return Ok(true);
-    }
-
-    Ok(false)
-}
-
-async fn run_start_command(config_path: String, debug: bool, direct: bool) {
-    if should_delegate_start(&config_path, debug, direct) {
-        match try_delegate_to_init("start") {
-            Ok(true) => return,
-            Ok(false) => {}
-            Err(e) => {
-                eprintln!("failed to start service via init manager: {e}");
-                std::process::exit(1);
-            }
-        }
-    }
-
+async fn run_start_command(config_path: String, debug: bool, _direct: bool) {
     run_daemon(config_path, debug).await;
 }
 
-fn run_stop_command(config_path: &str, socket_override: Option<&str>, direct: bool) {
-    if should_delegate_stop(config_path, socket_override, direct) {
-        match try_delegate_to_init("stop") {
-            Ok(true) => return,
-            Ok(false) => {}
-            Err(e) => {
-                eprintln!("failed to stop service via init manager: {e}");
-                std::process::exit(1);
-            }
-        }
-    }
-
+fn run_stop_command(config_path: &str, socket_override: Option<&str>, _direct: bool) {
     run_control_command(config_path, socket_override, "stop");
 }
 
@@ -1426,8 +1367,8 @@ mod tests {
     }
 
     #[test]
-    fn delegates_start_only_for_default_non_debug_non_direct() {
-        assert!(super::should_delegate_start(
+    fn start_never_delegates_to_init_system() {
+        assert!(!super::should_delegate_start(
             DEFAULT_CONFIG_PATH,
             false,
             false
@@ -1450,8 +1391,8 @@ mod tests {
     }
 
     #[test]
-    fn delegates_stop_only_for_default_without_socket_or_direct() {
-        assert!(super::should_delegate_stop(
+    fn stop_never_delegates_to_init_system() {
+        assert!(!super::should_delegate_stop(
             DEFAULT_CONFIG_PATH,
             None,
             false

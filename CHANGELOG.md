@@ -11,6 +11,7 @@
 
 ### Changed
 - **Config example documents cache max_entries**: The example config (`package/config/config.example.yaml`) now documents and sets `max_entries` in the `resolvers.cache` section, making the default cache size limit explicit and user-visible.
+- **CLI start/stop behavior**: `dns-filter start` now always starts the daemon in the foreground, and `dns-filter stop` always contacts the control socket instead of delegating to systemd/OpenRC.
 
 All notable changes to this project will be documented in this file.
 
