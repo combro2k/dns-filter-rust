@@ -439,4 +439,55 @@ logging:
         let dns = parsed.listen.dns.expect("dns config should exist");
         assert_eq!(dns.addresses, vec!["127.0.0.1"]);
     }
+
+    #[test]
+    fn parses_disabled_listeners_without_optional_fields() {
+        let yaml = r#"
+listen:
+  dns:
+    enabled: false
+  dot:
+    enabled: false
+  doh:
+    enabled: false
+  doq:
+    enabled: false
+  http:
+    enabled: false
+  metrics:
+    enabled: false
+blocklists: []
+allowlists: []
+resolvers:
+  strategy: "round_robin"
+  servers: []
+logging:
+  syslog: null
+  file: null
+  stdout:
+    enabled: true
+    level: "info"
+"#;
+
+        let parsed = parse_config("disabled-listeners.yaml", yaml)
+            .expect("disabled listeners should parse");
+
+        let dns = parsed.listen.dns.expect("dns config should exist");
+        assert!(!dns.enabled);
+
+        let dot = parsed.listen.dot.expect("dot config should exist");
+        assert!(!dot.enabled);
+
+        let doh = parsed.listen.doh.expect("doh config should exist");
+        assert!(!doh.enabled);
+
+        let doq = parsed.listen.doq.expect("doq config should exist");
+        assert!(!doq.enabled);
+
+        let http = parsed.listen.http.expect("http config should exist");
+        assert!(!http.enabled);
+
+        let metrics = parsed.listen.metrics.expect("metrics config should exist");
+        assert!(!metrics.enabled);
+    }
 }

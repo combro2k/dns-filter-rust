@@ -8,6 +8,7 @@
 
 ### Fixed
 - **Config schema robustness**: Added `#[serde(default)]` to `allowed_hosts` in `McpConfig` to ensure it is always present and defaults to `None` if not set. This prevents deserialization errors and makes config handling more robust.
+- **Disabled listeners can omit listener-specific config**: `listen.dns`, `listen.http`, `listen.metrics`, and TLS listeners now accept `enabled: false` without requiring `port`, `addresses`, or TLS settings. Enabled listeners still keep the strict validation path.
 
 ### Changed
 - **Config example documents cache max_entries**: The example config (`package/config/config.example.yaml`) now documents and sets `max_entries` in the `resolvers.cache` section, making the default cache size limit explicit and user-visible.

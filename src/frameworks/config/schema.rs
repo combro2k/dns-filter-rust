@@ -164,26 +164,16 @@ pub struct ListenConfig {
     pub metrics: Option<MetricsConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct SocketConfig {
     pub enabled: bool,
-    #[serde(
-        alias = "address",
-        deserialize_with = "deserialize_addresses",
-        default = "default_public_addresses"
-    )]
     pub addresses: Vec<String>,
     pub port: u16,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct TlsSocketConfig {
     pub enabled: bool,
-    #[serde(
-        alias = "address",
-        deserialize_with = "deserialize_addresses",
-        default = "default_public_addresses"
-    )]
     pub addresses: Vec<String>,
     pub port: u16,
     pub tls: TlsConfig,
@@ -196,16 +186,127 @@ pub struct TlsConfig {
     pub autogenerate: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct MetricsConfig {
     pub enabled: bool,
+    pub addresses: Vec<String>,
+    pub port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+struct SocketConfigRaw {
+    enabled: bool,
+    #[serde(
+        alias = "address",
+        deserialize_with = "deserialize_addresses",
+        default = "default_public_addresses"
+    )]
+    addresses: Vec<String>,
+    #[serde(default)]
+    port: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TlsSocketConfigRaw {
+    enabled: bool,
+    #[serde(
+        alias = "address",
+        deserialize_with = "deserialize_addresses",
+        default = "default_public_addresses"
+    )]
+    addresses: Vec<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    tls: Option<TlsConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetricsConfigRaw {
+    enabled: bool,
     #[serde(
         alias = "address",
         deserialize_with = "deserialize_addresses",
         default = "default_loopback_addresses"
     )]
-    pub addresses: Vec<String>,
-    pub port: u16,
+    addresses: Vec<String>,
+    #[serde(default)]
+    port: Option<u16>,
+}
+
+impl<'de> Deserialize<'de> for SocketConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let raw = SocketConfigRaw::deserialize(deserializer)?;
+
+        if raw.enabled {
+            Ok(Self {
+                enabled: true,
+                addresses: raw.addresses,
+                port: raw.port.ok_or_else(|| de::Error::missing_field("port"))?,
+            })
+        } else {
+            Ok(Self {
+                enabled: false,
+                addresses: Vec::new(),
+                port: 0,
+            })
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TlsSocketConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let raw = TlsSocketConfigRaw::deserialize(deserializer)?;
+
+        if raw.enabled {
+            Ok(Self {
+                enabled: true,
+                addresses: raw.addresses,
+                port: raw.port.ok_or_else(|| de::Error::missing_field("port"))?,
+                tls: raw.tls.ok_or_else(|| de::Error::missing_field("tls"))?,
+            })
+        } else {
+            Ok(Self {
+                enabled: false,
+                addresses: Vec::new(),
+                port: 0,
+                tls: TlsConfig {
+                    cert_path: String::new(),
+                    key_path: String::new(),
+                    autogenerate: None,
+                },
+            })
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MetricsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let raw = MetricsConfigRaw::deserialize(deserializer)?;
+
+        if raw.enabled {
+            Ok(Self {
+                enabled: true,
+                addresses: raw.addresses,
+                port: raw.port.ok_or_else(|| de::Error::missing_field("port"))?,
+            })
+        } else {
+            Ok(Self {
+                enabled: false,
+                addresses: Vec::new(),
+                port: 0,
+            })
+        }
+    }
 }
 
 fn default_public_addresses() -> Vec<String> {
