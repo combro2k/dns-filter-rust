@@ -14,7 +14,7 @@ use crate::frameworks::privileges::DEFAULT_CHROOT_DIR;
 use crate::frameworks::upstream::recursive_resolver::{
     load_root_hints, load_root_key, NameserverIpFamily, DEFAULT_MAX_HOPS,
 };
-use crate::frameworks::upstream::runtime::OutboundRouting;
+use crate::frameworks::upstream::runtime::{OutboundRouting, warn_if_fwmark_without_cap_net_admin};
 #[cfg(feature = "doq")]
 use crate::frameworks::upstream::DnsQuicClient;
 use crate::frameworks::upstream::{
@@ -793,6 +793,7 @@ fn build_single_upstream_resolver(
             )
         })?;
     let fwmark = server.fwmark.or(global_outbound.and_then(|o| o.fwmark));
+    warn_if_fwmark_without_cap_net_admin(fwmark);
     let routing = OutboundRouting::new(bind_address, fwmark);
 
     let resolver: Arc<dyn UpstreamResolver> = match server.protocol.as_str() {

@@ -221,8 +221,9 @@ When running with `security.chroot_dir`, the packaged unit bind-mounts host
 trust roots into the jail (`/etc/ssl` -> `/var/lib/dns-filter/etc/ssl`) so
 DoH/DoT/DoQ upstream certificate validation continues to work after chroot.
 
-If you use `outbound.fwmark`, keep `CAP_NET_ADMIN` in the unit capability set
-in addition to `CAP_NET_BIND_SERVICE`.
+
+**Chroot + fwmark note:**
+If you use `outbound.fwmark` (Linux SO_MARK), you must keep `CAP_NET_ADMIN` in the unit capability set (in addition to `CAP_NET_BIND_SERVICE`) _after_ chroot and privilege drop. The systemd/OpenRC unit must grant this capability, or SO_MARK will fail and policy routing will not work. The daemon will log a warning at startup if `fwmark` is configured but `CAP_NET_ADMIN` is missing.
 
 ### OpenRC Integration
 

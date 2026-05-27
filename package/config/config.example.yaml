@@ -147,7 +147,7 @@ filtering:
 # Per-server bind_address/fwmark overrides these defaults.
 # outbound:
 #   bind_address: "10.0.0.2"            # Source IP to bind upstream sockets to
-#   fwmark: 51820                       # Linux SO_MARK for policy routing (needs CAP_NET_ADMIN)
+#   fwmark: 51820                       # Linux SO_MARK for policy routing (needs CAP_NET_ADMIN, must be present after chroot/priv drop)
 
 # ---------------------------------------------------------------------------
 # Upstream resolvers

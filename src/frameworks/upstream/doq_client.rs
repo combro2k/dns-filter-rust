@@ -279,7 +279,7 @@ fn build_quic_socket(
 
     #[cfg(target_os = "linux")]
     if let Some(mark) = routing.fwmark {
-        socket.set_mark(mark)?;
+        super::runtime::apply_socket_mark(&socket, mark)?;
     }
 
     socket.set_nonblocking(true)?;
