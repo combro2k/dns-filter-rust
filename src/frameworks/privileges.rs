@@ -87,9 +87,9 @@ pub fn drop_privileges(config: &PrivilegeDropConfig<'_>) -> Result<()> {
         "privileges dropped"
     );
 
-    // Step 7: On Linux, retain only CAP_NET_BIND_SERVICE
+    // Step 7: On Linux, retain only the network-related capabilities we need
     #[cfg(target_os = "linux")]
-    retain_net_bind_capability()?;
+    retain_network_capabilities()?;
 
     // Step 8: On Linux, disable keepcaps
     #[cfg(target_os = "linux")]
@@ -101,22 +101,32 @@ pub fn drop_privileges(config: &PrivilegeDropConfig<'_>) -> Result<()> {
     Ok(())
 }
 
-/// On Linux, clear all capabilities except CAP_NET_BIND_SERVICE in the
-/// effective and permitted sets.
+/// On Linux, clear all capabilities except the network-related capabilities
+/// required at runtime (`CAP_NET_BIND_SERVICE` for privileged port binds and
+/// `CAP_NET_ADMIN` for `SO_MARK` / fwmark routing).
 #[cfg(target_os = "linux")]
-fn retain_net_bind_capability() -> Result<()> {
+fn retain_network_capabilities() -> Result<()> {
     use caps::{CapSet, Capability, CapsHashSet};
 
     let mut keep = CapsHashSet::new();
     keep.insert(Capability::CAP_NET_BIND_SERVICE);
+    keep.insert(Capability::CAP_NET_ADMIN);
 
     // Clear and re-set permitted set
     caps::set(None, CapSet::Permitted, &keep).context("setting permitted capabilities")?;
     // Set effective to match
     caps::set(None, CapSet::Effective, &keep).context("setting effective capabilities")?;
 
-    tracing::info!("retained CAP_NET_BIND_SERVICE, dropped all other capabilities");
+    tracing::info!("retained CAP_NET_BIND_SERVICE and CAP_NET_ADMIN, dropped all other capabilities");
     Ok(())
+}
+
+// Helper used by unit tests to assert the intended retained capability set
+// without performing any privileged operations.
+#[cfg(all(test, target_os = "linux"))]
+fn get_intended_retain_caps() -> Vec<caps::Capability> {
+    use caps::Capability;
+    vec![Capability::CAP_NET_BIND_SERVICE, Capability::CAP_NET_ADMIN]
 }
 
 /// Verify that privileges were actually dropped by checking current uid/gid.
@@ -156,5 +166,14 @@ mod tests {
         };
         let result = drop_privileges(&config);
         assert!(result.is_ok(), "expected no-op for non-root: {result:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn intended_retain_caps_include_net_admin_and_bind_service() {
+        let caps = get_intended_retain_caps();
+        use caps::Capability;
+        assert!(caps.contains(&Capability::CAP_NET_BIND_SERVICE));
+        assert!(caps.contains(&Capability::CAP_NET_ADMIN));
     }
 }
