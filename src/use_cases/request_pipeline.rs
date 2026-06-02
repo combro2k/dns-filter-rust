@@ -202,9 +202,14 @@ impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError
                 Ok(None)
             }
             FilterDecision::Block => {
+                let blocked_by = self.domain_filter.blocked_by(&domain);
                 record_dns_query("dns", QueryDecision::Blocked);
-                record_blocklist_hit(None);
-                tracing::info!(domain = %domain, "query blocked by filter policy");
+                record_blocklist_hit(&blocked_by);
+                tracing::info!(
+                    domain = %domain,
+                    blocked_by = ?blocked_by,
+                    "query blocked by filter policy"
+                );
                 let response = build_sinkhole_response(
                     &message,
                     self.domain_filter.sinkhole_ipv4(),
@@ -659,6 +664,14 @@ mod tests {
     impl DomainFilter for TestDomainFilter {
         fn decide(&self, _domain: &str) -> FilterDecision {
             self.decision
+        }
+
+        fn blocked_by(&self, _domain: &str) -> Vec<String> {
+            if self.decision == FilterDecision::Block {
+                vec!["test-blocklist".to_string()]
+            } else {
+                Vec::new()
+            }
         }
 
         fn sinkhole_ipv4(&self) -> std::net::Ipv4Addr {

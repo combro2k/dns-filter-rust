@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Blocklist attribution on blocked queries**: when a DNS query is blocked, the system now identifies which blocklist(s) contain the matching domain. The `blocked_by` field is included in `QueryLogEntry` (visible in the `/api/v1/query-log` API response and admin UI). The `blocklist_hits_total` Prometheus metric now uses a `list` label for per-list hit tracking.
 - **Upstream resolver identity in error logs**: the `DnsUpstreamStage` now includes an `upstream=` field in DNSSEC NSEC/NODATA and SERVFAIL log messages, identifying which resolver produced the error. Errors from instrumented resolvers also carry the specific resolver label (e.g. `[dns://1.1.1.1:53]`) so that strategy groups (failover/round-robin) show exactly which sub-resolver failed.
 - **`UpstreamResolver::label()` trait method**: all resolver implementations now expose a human-readable label via the `label()` method (e.g. `dns://1.1.1.1:53`, `dot://dns.google`, `doh://dns.google/dns-query`, `doq://dns.adguard.com`, `recursive`, `zone:example.com`, `strategy:failover[3]`).
 - **Embedded Tailwind admin UI**: added a browser-facing administration dashboard at `/` and `/admin` that uses the existing authenticated API, stores the bearer token in session storage, and exposes runtime status, filtering controls, query log, and quick-action buttons.

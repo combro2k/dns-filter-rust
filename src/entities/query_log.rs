@@ -13,6 +13,8 @@ pub struct QueryLogEntry {
     pub decision: QueryDecision,
     pub source_ip: String,
     pub response_time_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -86,6 +88,7 @@ mod tests {
                 decision: QueryDecision::Passthrough,
                 source_ip: "127.0.0.1".to_string(),
                 response_time_ms: 1,
+                blocked_by: None,
             });
         }
         assert_eq!(log.len(), 3);
@@ -111,6 +114,7 @@ mod tests {
                 decision: QueryDecision::Blocked,
                 source_ip: "::1".to_string(),
                 response_time_ms: 2,
+                blocked_by: None,
             });
         }
         assert_eq!(log.len(), 5);

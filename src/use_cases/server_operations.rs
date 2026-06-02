@@ -1525,6 +1525,13 @@ mod tests {
                 FilterDecision::Neutral
             }
         }
+        fn blocked_by(&self, domain: &str) -> Vec<String> {
+            if domain == "blocked.example.com" {
+                vec!["test-list".to_string()]
+            } else {
+                Vec::new()
+            }
+        }
         fn sinkhole_ipv4(&self) -> Ipv4Addr {
             Ipv4Addr::UNSPECIFIED
         }

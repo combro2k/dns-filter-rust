@@ -264,6 +264,9 @@
             }
 
             entries.slice(0, 8).forEach((entry) => {
+                const blockedByHtml = entry.blocked_by && entry.blocked_by.length
+                    ? `<span class="block text-[10px] text-rose-300 mt-0.5">${entry.blocked_by.join(', ')}</span>`
+                    : '';
                 const row = document.createElement('tr');
                 row.className = 'border-t border-slate-800';
                 row.innerHTML = `
@@ -272,6 +275,7 @@
                     <td class="py-3 pr-3 text-slate-200">${entry.qtype}</td>
                     <td class="py-3 pr-3">
                         <span class="rounded-full px-2 py-1 text-xs font-semibold ${entry.decision === 'blocked' ? 'bg-rose-500/20 text-rose-200' : entry.decision === 'allowed' ? 'bg-emerald-500/20 text-emerald-200' : 'bg-amber-500/20 text-amber-100'}">${entry.decision}</span>
+                        ${blockedByHtml}
                     </td>
                     <td class="py-3 text-slate-200">${entry.source_ip}</td>
                 `;

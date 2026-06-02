@@ -18,7 +18,7 @@ pub struct MetricsState {
     pub dns_queries_blocked: Counter,
     pub dns_queries_allowed: Counter,
     pub dns_queries_passthrough: Counter,
-    pub blocklist_hits_total: Counter,
+    pub blocklist_hits_total: CounterVec,
     pub cache_hits_total: Counter,
     pub cache_misses_total: Counter,
     pub upstream_request_duration_seconds: HistogramVec,
@@ -42,8 +42,10 @@ impl MetricsState {
             "dns_queries_passthrough",
             "Total number of DNS queries processed without filtering",
         )?;
-        let blocklist_hits_total =
-            Counter::new("blocklist_hits_total", "Total number of blocklist hits")?;
+        let blocklist_hits_total = CounterVec::new(
+            prometheus::Opts::new("blocklist_hits_total", "Total number of blocklist hits"),
+            &["list"],
+        )?;
         let cache_hits_total = Counter::new("cache_hits_total", "Total number of DNS cache hits")?;
         let cache_misses_total =
             Counter::new("cache_misses_total", "Total number of DNS cache misses")?;
@@ -177,12 +179,24 @@ pub enum QueryDecision {
     Passthrough,
 }
 
-/// Record a blocklist hit with optional metadata.
-pub fn record_blocklist_hit(_blocklist_name: Option<&str>) {
+/// Record blocklist hits, one increment per matching list name.
+pub fn record_blocklist_hit(list_names: &[String]) {
     let Some(metrics) = try_get_metrics() else {
         return;
     };
-    metrics.blocklist_hits_total.inc();
+    if list_names.is_empty() {
+        metrics
+            .blocklist_hits_total
+            .with_label_values(&["unknown"])
+            .inc();
+    } else {
+        for name in list_names {
+            metrics
+                .blocklist_hits_total
+                .with_label_values(&[name])
+                .inc();
+        }
+    }
 }
 
 /// Record a DNS cache operation.
@@ -299,7 +313,15 @@ pub fn snapshot() -> MetricsSnapshot {
         queries_blocked: metrics.dns_queries_blocked.get() as u64,
         queries_allowed: metrics.dns_queries_allowed.get() as u64,
         queries_passthrough: metrics.dns_queries_passthrough.get() as u64,
-        blocklist_hits_total: metrics.blocklist_hits_total.get() as u64,
+        blocklist_hits_total: {
+            let mut total = 0u64;
+            for family in metrics.blocklist_hits_total.collect() {
+                for metric in family.get_metric() {
+                    total += metric.get_counter().get_value() as u64;
+                }
+            }
+            total
+        },
         cache_hits_total: metrics.cache_hits_total.get() as u64,
         cache_misses_total: metrics.cache_misses_total.get() as u64,
         upstreams: upstreams.into_values().collect(),
@@ -352,7 +374,7 @@ mod tests {
         init_prometheus_metrics().expect("metrics init should succeed");
 
         record_dns_query("dns", QueryDecision::Blocked);
-        record_blocklist_hit(None);
+        record_blocklist_hit(&["test-list".to_string()]);
         record_cache_operation(true);
         record_upstream_request("udp://1.1.1.1:53", 0.005, None);
 
@@ -374,7 +396,7 @@ mod tests {
 
         record_dns_query("dns", QueryDecision::Passthrough);
         record_dns_query("dns", QueryDecision::Blocked);
-        record_blocklist_hit(None);
+        record_blocklist_hit(&["snapshot-test-list".to_string()]);
         record_cache_operation(true);
         record_cache_operation(false);
         record_upstream_request("udp://9.9.9.9:53", 0.01, Some("timeout"));
@@ -394,8 +416,15 @@ mod tests {
         );
         assert_eq!(
             (snapshot_after.blocklist_hits_total - snapshot_before.blocklist_hits_total) as f64,
-            metric_value_or_zero(&output_after, "blocklist_hits_total", &[])
-                - metric_value_or_zero(&output_before, "blocklist_hits_total", &[])
+            metric_value_or_zero(
+                &output_after,
+                "blocklist_hits_total",
+                &[("list", "snapshot-test-list")]
+            ) - metric_value_or_zero(
+                &output_before,
+                "blocklist_hits_total",
+                &[("list", "snapshot-test-list")]
+            )
         );
         assert_eq!(
             (snapshot_after.cache_hits_total - snapshot_before.cache_hits_total) as f64,

@@ -70,6 +70,7 @@ struct CachedListDocument {
 
 pub trait DomainFilter: Send + Sync {
     fn decide(&self, domain: &str) -> FilterDecision;
+    fn blocked_by(&self, domain: &str) -> Vec<String>;
     fn sinkhole_ipv4(&self) -> Ipv4Addr;
     fn sinkhole_ipv6(&self) -> Ipv6Addr;
     fn start_background_refresh(self: Arc<Self>);
@@ -372,6 +373,41 @@ impl DomainFilter for ListFilterEngine {
         }
 
         FilterDecision::Neutral
+    }
+
+    fn blocked_by(&self, domain: &str) -> Vec<String> {
+        let normalized = normalize_domain(domain);
+        if normalized.is_empty() {
+            return Vec::new();
+        }
+
+        let disabled_keys: HashSet<String> = self
+            .runtimes
+            .iter()
+            .filter(|rt| rt.runtime_disabled.load(Ordering::Relaxed))
+            .map(|rt| rt.key.clone())
+            .collect();
+
+        let lists = self
+            .lists
+            .read()
+            .expect("list cache lock poisoned while reading blocked_by");
+
+        let mut matching_names = Vec::new();
+        for rt in &self.runtimes {
+            if rt.kind != ListKind::Block {
+                continue;
+            }
+            if disabled_keys.contains(&rt.key) {
+                continue;
+            }
+            if let Some(list_domains) = lists.get(&rt.key) {
+                if matches_any(&list_domains.domains, &normalized) {
+                    matching_names.push(rt.name.clone());
+                }
+            }
+        }
+        matching_names
     }
 
     fn sinkhole_ipv4(&self) -> Ipv4Addr {
@@ -830,5 +866,134 @@ mod tests {
         }];
 
         assert!(build_runtimes(&lists, ListKind::Block).is_err());
+    }
+
+    fn make_test_engine(
+        block_lists: Vec<(&str, Vec<&str>)>,
+        allow_lists: Vec<(&str, Vec<&str>)>,
+    ) -> ListFilterEngine {
+        let mut runtimes = Vec::new();
+        let mut lists_map = HashMap::new();
+
+        for (name, domains) in &block_lists {
+            let key = format!("block:{name}");
+            runtimes.push(ListRuntime {
+                key: key.clone(),
+                name: name.to_string(),
+                url: format!("https://example.com/{name}"),
+                interval: Duration::from_secs(3600),
+                kind: ListKind::Block,
+                format: ListFormat::Domains,
+                runtime_disabled: Arc::new(AtomicBool::new(false)),
+            });
+            lists_map.insert(
+                key,
+                ListDomains {
+                    kind: ListKind::Block,
+                    domains: domains.iter().map(|d| d.to_string()).collect(),
+                    exceptions: HashSet::new(),
+                },
+            );
+        }
+
+        for (name, domains) in &allow_lists {
+            let key = format!("allow:{name}");
+            runtimes.push(ListRuntime {
+                key: key.clone(),
+                name: name.to_string(),
+                url: format!("https://example.com/{name}"),
+                interval: Duration::from_secs(3600),
+                kind: ListKind::Allow,
+                format: ListFormat::Domains,
+                runtime_disabled: Arc::new(AtomicBool::new(false)),
+            });
+            lists_map.insert(
+                key,
+                ListDomains {
+                    kind: ListKind::Allow,
+                    domains: domains.iter().map(|d| d.to_string()).collect(),
+                    exceptions: HashSet::new(),
+                },
+            );
+        }
+
+        let engine = ListFilterEngine {
+            sinkhole_v4: Ipv4Addr::UNSPECIFIED,
+            sinkhole_v6: Ipv6Addr::UNSPECIFIED,
+            runtimes,
+            cache_repo: None,
+            lists: Arc::new(RwLock::new(lists_map)),
+            snapshot: Arc::new(RwLock::new(FilterSnapshot::default())),
+        };
+        engine.rebuild_snapshot();
+        engine
+    }
+
+    #[test]
+    fn blocked_by_returns_single_list() {
+        let engine = make_test_engine(vec![("ads-list", vec!["ads.example.com"])], vec![]);
+        let result = engine.blocked_by("ads.example.com");
+        assert_eq!(result, vec!["ads-list"]);
+    }
+
+    #[test]
+    fn blocked_by_returns_multiple_lists() {
+        let engine = make_test_engine(
+            vec![
+                ("ads-list", vec!["ads.example.com", "tracker.example.com"]),
+                (
+                    "malware-list",
+                    vec!["ads.example.com", "malware.example.com"],
+                ),
+            ],
+            vec![],
+        );
+        let result = engine.blocked_by("ads.example.com");
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&"ads-list".to_string()));
+        assert!(result.contains(&"malware-list".to_string()));
+    }
+
+    #[test]
+    fn blocked_by_returns_empty_for_unblocked_domain() {
+        let engine = make_test_engine(vec![("ads-list", vec!["ads.example.com"])], vec![]);
+        let result = engine.blocked_by("safe.example.com");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn blocked_by_excludes_disabled_lists() {
+        let engine = make_test_engine(
+            vec![
+                ("ads-list", vec!["ads.example.com"]),
+                ("disabled-list", vec!["ads.example.com"]),
+            ],
+            vec![],
+        );
+        // Disable the second list
+        engine.runtimes[1]
+            .runtime_disabled
+            .store(true, Ordering::Relaxed);
+
+        let result = engine.blocked_by("ads.example.com");
+        assert_eq!(result, vec!["ads-list"]);
+    }
+
+    #[test]
+    fn blocked_by_matches_parent_domain() {
+        let engine = make_test_engine(vec![("ads-list", vec!["example.com"])], vec![]);
+        let result = engine.blocked_by("sub.example.com");
+        assert_eq!(result, vec!["ads-list"]);
+    }
+
+    #[test]
+    fn blocked_by_ignores_allow_lists() {
+        let engine = make_test_engine(
+            vec![("ads-list", vec!["ads.example.com"])],
+            vec![("allow-list", vec!["ads.example.com"])],
+        );
+        // blocked_by only checks block lists, not allow lists
+        let result = engine.blocked_by("ads.example.com");
+        assert_eq!(result, vec!["ads-list"]);
     }
 }
