@@ -67,6 +67,7 @@ struct ZoneSnapshot {
 #[derive(Debug)]
 pub struct ZoneAuthorityResolver {
     snapshot: Arc<RwLock<ZoneSnapshot>>,
+    label: String,
 }
 
 impl ZoneAuthorityResolver {
@@ -80,8 +81,10 @@ impl ZoneAuthorityResolver {
         let initial = load_snapshot(zone, &source, &auth)?;
         let snapshot = Arc::new(RwLock::new(initial));
 
+        let label = format!("zone:{zone}");
         let resolver = Self {
             snapshot: Arc::clone(&snapshot),
+            label,
         };
 
         if let ZoneSource::Url(url) = source {
@@ -157,6 +160,10 @@ impl UpstreamResolver for ZoneAuthorityResolver {
         response.to_vec().map_err(|e| {
             UpstreamResolveError::Protocol(format!("failed to encode DNS response: {e}"))
         })
+    }
+
+    fn label(&self) -> &str {
+        &self.label
     }
 }
 

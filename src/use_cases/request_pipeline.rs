@@ -237,8 +237,10 @@ impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError
         let response = match self.upstream_resolver.resolve(request.query.clone()).await {
             Ok(r) => r,
             Err(error) => {
+                let upstream = self.upstream_resolver.label();
                 if is_dnssec_nodata_protocol_error(&error) {
                     tracing::info!(
+                        %upstream,
                         %error,
                         "upstream returned DNSSEC NSEC/NODATA proof; returning NOERROR-empty"
                     );
@@ -246,7 +248,7 @@ impl AsyncRequestStage<DnsPipelineRequest, DnsPipelineResponse, DnsPipelineError
                         &request.query,
                     ))));
                 }
-                tracing::warn!(%error, "upstream resolution failed; returning SERVFAIL");
+                tracing::warn!(%upstream, %error, "upstream resolution failed; returning SERVFAIL");
                 return Ok(Some(DnsPipelineResponse::new(build_servfail_response(
                     &request.query,
                 ))));
@@ -385,13 +387,15 @@ fn build_nodata_response(query_bytes: &[u8]) -> Vec<u8> {
 }
 
 fn is_dnssec_nodata_protocol_error(error: &UpstreamResolveError) -> bool {
-    let UpstreamResolveError::Protocol(message) = error else {
-        return false;
-    };
-
-    // Hickory may surface DNSSEC NSEC-validated NODATA as a protocol error
-    // string, e.g. "Dns(Nsec { ... })".
-    message.contains("Dns(Nsec") || message.contains("Nsec {")
+    match error {
+        UpstreamResolveError::Protocol(message) => {
+            // Hickory may surface DNSSEC NSEC-validated NODATA as a protocol error
+            // string, e.g. "Dns(Nsec { ... })".
+            message.contains("Dns(Nsec") || message.contains("Nsec {")
+        }
+        UpstreamResolveError::WithSource { inner, .. } => is_dnssec_nodata_protocol_error(inner),
+        _ => false,
+    }
 }
 
 fn build_error_response(query_bytes: &[u8], response_code: ResponseCode) -> Vec<u8> {

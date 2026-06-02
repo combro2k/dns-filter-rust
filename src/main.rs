@@ -1357,5 +1357,4 @@ mod tests {
             parse_cli_args(["dns-filter", "start", "--config"]).expect_err("parse should fail");
         assert!(err.contains("--config"));
     }
-
 }

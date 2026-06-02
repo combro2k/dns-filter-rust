@@ -469,8 +469,8 @@ logging:
     level: "info"
 "#;
 
-        let parsed = parse_config("disabled-listeners.yaml", yaml)
-            .expect("disabled listeners should parse");
+        let parsed =
+            parse_config("disabled-listeners.yaml", yaml).expect("disabled listeners should parse");
 
         let dns = parsed.listen.dns.expect("dns config should exist");
         assert!(!dns.enabled);

@@ -24,6 +24,21 @@ pub enum UpstreamResolveError {
     Protocol(String),
     #[error("all upstreams failed")]
     AllFailed,
+    #[error("[{resolver}] {inner}")]
+    WithSource {
+        resolver: String,
+        inner: Box<UpstreamResolveError>,
+    },
+}
+
+impl UpstreamResolveError {
+    /// Wraps the error with the label of the resolver that produced it.
+    pub fn with_source(self, label: &str) -> Self {
+        Self::WithSource {
+            resolver: label.to_string(),
+            inner: Box::new(self),
+        }
+    }
 }
 
 /// Resolves a raw DNS wire-format query and returns a raw DNS wire-format response.
@@ -33,6 +48,11 @@ pub enum UpstreamResolveError {
 #[async_trait]
 pub trait UpstreamResolver: Send + Sync {
     async fn resolve(&self, query: Vec<u8>) -> Result<Vec<u8>, UpstreamResolveError>;
+
+    /// Returns a human-readable label identifying this resolver (e.g. `"dns://1.1.1.1:53"`).
+    fn label(&self) -> &str {
+        "unknown"
+    }
 }
 
 const DEFAULT_MAX_CACHE_ENTRIES: usize = 10_000;
@@ -167,6 +187,10 @@ impl UpstreamResolver for CachedUpstreamResolver {
 
         Ok(response)
     }
+
+    fn label(&self) -> &str {
+        self.inner.label()
+    }
 }
 
 fn query_id(query: &[u8]) -> u16 {
@@ -282,9 +306,14 @@ impl UpstreamResolver for InstrumentedUpstreamResolver {
             UpstreamResolveError::Timeout => "timeout",
             UpstreamResolveError::Protocol(_) => "protocol",
             UpstreamResolveError::AllFailed => "all_failed",
+            UpstreamResolveError::WithSource { .. } => "protocol",
         });
         record_upstream_request(&self.label, started.elapsed().as_secs_f64(), error_label);
-        result
+        result.map_err(|e| e.with_source(&self.label))
+    }
+
+    fn label(&self) -> &str {
+        &self.label
     }
 }
 
@@ -298,14 +327,17 @@ pub struct StrategyUpstreamResolver {
     resolvers: Vec<Arc<dyn UpstreamResolver>>,
     strategy: UpstreamStrategy,
     counter: AtomicUsize,
+    label: String,
 }
 
 impl StrategyUpstreamResolver {
     pub fn new(resolvers: Vec<Arc<dyn UpstreamResolver>>, strategy: UpstreamStrategy) -> Self {
+        let label = format!("strategy:{:?}[{}]", strategy, resolvers.len()).to_lowercase();
         Self {
             resolvers,
             strategy,
             counter: AtomicUsize::new(0),
+            label,
         }
     }
 }
@@ -340,6 +372,10 @@ impl UpstreamResolver for StrategyUpstreamResolver {
                 Err(last_err)
             }
         }
+    }
+
+    fn label(&self) -> &str {
+        &self.label
     }
 }
 

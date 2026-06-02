@@ -117,7 +117,9 @@ fn retain_network_capabilities() -> Result<()> {
     // Set effective to match
     caps::set(None, CapSet::Effective, &keep).context("setting effective capabilities")?;
 
-    tracing::info!("retained CAP_NET_BIND_SERVICE and CAP_NET_ADMIN, dropped all other capabilities");
+    tracing::info!(
+        "retained CAP_NET_BIND_SERVICE and CAP_NET_ADMIN, dropped all other capabilities"
+    );
     Ok(())
 }
 

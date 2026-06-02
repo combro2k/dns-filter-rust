@@ -78,6 +78,7 @@ pub struct DnsHttpsClient {
     auth_headers: Option<Arc<DohAuthHeaders>>,
     client_cache: ClientCache,
     routing: OutboundRouting,
+    label: String,
 }
 
 impl DnsHttpsClient {
@@ -87,6 +88,7 @@ impl DnsHttpsClient {
     /// or the auth value would produce an invalid HTTP header.
     pub fn new(url: String, auth: Option<ZoneSourceAuth>) -> Result<Self, UpstreamResolveError> {
         let (endpoint, server_name, path) = parse_doh_url(&url)?;
+        let label = format!("doh://{server_name}{path}");
         let auth_headers = match auth {
             None => None,
             Some(zone_auth) => Some(Arc::new(build_auth_headers(&zone_auth)?)),
@@ -99,6 +101,7 @@ impl DnsHttpsClient {
             auth_headers,
             client_cache: ClientCache::default(),
             routing: OutboundRouting::new(None, None),
+            label,
         })
     }
 
@@ -236,6 +239,10 @@ impl DnsHttpsClient {
 impl UpstreamResolver for DnsHttpsClient {
     async fn resolve(&self, query: Vec<u8>) -> Result<Vec<u8>, UpstreamResolveError> {
         self.resolve_doh(&query).await
+    }
+
+    fn label(&self) -> &str {
+        &self.label
     }
 }
 

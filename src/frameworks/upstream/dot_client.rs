@@ -39,6 +39,7 @@ pub struct DnsTlsClient {
     bootstrap_resolvers: Vec<SocketAddr>,
     client_cache: ClientCache,
     routing: OutboundRouting,
+    label: String,
 }
 
 #[derive(Debug, Clone)]
@@ -49,23 +50,27 @@ enum DotEndpoint {
 
 impl DnsTlsClient {
     pub fn new(address: SocketAddr, server_name: String) -> Self {
+        let label = format!("dot://{server_name}");
         Self {
             endpoint: DotEndpoint::Static(address),
             server_name,
             bootstrap_resolvers: vec![SocketAddr::new(IpAddr::from([1, 1, 1, 1]), 53)],
             client_cache: ClientCache::default(),
             routing: OutboundRouting::new(None, None),
+            label,
         }
     }
 
     pub fn new_hostname(host: String, port: u16) -> Self {
         let server_name = host_without_trailing_dot(&host);
+        let label = format!("dot://{server_name}");
         Self {
             endpoint: DotEndpoint::Hostname { host, port },
             server_name,
             bootstrap_resolvers: vec![SocketAddr::new(IpAddr::from([1, 1, 1, 1]), 53)],
             client_cache: ClientCache::default(),
             routing: OutboundRouting::new(None, None),
+            label,
         }
     }
 
@@ -249,6 +254,10 @@ impl DnsTlsClient {
 impl UpstreamResolver for DnsTlsClient {
     async fn resolve(&self, query: Vec<u8>) -> Result<Vec<u8>, UpstreamResolveError> {
         self.resolve_dot(&query).await
+    }
+
+    fn label(&self) -> &str {
+        &self.label
     }
 }
 

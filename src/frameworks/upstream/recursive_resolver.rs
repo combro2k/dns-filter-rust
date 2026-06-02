@@ -416,6 +416,10 @@ impl UpstreamResolver for RecursiveResolver {
             Err(e) => Err(UpstreamResolveError::Protocol(format!("{e}"))),
         }
     }
+
+    fn label(&self) -> &str {
+        "recursive"
+    }
 }
 
 #[cfg(test)]

@@ -39,6 +39,8 @@ install: install-binary install-config install-data install-service
 
 install-binary: build
 	install -D -m 0755 target/$(BUILD_PROFILE)/$(BINARY_NAME) $(DESTDIR)$(BINDIR)/$(BINARY_NAME)
+	@command -v setcap >/dev/null 2>&1 && setcap cap_net_admin,cap_net_bind_service=eip $(DESTDIR)$(BINDIR)/$(BINARY_NAME) || \
+	  echo "[WARN] setcap not found: please install 'libcap2-bin' (Debian/Ubuntu) or 'libcap' (Alpine) and run: sudo setcap cap_net_admin,cap_net_bind_service=eip $(DESTDIR)$(BINDIR)/$(BINARY_NAME)"
 
 install-config:
 	install -d -m 0755 $(DESTDIR)$(ETCDIR)

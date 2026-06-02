@@ -39,14 +39,17 @@ pub struct DnsUdpTcpClient {
     address: SocketAddr,
     tcp_cache: TcpClientCache,
     routing: OutboundRouting,
+    label: String,
 }
 
 impl DnsUdpTcpClient {
     pub fn new(address: SocketAddr) -> Self {
+        let label = format!("dns://{address}");
         Self {
             address,
             tcp_cache: TcpClientCache::default(),
             routing: OutboundRouting::new(None, None),
+            label,
         }
     }
 
@@ -161,6 +164,10 @@ impl UpstreamResolver for DnsUdpTcpClient {
         } else {
             Ok(response)
         }
+    }
+
+    fn label(&self) -> &str {
+        &self.label
     }
 }
 

@@ -9,7 +9,7 @@ use std::fs;
 /// Checks if CAP_NET_ADMIN is present in the current process (Linux only).
 #[cfg(target_os = "linux")]
 fn has_cap_net_admin() -> bool {
-    use caps::{Capability, has_cap};
+    use caps::{has_cap, Capability};
     has_cap(None, caps::CapSet::Effective, Capability::CAP_NET_ADMIN).unwrap_or(false)
 }
 
@@ -118,7 +118,18 @@ impl RuntimeProvider for RoutedRuntimeProvider {
             // Apply fwmark (Linux only).
             #[cfg(target_os = "linux")]
             if let Some(mark) = routing.fwmark {
-                tracing::info!(fwmark = mark, "applying SO_MARK to outgoing TCP socket");
+                use nix::unistd::{getgid, getuid};
+                let (eff, prm, bnd, amb) = current_process_capabilities();
+                tracing::info!(
+                    fwmark = mark,
+                    uid = ?getuid(),
+                    gid = ?getgid(),
+                    cap_eff = eff.as_deref(),
+                    cap_prm = prm.as_deref(),
+                    cap_bnd = bnd.as_deref(),
+                    cap_amb = amb.as_deref(),
+                    "applying SO_MARK to outgoing TCP socket"
+                );
                 apply_socket_mark(&socket, mark)?;
             }
 
@@ -176,7 +187,18 @@ impl RuntimeProvider for RoutedRuntimeProvider {
             // Apply fwmark (Linux only).
             #[cfg(target_os = "linux")]
             if let Some(mark) = routing.fwmark {
-                tracing::info!(fwmark = mark, "applying SO_MARK to outgoing UDP socket");
+                use nix::unistd::{getgid, getuid};
+                let (eff, prm, bnd, amb) = current_process_capabilities();
+                tracing::info!(
+                    fwmark = mark,
+                    uid = ?getuid(),
+                    gid = ?getgid(),
+                    cap_eff = eff.as_deref(),
+                    cap_prm = prm.as_deref(),
+                    cap_bnd = bnd.as_deref(),
+                    cap_amb = amb.as_deref(),
+                    "applying SO_MARK to outgoing UDP socket"
+                );
                 apply_socket_mark(&socket, mark)?;
             }
 
@@ -186,6 +208,66 @@ impl RuntimeProvider for RoutedRuntimeProvider {
             tokio::net::UdpSocket::from_std(socket.into())
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn apply_socket_mark(socket: &socket2::Socket, mark: u32) -> io::Result<()> {
+    if let Err(err) = socket.set_mark(mark) {
+        let (eff, prm, bnd, amb) = current_process_capabilities();
+        tracing::error!(
+            fwmark = mark,
+            error = %err,
+            cap_eff = eff.as_deref(),
+            cap_prm = prm.as_deref(),
+            cap_bnd = bnd.as_deref(),
+            cap_amb = amb.as_deref(),
+            "failed to set SO_MARK on outgoing socket"
+        );
+        return Err(err);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn current_process_capabilities() -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    fs::read_to_string("/proc/self/status")
+        .ok()
+        .map(|status| parse_capability_lines(&status))
+        .unwrap_or((None, None, None, None))
+}
+
+#[cfg(target_os = "linux")]
+fn parse_capability_lines(
+    status: &str,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let mut eff = None;
+    let mut prm = None;
+    let mut bnd = None;
+    let mut amb = None;
+
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("CapEff:") {
+            eff = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("CapPrm:") {
+            prm = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("CapBnd:") {
+            bnd = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("CapAmb:") {
+            amb = Some(rest.trim().to_string());
+        }
+    }
+
+    (eff, prm, bnd, amb)
 }
 
 #[cfg(test)]
@@ -256,52 +338,4 @@ mod tests {
         // Should fail with connection refused or timeout, not a bind error.
         assert!(result.is_err());
     }
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn apply_socket_mark(socket: &socket2::Socket, mark: u32) -> io::Result<()> {
-    if let Err(err) = socket.set_mark(mark) {
-        let (eff, prm, bnd, amb) = current_process_capabilities();
-        tracing::error!(
-            fwmark = mark,
-            error = %err,
-            cap_eff = eff.as_deref(),
-            cap_prm = prm.as_deref(),
-            cap_bnd = bnd.as_deref(),
-            cap_amb = amb.as_deref(),
-            "failed to set SO_MARK on outgoing socket"
-        );
-        return Err(err);
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn current_process_capabilities() -> (Option<String>, Option<String>, Option<String>, Option<String>) {
-    fs::read_to_string("/proc/self/status")
-        .ok()
-        .map(|status| parse_capability_lines(&status))
-        .unwrap_or((None, None, None, None))
-}
-
-#[cfg(target_os = "linux")]
-fn parse_capability_lines(status: &str) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
-    let mut eff = None;
-    let mut prm = None;
-    let mut bnd = None;
-    let mut amb = None;
-
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("CapEff:") {
-            eff = Some(rest.trim().to_string());
-        } else if let Some(rest) = line.strip_prefix("CapPrm:") {
-            prm = Some(rest.trim().to_string());
-        } else if let Some(rest) = line.strip_prefix("CapBnd:") {
-            bnd = Some(rest.trim().to_string());
-        } else if let Some(rest) = line.strip_prefix("CapAmb:") {
-            amb = Some(rest.trim().to_string());
-        }
-    }
-
-    (eff, prm, bnd, amb)
 }

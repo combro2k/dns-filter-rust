@@ -1,3 +1,19 @@
+### Required for fwmark (SO_MARK) support
+
+If you use `outbound.fwmark` (Linux SO_MARK), you must install `setcap` to grant the binary the required capabilities:
+
+- **Debian/Ubuntu:** `sudo apt-get install -y libcap2-bin`
+- **Alpine:** `sudo apk add libcap`
+- **Fedora/RHEL:** `sudo dnf install -y libcap`
+
+After install (or after `make install`), run:
+
+```bash
+sudo setcap cap_net_admin,cap_net_bind_service=eip /usr/bin/dns-filter
+# or wherever you installed the binary
+```
+
+If `setcap` is not available, the Makefile will print a warning and you must install it and run the above command manually.
 # dns-filter
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://www.rust-lang.org/) [![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#license) [![Version](https://img.shields.io/badge/version-3.0.0-green)](./CHANGELOG.md)

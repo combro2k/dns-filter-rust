@@ -14,7 +14,7 @@ use crate::frameworks::privileges::DEFAULT_CHROOT_DIR;
 use crate::frameworks::upstream::recursive_resolver::{
     load_root_hints, load_root_key, NameserverIpFamily, DEFAULT_MAX_HOPS,
 };
-use crate::frameworks::upstream::runtime::{OutboundRouting, warn_if_fwmark_without_cap_net_admin};
+use crate::frameworks::upstream::runtime::{warn_if_fwmark_without_cap_net_admin, OutboundRouting};
 #[cfg(feature = "doq")]
 use crate::frameworks::upstream::DnsQuicClient;
 use crate::frameworks::upstream::{
