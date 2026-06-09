@@ -1186,8 +1186,10 @@ fn spawn_admin_server(
 ) -> Option<tokio::task::JoinHandle<()>> {
     let admin_config = admin_config.as_ref().filter(|c| c.enabled)?;
 
-    // Compute the API base URL for template injection.
-    let api_base_url = compute_api_base_url(api_config);
+    // Extract the API token from the api config (if present) for the embedded API routes.
+    let api_token = api_config
+        .as_ref()
+        .and_then(|c| c.api_token.clone());
 
     // Parse the HTTP bind address (always started).
     let http_addrs = match parse_bind_addrs(&admin_config.addresses, admin_config.port) {
@@ -1236,7 +1238,7 @@ fn spawn_admin_server(
             tls_addr,
             tls_config,
             tls_port,
-            api_base_url,
+            api_token,
             ops,
             shutdown,
         )
@@ -1245,24 +1247,6 @@ fn spawn_admin_server(
             tracing::error!(error = %e, "Admin server failed");
         }
     }))
-}
-
-/// Computes the API base URL from the API config for injection into the admin template.
-#[cfg(feature = "http-api")]
-fn compute_api_base_url(api_config: &Option<ApiConfig>) -> String {
-    match api_config.as_ref().filter(|c| c.enabled) {
-        Some(cfg) => {
-            let scheme = if cfg.tls.is_some() { "https" } else { "http" };
-            let host = if cfg.address == "0.0.0.0" || cfg.address == "::" {
-                // Use localhost for wildcard addresses — the browser will resolve it.
-                "localhost"
-            } else {
-                &cfg.address
-            };
-            format!("{scheme}://{host}:{}", cfg.port)
-        }
-        None => String::new(),
-    }
 }
 
 #[cfg(feature = "mcp")]

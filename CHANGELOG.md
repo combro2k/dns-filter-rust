@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Embedded API routes in admin listener**: the admin UI server now serves all `/api/v1/*` routes directly on the same origin, eliminating the need for a separate API listener or cross-origin requests. The standalone `api:` listener remains available for headless/API-only deployments.
 - **Separate admin UI listener with dual-port HTTP/HTTPS support**: the admin dashboard is now served from its own `listen.admin` listener, separate from the API. Supports a dual-port setup: when TLS is configured, port 80 issues 301 redirects to the HTTPS port (default 8443); when TLS is absent, port 80 serves the admin UI directly over plain HTTP.
 - **Optional TLS for the REST API**: `api.tls` configuration enables HTTPS on the API listener with certificate auto-generation support (`autogenerate: true`).
 - **Optional TLS for the metrics listener**: `listen.metrics.tls` configuration enables HTTPS on the Prometheus metrics endpoint.
@@ -17,6 +18,7 @@
 - **Config schema robustness**: Added `#[serde(default)]` to `allowed_hosts` in `McpConfig` to ensure it is always present and defaults to `None` if not set. This prevents deserialization errors and makes config handling more robust.
 - **Disabled listeners can omit listener-specific config**: `listen.dns`, `listen.admin`, `listen.metrics`, and TLS listeners now accept `enabled: false` without requiring `port`, `addresses`, or TLS settings. Enabled listeners still keep the strict validation path.
  - **Preserve `CAP_NET_ADMIN` during privilege drop**: the daemon now retains `CAP_NET_ADMIN` in addition to `CAP_NET_BIND_SERVICE` when dropping privileges so Linux `SO_MARK` (`outbound.fwmark`) can be applied when the init system grants it.
+- **Admin UI health badge showed "degraded" when healthy**: the admin dashboard compared the health status against `"ok"` but the backend returns `"healthy"`, causing the badge to always show "degraded". Fixed the comparison to match the actual status string.
 
 ### Changed
 - **Admin UI moved to dedicated listener**: the `/` and `/admin` routes are no longer served by the API server. They are now served by the new `listen.admin` listener with its own port configuration. The admin HTML template uses a server-injected API base URL instead of `window.location.origin`.

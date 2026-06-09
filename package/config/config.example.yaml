@@ -331,7 +331,9 @@ logging:
 # ---------------------------------------------------------------------------
 # REST API — runtime administration
 # ---------------------------------------------------------------------------
-# Default from struct: absent (None = API disabled).
+# Default from struct: absent (None = standalone API disabled).
+# The admin listener (`listen.admin`) always embeds the full API on its own
+# port, so a separate API listener is only needed for headless/API-only use.
 # All /api/* endpoints require a Bearer token when api_token is set.
 # The /health endpoint is always unauthenticated.
 # api:

@@ -9,13 +9,16 @@ use axum::Router;
 use tokio_util::sync::CancellationToken;
 
 use super::bind_tcp;
+use super::http::{api_router, ApiState};
 use crate::use_cases::server_operations::ServerOperations;
 
 /// Shared state for the admin UI server.
 pub struct AdminState {
     pub ops: Arc<ServerOperations>,
-    /// Pre-rendered admin HTML with the API base URL injected.
+    /// Pre-rendered admin HTML.
     pub admin_html: String,
+    /// Optional Bearer token for API authentication (shared with embedded API routes).
+    pub api_token: Option<String>,
     pub shutdown: CancellationToken,
 }
 
@@ -27,29 +30,29 @@ struct RedirectState {
 
 pub const ADMIN_PAGE_TEMPLATE: &str = include_str!("../../../templates/admin.html");
 
-/// Renders the admin page with the API base URL injected into the template.
-fn render_admin_html(api_base_url: &str) -> String {
-    ADMIN_PAGE_TEMPLATE.replace("{{API_BASE_URL}}", api_base_url)
+/// Renders the admin page with API_BASE_URL set to empty (same-origin).
+fn render_admin_html() -> String {
+    ADMIN_PAGE_TEMPLATE.replace("{{API_BASE_URL}}", "")
 }
 
-/// Starts the admin UI server(s).
+/// Starts the admin UI server(s) with embedded API routes.
 ///
 /// When `tls_config` is provided:
-/// - HTTPS server runs on `tls_addr` serving the admin UI.
+/// - HTTPS server runs on `tls_addr` serving the admin UI + API.
 /// - HTTP server runs on `http_addr` issuing 301 redirects to HTTPS.
 ///
 /// When `tls_config` is `None`:
-/// - HTTP server runs on `http_addr` serving the admin UI directly.
+/// - HTTP server runs on `http_addr` serving the admin UI + API directly.
 pub async fn start_admin_servers(
     http_addr: SocketAddr,
     tls_addr: Option<SocketAddr>,
     tls_config: Option<Arc<rustls::ServerConfig>>,
     tls_port: u16,
-    api_base_url: String,
+    api_token: Option<String>,
     ops: Arc<ServerOperations>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
-    let admin_html = render_admin_html(&api_base_url);
+    let admin_html = render_admin_html();
 
     match tls_config {
         Some(tls_cfg) => {
@@ -65,7 +68,8 @@ pub async fn start_admin_servers(
 
             // Run the HTTPS admin server on the current task.
             let https_result =
-                start_https_admin_server(tls_addr, tls_cfg, admin_html, ops, shutdown).await;
+                start_https_admin_server(tls_addr, tls_cfg, admin_html, api_token, ops, shutdown)
+                    .await;
 
             // If HTTPS exits, cancel the redirect server too.
             redirect_handle.abort();
@@ -73,22 +77,24 @@ pub async fn start_admin_servers(
             https_result
         }
         None => {
-            // No TLS — serve admin UI over plain HTTP.
-            start_http_admin_server(http_addr, admin_html, ops, shutdown).await
+            // No TLS — serve admin UI + API over plain HTTP.
+            start_http_admin_server(http_addr, admin_html, api_token, ops, shutdown).await
         }
     }
 }
 
-/// HTTP admin server serving the admin UI over plain HTTP.
+/// HTTP admin server serving the admin UI + embedded API over plain HTTP.
 async fn start_http_admin_server(
     addr: SocketAddr,
     admin_html: String,
+    api_token: Option<String>,
     ops: Arc<ServerOperations>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     let state = Arc::new(AdminState {
         ops,
         admin_html,
+        api_token,
         shutdown: shutdown.clone(),
     });
 
@@ -123,12 +129,14 @@ async fn start_https_admin_server(
     addr: SocketAddr,
     tls_config: Arc<rustls::ServerConfig>,
     admin_html: String,
+    api_token: Option<String>,
     ops: Arc<ServerOperations>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     let state = Arc::new(AdminState {
         ops,
         admin_html,
+        api_token,
         shutdown: shutdown.clone(),
     });
 
@@ -233,12 +241,25 @@ async fn start_redirect_server(
     Ok(())
 }
 
-/// Builds the admin UI router with GET / and GET /admin and GET /health.
+/// Builds the admin UI router with embedded API routes.
+///
+/// The admin listener serves the UI pages, the health endpoint, and all
+/// `/api/v1/*` routes on the same origin so the browser never needs
+/// cross-origin requests.
 fn admin_router(state: Arc<AdminState>) -> Router {
+    // Build an ApiState from the AdminState for the embedded API routes.
+    let api_state = Arc::new(ApiState {
+        ops: Arc::clone(&state.ops),
+        api_token: state.api_token.clone(),
+        shutdown: state.shutdown.clone(),
+    });
+    let api = api_router(&api_state.api_token).with_state(api_state);
+
     Router::new()
         .route("/", get(handle_admin_page))
         .route("/admin", get(handle_admin_page))
         .route("/health", get(handle_health))
+        .merge(api)
         .with_state(state)
 }
 

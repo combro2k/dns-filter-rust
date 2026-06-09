@@ -170,18 +170,13 @@ impl utoipa::Modify for SecurityAddon {
     }
 }
 
-/// Starts the HTTP API server. Returns when the server shuts down.
-pub async fn start_api_server(
-    addr: SocketAddr,
-    state: Arc<ApiState>,
-    tls_config: Option<Arc<rustls::ServerConfig>>,
-    allowed_origins: Vec<String>,
-) -> anyhow::Result<()> {
-    let token = Arc::new(state.api_token.clone());
-    let shutdown = state.shutdown.clone();
-
-    // Authenticated routes
-    let api_routes = Router::new()
+/// Builds the authenticated API routes. Can be merged into other routers (e.g. admin).
+///
+/// The returned router uses `Arc<ApiState>` as its state type. Call `.with_state(state)`
+/// on the result to convert it to `Router<()>` before merging into a differently-typed router.
+pub fn api_router(api_token: &Option<String>) -> Router<Arc<ApiState>> {
+    let token = Arc::new(api_token.clone());
+    Router::new()
         .route("/api/v1/reload", post(handle_reload))
         .route("/api/v1/stop", post(handle_stop))
         .route("/api/v1/filtering/disable", post(handle_filtering_disable))
@@ -235,7 +230,19 @@ pub async fn start_api_server(
         .layer(middleware::from_fn(move |req, next| {
             let token = Arc::clone(&token);
             bearer_auth_middleware(req, next, token)
-        }));
+        }))
+}
+
+/// Starts the HTTP API server. Returns when the server shuts down.
+pub async fn start_api_server(
+    addr: SocketAddr,
+    state: Arc<ApiState>,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
+    allowed_origins: Vec<String>,
+) -> anyhow::Result<()> {
+    let shutdown = state.shutdown.clone();
+
+    let routes = api_router(&state.api_token);
 
     // Build CORS layer for cross-origin admin→API requests.
     let cors = build_cors_layer(&allowed_origins);
@@ -243,7 +250,7 @@ pub async fn start_api_server(
     // Unauthenticated routes + merge with authenticated routes
     let app = Router::new()
         .route("/health", get(handle_health))
-        .merge(api_routes)
+        .merge(routes)
         .layer(cors)
         .with_state(state);
 

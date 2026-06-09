@@ -326,7 +326,7 @@
                     healthStatus.textContent = data.status;
                     healthVersion.textContent = data.version;
                     healthUptime.textContent = formatUptime(data.uptime_seconds);
-                    renderHealthyState(data.status === 'ok');
+                    renderHealthyState(data.status === 'healthy');
                     filteringEnabled = data.filtering_enabled;
                 } else {
                     healthStatus.textContent = 'unavailable';
