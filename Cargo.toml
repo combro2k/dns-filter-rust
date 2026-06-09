@@ -14,6 +14,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum = { version = "0.8", optional = true }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "http1", "http2"], optional = true }
 hickory-proto = { version = "0.26.1", default-features = false, features = ["dnssec-ring"] }
 hickory-net = { version = "0.26.1", features = ["dnssec-ring", "tls-ring", "https-ring", "tokio"] }
 hickory-resolver = { version = "0.26.1", features = ["recursor", "dnssec-ring", "https-ring"] }
@@ -47,6 +48,7 @@ rmcp = { version = "1.7", features = ["server", "transport-streamable-http-serve
 schemars = { version = "1", optional = true }
 fuzzy-matcher = { version = "0.3", optional = true }
 utoipa = { version = "5", optional = true }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
 quinn = { version = "0.11.9", optional = true }
 prometheus = "0.13"
 
@@ -56,7 +58,7 @@ plugins = ["wasmtime"]
 dot = ["hickory-server/tls-ring", "dep:rcgen", "dep:hostname"]
 doh = ["hickory-server/https-ring", "dep:rcgen", "dep:hostname"]
 doq = ["hickory-net/quic-ring", "hickory-server/quic-ring", "dep:hostname", "dep:quinn", "dep:rcgen"]
-http-api = ["dep:axum", "dep:utoipa"]
+http-api = ["dep:axum", "dep:utoipa", "dep:rcgen", "dep:hostname", "dep:hyper-util", "dep:tower-http"]
 mcp = ["dep:axum", "dep:rmcp", "dep:schemars", "dep:fuzzy-matcher"]
 db-sqlite = ["sqlx/sqlite"]
 db-mysql = ["sqlx/mysql"]

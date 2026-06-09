@@ -4,11 +4,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{middleware, Json, Router};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
+use tower_http::cors::{Any, CorsLayer};
 use utoipa::OpenApi;
 
 use crate::use_cases::filtering::ListInfo;
@@ -81,12 +82,6 @@ fn json_error(status: StatusCode, message: &str) -> Response {
         timestamp: now_unix(),
     };
     (status, Json(body)).into_response()
-}
-
-const ADMIN_PAGE_TEMPLATE: &str = include_str!("../../../templates/admin.html");
-
-fn render_admin_page() -> Html<&'static str> {
-    Html(ADMIN_PAGE_TEMPLATE)
 }
 
 #[derive(OpenApi)]
@@ -176,7 +171,12 @@ impl utoipa::Modify for SecurityAddon {
 }
 
 /// Starts the HTTP API server. Returns when the server shuts down.
-pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> anyhow::Result<()> {
+pub async fn start_api_server(
+    addr: SocketAddr,
+    state: Arc<ApiState>,
+    tls_config: Option<Arc<rustls::ServerConfig>>,
+    allowed_origins: Vec<String>,
+) -> anyhow::Result<()> {
     let token = Arc::new(state.api_token.clone());
     let shutdown = state.shutdown.clone();
 
@@ -237,12 +237,14 @@ pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> anyhow:
             bearer_auth_middleware(req, next, token)
         }));
 
+    // Build CORS layer for cross-origin admin→API requests.
+    let cors = build_cors_layer(&allowed_origins);
+
     // Unauthenticated routes + merge with authenticated routes
     let app = Router::new()
-        .route("/", get(handle_admin_page))
-        .route("/admin", get(handle_admin_page))
         .route("/health", get(handle_health))
         .merge(api_routes)
+        .layer(cors)
         .with_state(state);
 
     let std_listener = bind_tcp(addr).unwrap_or_else(|e| {
@@ -259,14 +261,109 @@ pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> anyhow:
         std::process::exit(1);
     });
 
-    tracing::info!(address = %addr, "HTTP API server started");
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown.cancelled().await;
-        })
-        .await?;
+    match tls_config {
+        Some(tls_cfg) => {
+            tracing::info!(address = %addr, "HTTPS API server started");
+            serve_https(listener, app, tls_cfg, shutdown).await?;
+        }
+        None => {
+            tracing::info!(address = %addr, "HTTP API server started");
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    shutdown.cancelled().await;
+                })
+                .await?;
+        }
+    }
     Ok(())
+}
+
+/// Serves an Axum app over TLS using `tokio-rustls`.
+async fn serve_https(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    tls_config: Arc<rustls::ServerConfig>,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()> {
+    let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
+
+    loop {
+        tokio::select! {
+            result = listener.accept() => {
+                let (stream, peer) = match result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "API HTTPS accept error");
+                        continue;
+                    }
+                };
+
+                let acceptor = acceptor.clone();
+                let app = app.clone();
+
+                tokio::spawn(async move {
+                    let tls_stream = match acceptor.accept(stream).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::debug!(peer = %peer, error = %e, "API TLS handshake failed");
+                            return;
+                        }
+                    };
+
+                    let io = hyper_util::rt::TokioIo::new(tls_stream);
+                    let service = hyper_util::service::TowerToHyperService::new(app);
+
+                    if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                        hyper_util::rt::TokioExecutor::new(),
+                    )
+                    .serve_connection(io, service)
+                    .await
+                    {
+                        tracing::debug!(peer = %peer, error = %e, "API HTTPS connection error");
+                    }
+                });
+            }
+            _ = shutdown.cancelled() => {
+                tracing::info!("HTTPS API server shutting down");
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Builds a CORS layer for API cross-origin requests from the admin UI.
+fn build_cors_layer(allowed_origins: &[String]) -> CorsLayer {
+    use axum::http::{HeaderName, Method};
+
+    let methods = [
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::DELETE,
+        Method::OPTIONS,
+    ];
+
+    let headers = [
+        HeaderName::from_static("authorization"),
+        HeaderName::from_static("content-type"),
+    ];
+
+    if allowed_origins.is_empty() {
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(methods)
+            .allow_headers(headers)
+    } else {
+        let origins: Vec<_> = allowed_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods(methods)
+            .allow_headers(headers)
+    }
 }
 
 // --- Handler implementations ---
@@ -283,10 +380,6 @@ pub async fn start_api_server(addr: SocketAddr, state: Arc<ApiState>) -> anyhow:
 async fn handle_health(State(state): State<Arc<ApiState>>) -> Response {
     let result = state.ops.server_health();
     json_ok(result)
-}
-
-async fn handle_admin_page() -> Html<&'static str> {
-    render_admin_page()
 }
 
 #[utoipa::path(
@@ -1157,6 +1250,7 @@ mod tests {
 
     #[test]
     fn admin_page_template_contains_tailwind_and_dashboard_bindings() {
+        use crate::interface_adapters::listeners::admin::ADMIN_PAGE_TEMPLATE;
         assert!(ADMIN_PAGE_TEMPLATE.contains("https://cdn.tailwindcss.com"));
         assert!(ADMIN_PAGE_TEMPLATE.contains("loadDashboard"));
         assert!(ADMIN_PAGE_TEMPLATE.contains("sessionStorage"));

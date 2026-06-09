@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- **Separate admin UI listener with dual-port HTTP/HTTPS support**: the admin dashboard is now served from its own `listen.admin` listener, separate from the API. Supports a dual-port setup: when TLS is configured, port 80 issues 301 redirects to the HTTPS port (default 8443); when TLS is absent, port 80 serves the admin UI directly over plain HTTP.
+- **Optional TLS for the REST API**: `api.tls` configuration enables HTTPS on the API listener with certificate auto-generation support (`autogenerate: true`).
+- **Optional TLS for the metrics listener**: `listen.metrics.tls` configuration enables HTTPS on the Prometheus metrics endpoint.
+- **CORS support on the API**: the API server now includes CORS headers to allow cross-origin requests from the admin UI when served on a separate port/origin.
 - **Blocklist attribution on blocked queries**: when a DNS query is blocked, the system now identifies which blocklist(s) contain the matching domain. The `blocked_by` field is included in `QueryLogEntry` (visible in the `/api/v1/query-log` API response and admin UI). The `blocklist_hits_total` Prometheus metric now uses a `list` label for per-list hit tracking.
 - **Upstream resolver identity in error logs**: the `DnsUpstreamStage` now includes an `upstream=` field in DNSSEC NSEC/NODATA and SERVFAIL log messages, identifying which resolver produced the error. Errors from instrumented resolvers also carry the specific resolver label (e.g. `[dns://1.1.1.1:53]`) so that strategy groups (failover/round-robin) show exactly which sub-resolver failed.
 - **`UpstreamResolver::label()` trait method**: all resolver implementations now expose a human-readable label via the `label()` method (e.g. `dns://1.1.1.1:53`, `dot://dns.google`, `doh://dns.google/dns-query`, `doq://dns.adguard.com`, `recursive`, `zone:example.com`, `strategy:failover[3]`).
@@ -11,10 +15,12 @@
 
 ### Fixed
 - **Config schema robustness**: Added `#[serde(default)]` to `allowed_hosts` in `McpConfig` to ensure it is always present and defaults to `None` if not set. This prevents deserialization errors and makes config handling more robust.
-- **Disabled listeners can omit listener-specific config**: `listen.dns`, `listen.http`, `listen.metrics`, and TLS listeners now accept `enabled: false` without requiring `port`, `addresses`, or TLS settings. Enabled listeners still keep the strict validation path.
+- **Disabled listeners can omit listener-specific config**: `listen.dns`, `listen.admin`, `listen.metrics`, and TLS listeners now accept `enabled: false` without requiring `port`, `addresses`, or TLS settings. Enabled listeners still keep the strict validation path.
  - **Preserve `CAP_NET_ADMIN` during privilege drop**: the daemon now retains `CAP_NET_ADMIN` in addition to `CAP_NET_BIND_SERVICE` when dropping privileges so Linux `SO_MARK` (`outbound.fwmark`) can be applied when the init system grants it.
 
 ### Changed
+- **Admin UI moved to dedicated listener**: the `/` and `/admin` routes are no longer served by the API server. They are now served by the new `listen.admin` listener with its own port configuration. The admin HTML template uses a server-injected API base URL instead of `window.location.origin`.
+- **`listen.http` renamed to `listen.admin`**: the dead `listen.http` config field has been replaced with the fully-wired `listen.admin` config that supports dual-port HTTP/HTTPS, TLS certificate auto-generation, and separate port configuration.
 - **RoundRobin and Random strategies now fail over on error**: when the initially selected upstream resolver fails (e.g. timeout), the remaining resolvers are tried in rotation order before returning SERVFAIL. Previously a single resolver failure caused an immediate SERVFAIL even when other healthy resolvers were available.
 - **Config example documents cache max_entries**: The example config (`package/config/config.example.yaml`) now documents and sets `max_entries` in the `resolvers.cache` section, making the default cache size limit explicit and user-visible.
 - **CLI start/stop behavior**: `dns-filter start` now always starts the daemon in the foreground, and `dns-filter stop` always contacts the control socket instead of delegating to systemd/OpenRC.

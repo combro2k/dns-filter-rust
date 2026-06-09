@@ -82,7 +82,7 @@ listen:
   dot: null
   doh: null
   doq: null
-  http: null
+  admin: null
   metrics: null
 blocklists: []
 allowlists: []
@@ -112,7 +112,7 @@ listen:
   dot: null
   doh: null
   doq: null
-  http: null
+  admin: null
   metrics: null
 blocklists:
   - adguard_base:
@@ -155,7 +155,7 @@ listen:
   dot: null
   doh: null
   doq: null
-  http: null
+  admin: null
   metrics: null
 blocklists:
   - name: "adguard_base"
@@ -191,7 +191,7 @@ listen:
   dot: null
   doh: null
   doq: null
-  http: null
+  admin: null
   metrics: null
 blocklists: []
 allowlists: []
@@ -223,7 +223,7 @@ listen:
   dot: null
   doh: null
   doq: null
-  http: null
+  admin: null
   metrics: null
 blocklists: []
 allowlists: []
@@ -258,7 +258,7 @@ listen:
   dot: null
   doh: null
   doq: null
-  http: null
+  admin: null
   metrics: null
 blocklists: []
 allowlists: []
@@ -295,7 +295,7 @@ listen:
   dot: null
   doh: null
   doq: null
-  http: null
+  admin: null
   metrics: null
 blocklists: []
 allowlists: []
@@ -339,7 +339,7 @@ listen:
   dot: null
   doh: null
   doq: null
-  http: null
+  admin: null
   metrics: null
 blocklists: []
 allowlists: []
@@ -389,7 +389,7 @@ listen:
   dot: null
   doh: null
   doq: null
-  http: null
+  admin: null
   metrics: null
 blocklists: []
 allowlists: []
@@ -420,7 +420,7 @@ listen:
   dot: null
   doh: null
   doq: null
-  http: null
+  admin: null
   metrics: null
 blocklists: []
 allowlists: []
@@ -452,7 +452,7 @@ listen:
     enabled: false
   doq:
     enabled: false
-  http:
+  admin:
     enabled: false
   metrics:
     enabled: false
@@ -484,8 +484,8 @@ logging:
         let doq = parsed.listen.doq.expect("doq config should exist");
         assert!(!doq.enabled);
 
-        let http = parsed.listen.http.expect("http config should exist");
-        assert!(!http.enabled);
+        let admin = parsed.listen.admin.expect("admin config should exist");
+        assert!(!admin.enabled);
 
         let metrics = parsed.listen.metrics.expect("metrics config should exist");
         assert!(!metrics.enabled);

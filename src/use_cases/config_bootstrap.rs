@@ -928,7 +928,7 @@ mod tests {
                 dot: None,
                 doh: None,
                 doq: None,
-                http: None,
+                admin: None,
                 metrics: None,
             },
             blocklists: Vec::<NamedList>::new(),

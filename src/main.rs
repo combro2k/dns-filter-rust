@@ -31,12 +31,25 @@ use dns_filter::frameworks::privileges::{
     drop_privileges, PrivilegeDropConfig, DEFAULT_CHROOT_DIR, DEFAULT_GROUP, DEFAULT_USER,
 };
 use dns_filter::frameworks::signal_handler::{setup_shutdown_signals, setup_sighup_handler};
+#[cfg(feature = "http-api")]
+use dns_filter::interface_adapters::listeners::admin::start_admin_servers;
+#[cfg(feature = "http-api")]
+use dns_filter::interface_adapters::listeners::build_tls_config_for_https;
+#[cfg(any(
+    feature = "dot",
+    feature = "doh",
+    feature = "doq",
+    feature = "http-api"
+))]
+use dns_filter::interface_adapters::listeners::build_tls_config_plain;
 #[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
 use dns_filter::interface_adapters::listeners::build_tls_config_with_alpn;
 use dns_filter::interface_adapters::listeners::handler::HickoryRequestHandler;
 #[cfg(feature = "http-api")]
 use dns_filter::interface_adapters::listeners::http::{start_api_server, ApiState};
-use dns_filter::interface_adapters::listeners::metrics::start_metrics_server;
+use dns_filter::interface_adapters::listeners::metrics::{
+    start_metrics_server, start_metrics_server_tls,
+};
 use dns_filter::interface_adapters::listeners::{bind_tcp_tokio, bind_udp_tokio, parse_bind_addrs};
 use dns_filter::use_cases::config_bootstrap::{
     build_any_query_policy, build_dns_request_pipeline_full, build_domain_filter_with_cache,
@@ -1007,6 +1020,16 @@ async fn run_daemon(config_path: String, debug: bool) {
     #[cfg(not(feature = "http-api"))]
     let api_task: Option<tokio::task::JoinHandle<()>> = None;
 
+    #[cfg(feature = "http-api")]
+    let admin_task = spawn_admin_server(
+        &config.listen.admin,
+        &config.api,
+        Arc::clone(&server_ops),
+        shutdown.clone(),
+    );
+    #[cfg(not(feature = "http-api"))]
+    let admin_task: Option<tokio::task::JoinHandle<()>> = None;
+
     if let Err(error) = init_prometheus_metrics() {
         eprintln!("failed to initialize metrics: {error:#}");
         std::process::exit(1);
@@ -1055,6 +1078,17 @@ async fn run_daemon(config_path: String, debug: bool) {
             tracing::warn!("HTTP API server exited unexpectedly");
         }
         _ = async {
+            if let Some(task) = admin_task {
+                if let Err(e) = task.await {
+                    tracing::error!("Admin server task panicked: {e}");
+                }
+            } else {
+                std::future::pending::<()>().await;
+            }
+        } => {
+            tracing::warn!("Admin server exited unexpectedly");
+        }
+        _ = async {
             if let Some(task) = mcp_task {
                 if let Err(e) = task.await {
                     tracing::error!("MCP server task panicked: {e}");
@@ -1081,9 +1115,24 @@ fn spawn_metrics_servers(metrics_config: &Option<MetricsConfig>) {
         }
     };
 
+    let tls_config = metrics_config.tls.as_ref().map(|tls| {
+        match build_tls_config_plain(tls, &metrics_config.addresses) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("failed to configure metrics TLS: {e}");
+                std::process::exit(1);
+            }
+        }
+    });
+
     for addr in addrs {
+        let tls_cfg = tls_config.clone();
         tokio::spawn(async move {
-            if let Err(error) = start_metrics_server(addr).await {
+            let result = match tls_cfg {
+                Some(cfg) => start_metrics_server_tls(addr, cfg).await,
+                None => start_metrics_server(addr).await,
+            };
+            if let Err(error) = result {
                 tracing::error!(error = %error, addr = %addr, "metrics server failed");
             }
         });
@@ -1105,6 +1154,16 @@ fn spawn_api_server(
             std::process::exit(1);
         });
 
+    let tls_config = api_config.tls.as_ref().map(|tls| {
+        match build_tls_config_for_https(tls, std::slice::from_ref(&api_config.address)) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("failed to configure API TLS: {e}");
+                std::process::exit(1);
+            }
+        }
+    });
+
     let state = Arc::new(ApiState {
         ops,
         api_token: api_config.api_token.clone(),
@@ -1112,10 +1171,98 @@ fn spawn_api_server(
     });
 
     Some(tokio::spawn(async move {
-        if let Err(e) = start_api_server(addr, state).await {
+        if let Err(e) = start_api_server(addr, state, tls_config, vec![]).await {
             tracing::error!(error = %e, "HTTP API server failed");
         }
     }))
+}
+
+#[cfg(feature = "http-api")]
+fn spawn_admin_server(
+    admin_config: &Option<dns_filter::frameworks::config::schema::AdminConfig>,
+    api_config: &Option<ApiConfig>,
+    ops: Arc<ServerOperations>,
+    shutdown: CancellationToken,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let admin_config = admin_config.as_ref().filter(|c| c.enabled)?;
+
+    // Compute the API base URL for template injection.
+    let api_base_url = compute_api_base_url(api_config);
+
+    // Parse the HTTP bind address (always started).
+    let http_addrs = match parse_bind_addrs(&admin_config.addresses, admin_config.port) {
+        Ok(addrs) => addrs,
+        Err(e) => {
+            eprintln!("failed to parse admin HTTP bind addresses: {e}");
+            std::process::exit(1);
+        }
+    };
+    let http_addr = http_addrs
+        .first()
+        .copied()
+        .expect("admin must have at least one bind address");
+
+    // Optionally build TLS config and parse the HTTPS bind address.
+    let (tls_config, tls_addr) = match &admin_config.tls {
+        Some(tls) => {
+            let cfg = match build_tls_config_for_https(tls, &admin_config.addresses) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("failed to configure admin TLS: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let tls_addrs = match parse_bind_addrs(&admin_config.addresses, admin_config.tls_port) {
+                Ok(addrs) => addrs,
+                Err(e) => {
+                    eprintln!("failed to parse admin HTTPS bind addresses: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let tls_addr = tls_addrs
+                .first()
+                .copied()
+                .expect("admin TLS must have at least one bind address");
+            (Some(cfg), Some(tls_addr))
+        }
+        None => (None, None),
+    };
+
+    let tls_port = admin_config.tls_port;
+
+    Some(tokio::spawn(async move {
+        if let Err(e) = start_admin_servers(
+            http_addr,
+            tls_addr,
+            tls_config,
+            tls_port,
+            api_base_url,
+            ops,
+            shutdown,
+        )
+        .await
+        {
+            tracing::error!(error = %e, "Admin server failed");
+        }
+    }))
+}
+
+/// Computes the API base URL from the API config for injection into the admin template.
+#[cfg(feature = "http-api")]
+fn compute_api_base_url(api_config: &Option<ApiConfig>) -> String {
+    match api_config.as_ref().filter(|c| c.enabled) {
+        Some(cfg) => {
+            let scheme = if cfg.tls.is_some() { "https" } else { "http" };
+            let host = if cfg.address == "0.0.0.0" || cfg.address == "::" {
+                // Use localhost for wildcard addresses — the browser will resolve it.
+                "localhost"
+            } else {
+                &cfg.address
+            };
+            format!("{scheme}://{host}:{}", cfg.port)
+        }
+        None => String::new(),
+    }
 }
 
 #[cfg(feature = "mcp")]

@@ -1,3 +1,5 @@
+#[cfg(feature = "http-api")]
+pub mod admin;
 #[cfg(any(feature = "http-api", feature = "mcp"))]
 pub mod auth;
 pub mod dns;
@@ -13,7 +15,12 @@ pub mod http;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod metrics;
-#[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
+#[cfg(any(
+    feature = "dot",
+    feature = "doh",
+    feature = "doq",
+    feature = "http-api"
+))]
 pub mod tls;
 
 use std::io;
@@ -22,14 +29,34 @@ use std::net::SocketAddr;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{TcpListener, UdpSocket};
 
-#[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
+#[cfg(any(
+    feature = "dot",
+    feature = "doh",
+    feature = "doq",
+    feature = "http-api"
+))]
 use rustls::ServerConfig;
-#[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
+#[cfg(any(
+    feature = "dot",
+    feature = "doh",
+    feature = "doq",
+    feature = "http-api"
+))]
 use std::sync::Arc;
 
-#[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
+#[cfg(any(
+    feature = "dot",
+    feature = "doh",
+    feature = "doq",
+    feature = "http-api"
+))]
 use self::tls::{autogenerate_tls_cert_if_missing, build_tls_server_config, TlsSetupError};
-#[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
+#[cfg(any(
+    feature = "dot",
+    feature = "doh",
+    feature = "doq",
+    feature = "http-api"
+))]
 use crate::frameworks::config::schema::TlsConfig;
 
 /// Errors that can occur when setting up listeners.
@@ -46,7 +73,12 @@ pub enum ListenerSetupError {
         addr: SocketAddr,
         source: io::Error,
     },
-    #[cfg(any(feature = "dot", feature = "doh", feature = "doq"))]
+    #[cfg(any(
+        feature = "dot",
+        feature = "doh",
+        feature = "doq",
+        feature = "http-api"
+    ))]
     #[error("TLS configuration error: {0}")]
     Tls(#[from] TlsSetupError),
     #[error("listener registration error: {0}")]
@@ -91,6 +123,40 @@ pub fn build_tls_config_with_alpn(
     }
     let mut config = build_tls_server_config(&tls.cert_path, &tls.key_path)?;
     config.alpn_protocols = vec![alpn.to_vec()];
+    Ok(Arc::new(config))
+}
+
+/// Builds a [`rustls::ServerConfig`] with HTTP/1.1 and HTTP/2 ALPN negotiation.
+/// Optionally auto-generates a self-signed certificate when `autogenerate` is set.
+#[cfg(feature = "http-api")]
+pub fn build_tls_config_for_https(
+    tls: &TlsConfig,
+    extra_sans: &[String],
+) -> Result<Arc<ServerConfig>, ListenerSetupError> {
+    if tls.autogenerate.unwrap_or(false) {
+        autogenerate_tls_cert_if_missing(&tls.cert_path, &tls.key_path, extra_sans)?;
+    }
+    let mut config = build_tls_server_config(&tls.cert_path, &tls.key_path)?;
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(Arc::new(config))
+}
+
+/// Builds a plain [`rustls::ServerConfig`] without ALPN for raw-TCP TLS servers
+/// (e.g. metrics). Optionally auto-generates a self-signed certificate.
+#[cfg(any(
+    feature = "dot",
+    feature = "doh",
+    feature = "doq",
+    feature = "http-api"
+))]
+pub fn build_tls_config_plain(
+    tls: &TlsConfig,
+    extra_sans: &[String],
+) -> Result<Arc<ServerConfig>, ListenerSetupError> {
+    if tls.autogenerate.unwrap_or(false) {
+        autogenerate_tls_cert_if_missing(&tls.cert_path, &tls.key_path, extra_sans)?;
+    }
+    let config = build_tls_server_config(&tls.cert_path, &tls.key_path)?;
     Ok(Arc::new(config))
 }
 

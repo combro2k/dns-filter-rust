@@ -90,6 +90,7 @@ pub struct ApiConfig {
     pub api_token: Option<String>,
     #[serde(default)]
     pub query_logging: Option<QueryLoggingConfig>,
+    pub tls: Option<TlsConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,7 +161,7 @@ pub struct ListenConfig {
     pub dot: Option<TlsSocketConfig>,
     pub doh: Option<TlsSocketConfig>,
     pub doq: Option<TlsSocketConfig>,
-    pub http: Option<SocketConfig>,
+    pub admin: Option<AdminConfig>,
     pub metrics: Option<MetricsConfig>,
 }
 
@@ -191,6 +192,7 @@ pub struct MetricsConfig {
     pub enabled: bool,
     pub addresses: Vec<String>,
     pub port: u16,
+    pub tls: Option<TlsConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,6 +234,8 @@ struct MetricsConfigRaw {
     addresses: Vec<String>,
     #[serde(default)]
     port: Option<u16>,
+    #[serde(default)]
+    tls: Option<TlsConfig>,
 }
 
 impl<'de> Deserialize<'de> for SocketConfig {
@@ -298,12 +302,83 @@ impl<'de> Deserialize<'de> for MetricsConfig {
                 enabled: true,
                 addresses: raw.addresses,
                 port: raw.port.ok_or_else(|| de::Error::missing_field("port"))?,
+                tls: raw.tls,
             })
         } else {
             Ok(Self {
                 enabled: false,
                 addresses: Vec::new(),
                 port: 0,
+                tls: None,
+            })
+        }
+    }
+}
+
+/// Admin UI listener with dual-port support: HTTP (plain or redirect) + HTTPS.
+///
+/// When `tls` is configured, `tls_port` serves the admin UI over HTTPS and
+/// `port` responds with 301 redirects to the HTTPS endpoint. When `tls` is
+/// absent, `port` serves the admin UI over plain HTTP.
+#[derive(Debug)]
+pub struct AdminConfig {
+    pub enabled: bool,
+    pub addresses: Vec<String>,
+    /// HTTP port. Serves the UI directly when TLS is absent, or redirects to
+    /// `tls_port` when TLS is configured.
+    pub port: u16,
+    /// HTTPS port. Only active when `tls` is configured.
+    pub tls_port: u16,
+    pub tls: Option<TlsConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminConfigRaw {
+    enabled: bool,
+    #[serde(
+        alias = "address",
+        deserialize_with = "deserialize_addresses",
+        default = "default_public_addresses"
+    )]
+    addresses: Vec<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default = "default_admin_tls_port")]
+    tls_port: u16,
+    #[serde(default)]
+    tls: Option<TlsConfig>,
+}
+
+fn default_admin_port() -> u16 {
+    80
+}
+
+fn default_admin_tls_port() -> u16 {
+    8443
+}
+
+impl<'de> Deserialize<'de> for AdminConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let raw = AdminConfigRaw::deserialize(deserializer)?;
+
+        if raw.enabled {
+            Ok(Self {
+                enabled: true,
+                addresses: raw.addresses,
+                port: raw.port.unwrap_or_else(default_admin_port),
+                tls_port: raw.tls_port,
+                tls: raw.tls,
+            })
+        } else {
+            Ok(Self {
+                enabled: false,
+                addresses: Vec::new(),
+                port: 0,
+                tls_port: 0,
+                tls: None,
             })
         }
     }

@@ -143,6 +143,9 @@
     </div>
 
     <script>
+        // API base URL is injected by the server at serve-time.
+        // When served from the same origin as the API, this will be empty.
+        const API_BASE_URL = '{{API_BASE_URL}}';
         const TOKEN_KEY = 'dns-filter-admin-token';
         const statusBanner = document.getElementById('status-banner');
         const apiTokenInput = document.getElementById('api-token');
@@ -206,7 +209,7 @@
         }
 
         async function apiRequest(path, options = {}) {
-            const response = await fetch(`${window.location.origin}${path}`, {
+            const response = await fetch(`${API_BASE_URL}${path}`, {
                 ...options,
                 headers: buildHeaders(options.headers || {})
             });

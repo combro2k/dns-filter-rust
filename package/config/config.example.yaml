@@ -47,15 +47,24 @@ listen:
   #     key_path: "certs/key.pem"
   #     autogenerate: true
 
-  # http:
+  # admin:
   #   enabled: true
   #   addresses: ["0.0.0.0", "::"]
-  #   port: 8080
+  #   port: 80                         # HTTP — serves UI or redirects to tls_port
+  #   tls_port: 8443                    # HTTPS — only active when tls is configured
+  #   tls:
+  #     cert_path: "certs/admin-cert.pem"
+  #     key_path: "certs/admin-key.pem"
+  #     autogenerate: true
 
   # metrics:
   #   enabled: true
   #   addresses: ["127.0.0.1", "::1"]
   #   port: 9100
+  #   tls:
+  #     cert_path: "certs/metrics-cert.pem"
+  #     key_path: "certs/metrics-key.pem"
+  #     autogenerate: true
 
 # MCP (Model Context Protocol) server for AI/LLM tool integration.
 # Requires the 'mcp' feature flag: cargo build --features mcp
@@ -330,6 +339,10 @@ logging:
 #   address: "0.0.0.0"                  # default
 #   port: 8000                          # default
 #   # api_token: "change-me-to-a-secure-value"
+#   # tls:
+#   #   cert_path: "certs/api-cert.pem"
+#   #   key_path: "certs/api-key.pem"
+#   #   autogenerate: true
 #   query_logging:
 #     enabled: false                    # default
 #     max_entries: 10000                # default

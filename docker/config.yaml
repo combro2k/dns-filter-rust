@@ -4,10 +4,15 @@ listen:
     port: 53
     addresses: ["0.0.0.0", "::"]
 
-  http:
+  admin:
     enabled: true
-    port: 8080
+    port: 80
     addresses: ["0.0.0.0", "::"]
+    tls_port: 8443
+    tls:
+      cert_path: "certs/admin-cert.pem"
+      key_path: "certs/admin-key.pem"
+      autogenerate: true
 
   metrics:
     enabled: true
@@ -17,7 +22,7 @@ listen:
 api:
   enabled: true
   address: "0.0.0.0"
-  port: 8080
+  port: 8000
   # api_token: "change-me"
 
 logging:
