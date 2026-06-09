@@ -320,8 +320,10 @@ impl UpstreamResolver for InstrumentedUpstreamResolver {
 /// Dispatches DNS queries to one or more upstream resolvers according to a strategy.
 ///
 /// # Strategies
-/// - `RoundRobin` — cycles through resolvers in order, one per call.
-/// - `Random` — picks a resolver at random each call.
+/// - `RoundRobin` — cycles through resolvers starting from the next in line.
+///   If the chosen resolver fails, the remaining resolvers are tried in order
+///   before giving up (failover from the rotation point).
+/// - `Random` — picks a resolver at random, then fails over through the rest.
 /// - `Failover` — tries resolvers sequentially until one succeeds.
 pub struct StrategyUpstreamResolver {
     resolvers: Vec<Arc<dyn UpstreamResolver>>,
@@ -351,14 +353,30 @@ impl UpstreamResolver for StrategyUpstreamResolver {
 
         match self.strategy {
             UpstreamStrategy::RoundRobin => {
-                let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.resolvers.len();
-                self.resolvers[idx].resolve(query).await
+                let start = self.counter.fetch_add(1, Ordering::Relaxed) % self.resolvers.len();
+                let mut last_err = UpstreamResolveError::AllFailed;
+                for i in 0..self.resolvers.len() {
+                    let idx = (start + i) % self.resolvers.len();
+                    match self.resolvers[idx].resolve(query.clone()).await {
+                        Ok(resp) => return Ok(resp),
+                        Err(e) => last_err = e,
+                    }
+                }
+                Err(last_err)
             }
 
             UpstreamStrategy::Random => {
                 use rand::Rng;
-                let idx = rand::thread_rng().gen_range(0..self.resolvers.len());
-                self.resolvers[idx].resolve(query).await
+                let start = rand::thread_rng().gen_range(0..self.resolvers.len());
+                let mut last_err = UpstreamResolveError::AllFailed;
+                for i in 0..self.resolvers.len() {
+                    let idx = (start + i) % self.resolvers.len();
+                    match self.resolvers[idx].resolve(query.clone()).await {
+                        Ok(resp) => return Ok(resp),
+                        Err(e) => last_err = e,
+                    }
+                }
+                Err(last_err)
             }
 
             UpstreamStrategy::Failover => {
@@ -512,6 +530,37 @@ mod tests {
     #[tokio::test]
     async fn test_empty_resolvers_returns_all_failed() {
         let sr = StrategyUpstreamResolver::new(vec![], UpstreamStrategy::RoundRobin);
+        assert!(sr.resolve(vec![]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_round_robin_fails_over_to_next_resolver() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let resolvers: Vec<Arc<dyn UpstreamResolver>> = vec![
+            Arc::new(AlwaysFailResolver),
+            Arc::new(TrackingResolver {
+                id: 1,
+                calls: Arc::clone(&calls),
+            }),
+            Arc::new(TrackingResolver {
+                id: 2,
+                calls: Arc::clone(&calls),
+            }),
+        ];
+        let sr = StrategyUpstreamResolver::new(resolvers, UpstreamStrategy::RoundRobin);
+
+        // Counter starts at 0, so first call picks resolver 0 (AlwaysFailResolver),
+        // then fails over to resolver 1.
+        let result = sr.resolve(vec![]).await;
+        assert!(result.is_ok());
+        assert_eq!(*calls.lock().unwrap(), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn test_round_robin_all_fail_returns_err() {
+        let resolvers: Vec<Arc<dyn UpstreamResolver>> =
+            vec![Arc::new(AlwaysFailResolver), Arc::new(AlwaysFailResolver)];
+        let sr = StrategyUpstreamResolver::new(resolvers, UpstreamStrategy::RoundRobin);
         assert!(sr.resolve(vec![]).await.is_err());
     }
 

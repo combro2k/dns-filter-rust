@@ -15,6 +15,7 @@
  - **Preserve `CAP_NET_ADMIN` during privilege drop**: the daemon now retains `CAP_NET_ADMIN` in addition to `CAP_NET_BIND_SERVICE` when dropping privileges so Linux `SO_MARK` (`outbound.fwmark`) can be applied when the init system grants it.
 
 ### Changed
+- **RoundRobin and Random strategies now fail over on error**: when the initially selected upstream resolver fails (e.g. timeout), the remaining resolvers are tried in rotation order before returning SERVFAIL. Previously a single resolver failure caused an immediate SERVFAIL even when other healthy resolvers were available.
 - **Config example documents cache max_entries**: The example config (`package/config/config.example.yaml`) now documents and sets `max_entries` in the `resolvers.cache` section, making the default cache size limit explicit and user-visible.
 - **CLI start/stop behavior**: `dns-filter start` now always starts the daemon in the foreground, and `dns-filter stop` always contacts the control socket instead of delegating to systemd/OpenRC.
 
