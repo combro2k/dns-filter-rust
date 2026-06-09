@@ -24,7 +24,7 @@ thiserror = "1.0"
 anyhow = "1.0"
 async-trait = "0.1"
 rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
 http = "1"
 base64 = "0.22"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "migrate", "macros"] }
@@ -50,11 +50,14 @@ fuzzy-matcher = { version = "0.3", optional = true }
 utoipa = { version = "5", optional = true }
 tower-http = { version = "0.6", features = ["cors"], optional = true }
 quinn = { version = "0.11.9", optional = true }
+instant-acme = { version = "0.8", features = ["ring"], optional = true }
+arc-swap = { version = "1", optional = true }
 prometheus = "0.13"
 
 [features]
 default = ["dot", "doh", "doq", "http-api", "mcp", "db-sqlite"]
 plugins = ["wasmtime"]
+acme = ["dep:instant-acme", "dep:arc-swap", "dep:rcgen"]
 dot = ["hickory-server/tls-ring", "dep:rcgen", "dep:hostname"]
 doh = ["hickory-server/https-ring", "dep:rcgen", "dep:hostname"]
 doq = ["hickory-net/quic-ring", "hickory-server/quic-ring", "dep:hostname", "dep:quinn", "dep:rcgen"]

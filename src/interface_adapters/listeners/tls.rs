@@ -250,6 +250,25 @@ fn san_display(san: &SanType) -> String {
     }
 }
 
+/// Builds a [`rustls::ServerConfig`] that delegates certificate resolution to
+/// a shared resolver. This enables hot-reloading of certificates (e.g. from
+/// ACME renewal) without restarting listeners.
+///
+/// The resolver is typically a [`SharedCertResolver`] backed by `ArcSwap`.
+#[cfg(feature = "acme")]
+pub fn build_tls_server_config_with_resolver(
+    resolver: Arc<dyn rustls::server::ResolvesServerCert>,
+) -> Result<ServerConfig, TlsSetupError> {
+    let config =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| TlsSetupError::Config(format!("TLS protocol version error: {e}")))?
+            .with_no_client_auth()
+            .with_cert_resolver(resolver);
+
+    Ok(config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

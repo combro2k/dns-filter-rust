@@ -962,6 +962,8 @@ mod tests {
             mcp: None,
             database: None,
             outbound: None,
+            #[cfg(feature = "acme")]
+            acme: None,
         }
     }
 

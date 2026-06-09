@@ -6,8 +6,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
-#[cfg(any(feature = "http-api", feature = "mcp"))]
+#[cfg(any(feature = "http-api", feature = "mcp", feature = "acme"))]
 use tokio_util::sync::CancellationToken;
+
+#[cfg(feature = "acme")]
+use dns_filter::frameworks::acme::cert_resolver::SharedCertResolver;
+#[cfg(feature = "acme")]
+use dns_filter::frameworks::acme::{load_certified_key_from_pem, AcmeManager};
+#[cfg(feature = "acme")]
+use dns_filter::interface_adapters::listeners::{
+    build_tls_config_with_resolver_alpn, build_tls_config_with_resolver_https,
+};
 
 #[cfg(feature = "http-api")]
 use dns_filter::entities::query_log::QueryLog;
@@ -678,6 +687,144 @@ async fn run_daemon(config_path: String, debug: bool) {
     }
 
     // --- Register DoT listeners ---
+    // --- ACME certificate management (optional, feature-gated) ---
+    #[cfg(feature = "acme")]
+    let (acme_resolver, acme_manager_for_renewal): (
+        Option<Arc<dyn rustls::server::ResolvesServerCert>>,
+        Option<Arc<AcmeManager>>,
+    ) = {
+        if let Some(acme_config) = config.acme.as_ref().filter(|c| c.enabled) {
+            // Resolve cert/key paths for chroot context
+            let cert_path = match if will_chroot {
+                resolve_path_for_chroot_runtime(&acme_config.cert_path, &priv_chroot)
+            } else {
+                resolve_path_for_chroot_host(&acme_config.cert_path, &priv_chroot)
+            } {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("invalid acme.cert_path: {e:#}");
+                    std::process::exit(1);
+                }
+            };
+            let key_path = match if will_chroot {
+                resolve_path_for_chroot_runtime(&acme_config.key_path, &priv_chroot)
+            } else {
+                resolve_path_for_chroot_host(&acme_config.key_path, &priv_chroot)
+            } {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("invalid acme.key_path: {e:#}");
+                    std::process::exit(1);
+                }
+            };
+            let account_path = match if will_chroot {
+                resolve_path_for_chroot_runtime(&acme_config.account_credentials_path, &priv_chroot)
+            } else {
+                resolve_path_for_chroot_host(&acme_config.account_credentials_path, &priv_chroot)
+            } {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("invalid acme.account_credentials_path: {e:#}");
+                    std::process::exit(1);
+                }
+            };
+
+            // Build runtime ACME config with resolved paths
+            let runtime_acme_config = dns_filter::frameworks::config::schema::AcmeConfig {
+                enabled: true,
+                directory_url: acme_config.directory_url.clone(),
+                domains: acme_config.domains.clone(),
+                email: acme_config.email.clone(),
+                cert_path,
+                key_path,
+                account_credentials_path: account_path,
+                renew_before_expiry: acme_config.renew_before_expiry.clone(),
+                dns_provider: dns_filter::frameworks::config::schema::AcmeDnsProviderConfig {
+                    provider_type: acme_config.dns_provider.provider_type.clone(),
+                    api_token: acme_config.dns_provider.api_token.clone(),
+                    zone_id: acme_config.dns_provider.zone_id.clone(),
+                },
+            };
+
+            // Create initial CertifiedKey — either from existing cert or a temporary self-signed
+            let initial_key = if std::path::Path::new(&runtime_acme_config.cert_path).exists()
+                && std::path::Path::new(&runtime_acme_config.key_path).exists()
+            {
+                match std::fs::read_to_string(&runtime_acme_config.cert_path)
+                    .and_then(|cert| {
+                        std::fs::read_to_string(&runtime_acme_config.key_path)
+                            .map(|key| (cert, key))
+                    })
+                    .map_err(|e| e.to_string())
+                    .and_then(|(cert, key)| {
+                        load_certified_key_from_pem(&cert, &key).map_err(|e| e.to_string())
+                    }) {
+                    Ok(ck) => {
+                        tracing::info!("loaded existing ACME certificate for initial TLS setup");
+                        Arc::new(ck)
+                    }
+                    Err(e) => {
+                        eprintln!("failed to load existing ACME certificate: {e}");
+                        eprintln!("ACME will attempt to obtain a new certificate");
+                        // Generate a temporary self-signed cert to start listeners
+                        match generate_temp_certified_key() {
+                            Ok(ck) => Arc::new(ck),
+                            Err(e) => {
+                                eprintln!("failed to generate temporary cert: {e}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+            } else {
+                tracing::info!("no existing ACME certificate found, using temporary self-signed cert until ACME completes");
+                match generate_temp_certified_key() {
+                    Ok(ck) => Arc::new(ck),
+                    Err(e) => {
+                        eprintln!("failed to generate temporary cert: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            };
+
+            let resolver = Arc::new(SharedCertResolver::new(initial_key));
+
+            // Create the ACME manager and start certificate acquisition
+            let acme_manager = match AcmeManager::new(runtime_acme_config, Arc::clone(&resolver)) {
+                Ok(m) => Arc::new(m),
+                Err(e) => {
+                    eprintln!("failed to initialize ACME manager: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            // Obtain/verify certificate (blocks startup briefly)
+            let acme_manager_startup = Arc::clone(&acme_manager);
+            match acme_manager_startup.obtain_or_load_certificate().await {
+                Ok(()) => tracing::info!("ACME certificate ready"),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "ACME certificate acquisition failed at startup, using fallback"
+                    );
+                    // Continue with whatever cert is loaded (temp or cached)
+                }
+            }
+
+            (
+                Some(Arc::clone(&resolver) as Arc<dyn rustls::server::ResolvesServerCert>),
+                Some(acme_manager),
+            )
+        } else {
+            (None, None)
+        }
+    };
+    #[cfg(not(feature = "acme"))]
+    let acme_resolver: Option<std::convert::Infallible> = None;
+    // Suppress unused warning when no TLS protocol features are enabled
+    let _ = &acme_resolver;
+
+    // --- Register DoT listeners ---
     #[cfg(feature = "dot")]
     if let Some(dot_config) = config.listen.dot.as_ref().filter(|cfg| cfg.enabled) {
         let dot_addrs = match parse_bind_addrs(&dot_config.addresses, dot_config.port) {
@@ -687,38 +834,53 @@ async fn run_daemon(config_path: String, debug: bool) {
                 std::process::exit(1);
             }
         };
-        let mut runtime_tls = dot_config.tls.clone();
-        runtime_tls.cert_path = match if will_chroot {
-            resolve_path_for_chroot_runtime(&runtime_tls.cert_path, &priv_chroot)
-        } else {
-            resolve_path_for_chroot_host(&runtime_tls.cert_path, &priv_chroot)
-        } {
-            Ok(path) => path,
-            Err(e) => {
-                eprintln!("invalid DoT tls.cert_path: {e:#}");
-                std::process::exit(1);
-            }
-        };
-        runtime_tls.key_path = match if will_chroot {
-            resolve_path_for_chroot_runtime(&runtime_tls.key_path, &priv_chroot)
-        } else {
-            resolve_path_for_chroot_host(&runtime_tls.key_path, &priv_chroot)
-        } {
-            Ok(path) => path,
-            Err(e) => {
-                eprintln!("invalid DoT tls.key_path: {e:#}");
-                std::process::exit(1);
-            }
-        };
 
-        let tls_config =
+        // Use ACME resolver if available, otherwise fall back to per-listener TLS config
+        #[cfg(feature = "acme")]
+        let acme_tls = acme_resolver.as_ref().map(|resolver| {
+            build_tls_config_with_resolver_alpn(Arc::clone(resolver), b"dot").unwrap_or_else(|e| {
+                eprintln!("failed to configure DoT TLS (ACME): {e}");
+                std::process::exit(1);
+            })
+        });
+        #[cfg(not(feature = "acme"))]
+        let acme_tls: Option<Arc<rustls::ServerConfig>> = None;
+
+        let tls_config = if let Some(cfg) = acme_tls {
+            cfg
+        } else {
+            let mut runtime_tls = dot_config.tls.clone();
+            runtime_tls.cert_path = match if will_chroot {
+                resolve_path_for_chroot_runtime(&runtime_tls.cert_path, &priv_chroot)
+            } else {
+                resolve_path_for_chroot_host(&runtime_tls.cert_path, &priv_chroot)
+            } {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!("invalid DoT tls.cert_path: {e:#}");
+                    std::process::exit(1);
+                }
+            };
+            runtime_tls.key_path = match if will_chroot {
+                resolve_path_for_chroot_runtime(&runtime_tls.key_path, &priv_chroot)
+            } else {
+                resolve_path_for_chroot_host(&runtime_tls.key_path, &priv_chroot)
+            } {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!("invalid DoT tls.key_path: {e:#}");
+                    std::process::exit(1);
+                }
+            };
             match build_tls_config_with_alpn(&runtime_tls, &dot_config.addresses, b"dot") {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("failed to configure DoT TLS: {e}");
                     std::process::exit(1);
                 }
-            };
+            }
+        };
+
         for addr in &dot_addrs {
             let tcp = match bind_tcp_tokio(*addr) {
                 Ok(s) => s,
@@ -749,38 +911,53 @@ async fn run_daemon(config_path: String, debug: bool) {
                 std::process::exit(1);
             }
         };
-        let mut runtime_tls = doh_config.tls.clone();
-        runtime_tls.cert_path = match if will_chroot {
-            resolve_path_for_chroot_runtime(&runtime_tls.cert_path, &priv_chroot)
-        } else {
-            resolve_path_for_chroot_host(&runtime_tls.cert_path, &priv_chroot)
-        } {
-            Ok(path) => path,
-            Err(e) => {
-                eprintln!("invalid DoH tls.cert_path: {e:#}");
-                std::process::exit(1);
-            }
-        };
-        runtime_tls.key_path = match if will_chroot {
-            resolve_path_for_chroot_runtime(&runtime_tls.key_path, &priv_chroot)
-        } else {
-            resolve_path_for_chroot_host(&runtime_tls.key_path, &priv_chroot)
-        } {
-            Ok(path) => path,
-            Err(e) => {
-                eprintln!("invalid DoH tls.key_path: {e:#}");
-                std::process::exit(1);
-            }
-        };
 
-        let tls_config =
+        // Use ACME resolver if available, otherwise fall back to per-listener TLS config
+        #[cfg(feature = "acme")]
+        let acme_tls = acme_resolver.as_ref().map(|resolver| {
+            build_tls_config_with_resolver_https(Arc::clone(resolver)).unwrap_or_else(|e| {
+                eprintln!("failed to configure DoH TLS (ACME): {e}");
+                std::process::exit(1);
+            })
+        });
+        #[cfg(not(feature = "acme"))]
+        let acme_tls: Option<Arc<rustls::ServerConfig>> = None;
+
+        let tls_config = if let Some(cfg) = acme_tls {
+            cfg
+        } else {
+            let mut runtime_tls = doh_config.tls.clone();
+            runtime_tls.cert_path = match if will_chroot {
+                resolve_path_for_chroot_runtime(&runtime_tls.cert_path, &priv_chroot)
+            } else {
+                resolve_path_for_chroot_host(&runtime_tls.cert_path, &priv_chroot)
+            } {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!("invalid DoH tls.cert_path: {e:#}");
+                    std::process::exit(1);
+                }
+            };
+            runtime_tls.key_path = match if will_chroot {
+                resolve_path_for_chroot_runtime(&runtime_tls.key_path, &priv_chroot)
+            } else {
+                resolve_path_for_chroot_host(&runtime_tls.key_path, &priv_chroot)
+            } {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!("invalid DoH tls.key_path: {e:#}");
+                    std::process::exit(1);
+                }
+            };
             match build_tls_config_with_alpn(&runtime_tls, &doh_config.addresses, b"h2") {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("failed to configure DoH TLS: {e}");
                     std::process::exit(1);
                 }
-            };
+            }
+        };
+
         for addr in &doh_addrs {
             let tcp = match bind_tcp_tokio(*addr) {
                 Ok(s) => s,
@@ -813,38 +990,53 @@ async fn run_daemon(config_path: String, debug: bool) {
                 std::process::exit(1);
             }
         };
-        let mut runtime_tls = doq_config.tls.clone();
-        runtime_tls.cert_path = match if will_chroot {
-            resolve_path_for_chroot_runtime(&runtime_tls.cert_path, &priv_chroot)
-        } else {
-            resolve_path_for_chroot_host(&runtime_tls.cert_path, &priv_chroot)
-        } {
-            Ok(path) => path,
-            Err(e) => {
-                eprintln!("invalid DoQ tls.cert_path: {e:#}");
-                std::process::exit(1);
-            }
-        };
-        runtime_tls.key_path = match if will_chroot {
-            resolve_path_for_chroot_runtime(&runtime_tls.key_path, &priv_chroot)
-        } else {
-            resolve_path_for_chroot_host(&runtime_tls.key_path, &priv_chroot)
-        } {
-            Ok(path) => path,
-            Err(e) => {
-                eprintln!("invalid DoQ tls.key_path: {e:#}");
-                std::process::exit(1);
-            }
-        };
 
-        let tls_config =
+        // Use ACME resolver if available, otherwise fall back to per-listener TLS config
+        #[cfg(feature = "acme")]
+        let acme_tls = acme_resolver.as_ref().map(|resolver| {
+            build_tls_config_with_resolver_alpn(Arc::clone(resolver), b"doq").unwrap_or_else(|e| {
+                eprintln!("failed to configure DoQ TLS (ACME): {e}");
+                std::process::exit(1);
+            })
+        });
+        #[cfg(not(feature = "acme"))]
+        let acme_tls: Option<Arc<rustls::ServerConfig>> = None;
+
+        let tls_config = if let Some(cfg) = acme_tls {
+            cfg
+        } else {
+            let mut runtime_tls = doq_config.tls.clone();
+            runtime_tls.cert_path = match if will_chroot {
+                resolve_path_for_chroot_runtime(&runtime_tls.cert_path, &priv_chroot)
+            } else {
+                resolve_path_for_chroot_host(&runtime_tls.cert_path, &priv_chroot)
+            } {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!("invalid DoQ tls.cert_path: {e:#}");
+                    std::process::exit(1);
+                }
+            };
+            runtime_tls.key_path = match if will_chroot {
+                resolve_path_for_chroot_runtime(&runtime_tls.key_path, &priv_chroot)
+            } else {
+                resolve_path_for_chroot_host(&runtime_tls.key_path, &priv_chroot)
+            } {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!("invalid DoQ tls.key_path: {e:#}");
+                    std::process::exit(1);
+                }
+            };
             match build_tls_config_with_alpn(&runtime_tls, &doq_config.addresses, b"doq") {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("failed to configure DoQ TLS: {e}");
                     std::process::exit(1);
                 }
-            };
+            }
+        };
+
         for addr in &doq_addrs {
             let udp = match bind_udp_tokio(*addr).await {
                 Ok(s) => s,
@@ -892,6 +1084,13 @@ async fn run_daemon(config_path: String, debug: bool) {
     if let Err(e) = setup_shutdown_signals(shutdown.clone()) {
         eprintln!("failed to set up shutdown signal handlers: {e}");
         std::process::exit(1);
+    }
+
+    // Spawn ACME certificate renewal background task
+    #[cfg(feature = "acme")]
+    if let Some(acme_mgr) = acme_manager_for_renewal {
+        acme_mgr.spawn_renewal_task(shutdown.clone());
+        tracing::info!("ACME background renewal task started");
     }
 
     // Set up SIGHUP signal handler for graceful reload
@@ -1102,6 +1301,25 @@ async fn run_daemon(config_path: String, debug: bool) {
     }
 }
 
+/// Generates a temporary self-signed certificate for initial TLS listener setup.
+/// Used as a placeholder until the ACME certificate is obtained.
+#[cfg(feature = "acme")]
+fn generate_temp_certified_key() -> Result<rustls::sign::CertifiedKey, String> {
+    let key_pair = rcgen::KeyPair::generate().map_err(|e| format!("key generation failed: {e}"))?;
+    let cert = rcgen::CertificateParams::default()
+        .self_signed(&key_pair)
+        .map_err(|e| format!("self-signed cert generation failed: {e}"))?;
+
+    let cert_der = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
+    let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
+        rustls::pki_types::PrivatePkcs8KeyDer::from(key_pair.serialize_der().to_vec()),
+    );
+    let signing_key = rustls::crypto::ring::sign::any_supported_type(&key_der)
+        .map_err(|e| format!("key type error: {e}"))?;
+
+    Ok(rustls::sign::CertifiedKey::new(vec![cert_der], signing_key))
+}
+
 fn spawn_metrics_servers(metrics_config: &Option<MetricsConfig>) {
     let Some(metrics_config) = metrics_config.as_ref().filter(|c| c.enabled) else {
         return;
@@ -1187,9 +1405,7 @@ fn spawn_admin_server(
     let admin_config = admin_config.as_ref().filter(|c| c.enabled)?;
 
     // Extract the API token from the api config (if present) for the embedded API routes.
-    let api_token = api_config
-        .as_ref()
-        .and_then(|c| c.api_token.clone());
+    let api_token = api_config.as_ref().and_then(|c| c.api_token.clone());
 
     // Parse the HTTP bind address (always started).
     let http_addrs = match parse_bind_addrs(&admin_config.addresses, admin_config.port) {
@@ -1234,13 +1450,7 @@ fn spawn_admin_server(
 
     Some(tokio::spawn(async move {
         if let Err(e) = start_admin_servers(
-            http_addr,
-            tls_addr,
-            tls_config,
-            tls_port,
-            api_token,
-            ops,
-            shutdown,
+            http_addr, tls_addr, tls_config, tls_port, api_token, ops, shutdown,
         )
         .await
         {

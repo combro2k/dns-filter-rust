@@ -25,6 +25,8 @@ pub struct DnsFilterConfig {
     pub mcp: Option<McpConfig>,
     pub database: Option<DatabaseConfig>,
     pub outbound: Option<OutboundConfig>,
+    #[cfg(feature = "acme")]
+    pub acme: Option<AcmeConfig>,
 }
 
 /// Global defaults for outbound upstream DNS connections.
@@ -690,4 +692,82 @@ pub struct FileLogConfig {
 pub struct StdoutLogConfig {
     pub enabled: bool,
     pub level: String,
+}
+
+// ---------------------------------------------------------------------------
+// ACME (Let's Encrypt) automatic certificate management
+// ---------------------------------------------------------------------------
+
+/// ACME automatic certificate management configuration.
+///
+/// When enabled, obtains and auto-renews TLS certificates via the ACME protocol
+/// (RFC 8555) using DNS-01 challenges. Certificates are shared across all TLS
+/// listeners (DoT, DoH, DoQ, admin, metrics, API).
+///
+/// Requires the `acme` feature flag: `cargo build --features acme`
+#[cfg(feature = "acme")]
+#[derive(Debug, Deserialize)]
+pub struct AcmeConfig {
+    pub enabled: bool,
+    /// ACME directory URL. Defaults to Let's Encrypt production.
+    #[serde(default = "default_acme_directory_url")]
+    pub directory_url: String,
+    /// Domain names to obtain certificates for.
+    pub domains: Vec<String>,
+    /// Contact email for the ACME account (e.g. "mailto:admin@example.com").
+    pub email: String,
+    /// Path to persist the obtained certificate chain (PEM).
+    #[serde(default = "default_acme_cert_path")]
+    pub cert_path: String,
+    /// Path to persist the obtained private key (PEM).
+    #[serde(default = "default_acme_key_path")]
+    pub key_path: String,
+    /// Path to persist the ACME account credentials (JSON).
+    #[serde(default = "default_acme_account_path")]
+    pub account_credentials_path: String,
+    /// Renew certificate when less than this duration remains before expiry.
+    /// Supports duration strings like "30d", "720h". Defaults to "30d".
+    #[serde(default = "default_acme_renew_before_expiry")]
+    pub renew_before_expiry: String,
+    /// DNS provider configuration for DNS-01 challenge validation.
+    pub dns_provider: AcmeDnsProviderConfig,
+}
+
+/// DNS provider configuration for ACME DNS-01 challenges.
+#[cfg(feature = "acme")]
+#[derive(Debug, Deserialize)]
+pub struct AcmeDnsProviderConfig {
+    /// Provider type. Currently only "cloudflare" is supported.
+    #[serde(rename = "type")]
+    pub provider_type: String,
+    /// API token for the DNS provider. Supports `${ENV_VAR}` syntax for
+    /// reading from environment variables.
+    pub api_token: String,
+    /// DNS zone ID. If omitted, auto-detected from the domain name.
+    pub zone_id: Option<String>,
+}
+
+#[cfg(feature = "acme")]
+fn default_acme_directory_url() -> String {
+    "https://acme-v02.api.letsencrypt.org/directory".to_string()
+}
+
+#[cfg(feature = "acme")]
+fn default_acme_cert_path() -> String {
+    "certs/acme-cert.pem".to_string()
+}
+
+#[cfg(feature = "acme")]
+fn default_acme_key_path() -> String {
+    "certs/acme-key.pem".to_string()
+}
+
+#[cfg(feature = "acme")]
+fn default_acme_account_path() -> String {
+    "certs/acme-account.json".to_string()
+}
+
+#[cfg(feature = "acme")]
+fn default_acme_renew_before_expiry() -> String {
+    "30d".to_string()
 }

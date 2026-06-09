@@ -160,6 +160,40 @@ pub fn build_tls_config_plain(
     Ok(Arc::new(config))
 }
 
+/// Builds a [`rustls::ServerConfig`] backed by a shared cert resolver for ACME.
+/// The resolver enables hot-reload of certificates without restarting listeners.
+/// Sets the given ALPN protocol.
+#[cfg(feature = "acme")]
+pub fn build_tls_config_with_resolver_alpn(
+    resolver: Arc<dyn rustls::server::ResolvesServerCert>,
+    alpn: &[u8],
+) -> Result<Arc<ServerConfig>, ListenerSetupError> {
+    let mut config = self::tls::build_tls_server_config_with_resolver(resolver)?;
+    config.alpn_protocols = vec![alpn.to_vec()];
+    Ok(Arc::new(config))
+}
+
+/// Builds a [`rustls::ServerConfig`] backed by a shared cert resolver for ACME.
+/// Configures HTTP/2 and HTTP/1.1 ALPN for HTTPS listeners.
+#[cfg(feature = "acme")]
+pub fn build_tls_config_with_resolver_https(
+    resolver: Arc<dyn rustls::server::ResolvesServerCert>,
+) -> Result<Arc<ServerConfig>, ListenerSetupError> {
+    let mut config = self::tls::build_tls_server_config_with_resolver(resolver)?;
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(Arc::new(config))
+}
+
+/// Builds a plain [`rustls::ServerConfig`] backed by a shared cert resolver for ACME.
+/// No ALPN is set.
+#[cfg(feature = "acme")]
+pub fn build_tls_config_with_resolver_plain(
+    resolver: Arc<dyn rustls::server::ResolvesServerCert>,
+) -> Result<Arc<ServerConfig>, ListenerSetupError> {
+    let config = self::tls::build_tls_server_config_with_resolver(resolver)?;
+    Ok(Arc::new(config))
+}
+
 /// Creates and binds a UDP socket with proper dual-stack handling.
 ///
 /// For IPv6 addresses, sets `IPV6_V6ONLY` to prevent the socket from

@@ -25,6 +25,7 @@ src/
     interface_adapters/
     frameworks/
         config/
+        acme/             # cfg(feature = "acme")
         plugin_runtime/   # cfg(feature = "plugins")
 
 templates/

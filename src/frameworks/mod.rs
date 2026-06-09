@@ -1,3 +1,5 @@
+#[cfg(feature = "acme")]
+pub mod acme;
 pub mod config;
 pub mod control_client;
 pub mod control_socket;

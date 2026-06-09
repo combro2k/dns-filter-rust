@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **ACME certificate management** (feature: `acme`): Automatic TLS certificate provisioning via ACME (Let's Encrypt or any RFC 8555 provider) using DNS-01 challenges with Cloudflare DNS API. Supports background auto-renewal, zero-downtime certificate hot-reload across all TLS listeners (DoT, DoH, DoQ), persistent account credentials, and configurable renewal threshold. Enable with `--features acme`.
 - **Embedded API routes in admin listener**: the admin UI server now serves all `/api/v1/*` routes directly on the same origin, eliminating the need for a separate API listener or cross-origin requests. The standalone `api:` listener remains available for headless/API-only deployments.
 - **Separate admin UI listener with dual-port HTTP/HTTPS support**: the admin dashboard is now served from its own `listen.admin` listener, separate from the API. Supports a dual-port setup: when TLS is configured, port 80 issues 301 redirects to the HTTPS port (default 8443); when TLS is absent, port 80 serves the admin UI directly over plain HTTP.
 - **Optional TLS for the REST API**: `api.tls` configuration enables HTTPS on the API listener with certificate auto-generation support (`autogenerate: true`).

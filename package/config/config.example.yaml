@@ -79,6 +79,36 @@ listen:
 #   allowed_origins: []                  # default
 
 # ---------------------------------------------------------------------------
+# ACME automatic certificate management (Let's Encrypt)
+# ---------------------------------------------------------------------------
+# Requires the 'acme' feature flag: cargo build --features acme
+# Default from struct: absent (disabled).
+#
+# When enabled, obtains and auto-renews TLS certificates via the ACME protocol
+# (RFC 8555) using DNS-01 challenges with Cloudflare DNS API. Certificates are
+# shared across all TLS listeners (DoT, DoH, DoQ) with zero-downtime hot-reload.
+#
+# The DNS-01 challenge type supports wildcard certificates and does not require
+# port 80 to be publicly accessible.
+#
+# acme:
+#   enabled: true
+#   directory_url: "https://acme-v02.api.letsencrypt.org/directory"   # production (default)
+#   # directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory"  # staging/testing
+#   domains:
+#     - "dns.example.com"
+#     - "*.dns.example.com"             # wildcard supported with DNS-01
+#   email: "admin@example.com"
+#   cert_path: "certs/acme-cert.pem"    # default
+#   key_path: "certs/acme-key.pem"      # default
+#   account_credentials_path: "certs/acme-account.json"  # default
+#   renew_before_expiry: "30d"          # default — renew when <30 days remain
+#   dns_provider:
+#     type: "cloudflare"
+#     api_token: "${CF_DNS_API_TOKEN}"   # env var, or literal value
+#     # zone_id: "abc123..."            # optional — auto-detected from domain if omitted
+
+# ---------------------------------------------------------------------------
 # Blocklists — domains to block
 # ---------------------------------------------------------------------------
 # Default from struct: empty list.
